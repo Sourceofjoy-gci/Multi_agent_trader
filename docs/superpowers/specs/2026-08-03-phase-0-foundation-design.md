@@ -163,7 +163,7 @@ def load_constitution(
     constitution_path: Path,
     signature_path: Path,
     public_key_path: Path,
-) -> Constitution: ...
+) -> LoadedConstitution: ...
 
 class Clock(Protocol):
     def now(self) -> datetime: ...
@@ -172,6 +172,11 @@ class AuditLedger(Protocol):
     def append(self, event: AuditEvent) -> AuditRecord: ...
     def verify(self) -> IntegrityReport: ...
 ```
+
+`LoadedConstitution` is a frozen wrapper containing the validated
+`Constitution` plus immutable verification metadata: the constitution SHA-256,
+constitution version, and public-key fingerprint. Consumers use its
+`constitution` field for limits and its metadata fields for audit records.
 
 The canonical contracts in `trading_house.core.schemas` are the only supported
 cross-module message types. Ad-hoc dictionaries may not cross module
