@@ -112,3 +112,16 @@ def database() -> Iterator[DatabaseHarness]:
             ),
             alembic_config=alembic_config,
         )
+
+
+@pytest.fixture
+def isolated_audit_ledger(database: DatabaseHarness) -> Iterator[None]:
+    """Give one test a fresh ledger without bypassing append-only protections."""
+
+    command.downgrade(database.alembic_config, "base")
+    command.upgrade(database.alembic_config, "head")
+    try:
+        yield
+    finally:
+        command.downgrade(database.alembic_config, "base")
+        command.upgrade(database.alembic_config, "head")
