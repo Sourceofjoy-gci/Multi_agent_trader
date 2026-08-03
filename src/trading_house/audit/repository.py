@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Never, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -22,6 +22,13 @@ class _AuditRepositoryFailure(Exception):
     """Credential- and event-free diagnostic cause for repository failures."""
 
 
+class _OperationFailure:
+    """Non-sensitive sentinel returned after discarding an operation failure."""
+
+
+_OPERATION_FAILED = _OperationFailure()
+
+
 def _record_from_row(row: tuple[Any, ...] | None) -> AuditRecord:
     if row is None or len(row) != 7:
         raise ValueError("audit database returned an invalid row")
@@ -36,6 +43,65 @@ def _record_from_row(row: tuple[Any, ...] | None) -> AuditRecord:
     )
 
 
+def _close_connection(connection: psycopg.Connection[tuple[Any, ...]]) -> bool:
+    try:
+        connection.close()
+    except Exception:
+        return False
+    return True
+
+
+def _append_operation(
+    connection_factory: ConnectionFactory,
+    event: AuditEvent,
+) -> AuditRecord | _OperationFailure:
+    connection: psycopg.Connection[tuple[Any, ...]] | None = None
+    outcome: AuditRecord | _OperationFailure = _OPERATION_FAILED
+    try:
+        canonical_event = canonicalize_event(event)
+        event_json = event.model_dump(mode="json")
+        connection = connection_factory()
+        with connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM audit.append_event(%s, %s)",
+                (canonical_event, Jsonb(event_json)),
+            )
+            outcome = _record_from_row(cursor.fetchone())
+    except Exception:
+        outcome = _OPERATION_FAILED
+    finally:
+        if connection is not None and not _close_connection(connection):
+            outcome = _OPERATION_FAILED
+    return outcome
+
+
+def _records_operation(
+    connection_factory: ConnectionFactory,
+) -> tuple[AuditRecord, ...] | _OperationFailure:
+    connection: psycopg.Connection[tuple[Any, ...]] | None = None
+    outcome: tuple[AuditRecord, ...] | _OperationFailure = _OPERATION_FAILED
+    try:
+        connection = connection_factory()
+        with connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute(
+                "SELECT sequence_number, event_id, canonical_event, event_json, "
+                "previous_hash, entry_hash, received_at "
+                "FROM audit.ledger ORDER BY sequence_number"
+            )
+            outcome = tuple(_record_from_row(row) for row in cursor.fetchall())
+    except Exception:
+        outcome = _OPERATION_FAILED
+    finally:
+        if connection is not None and not _close_connection(connection):
+            outcome = _OPERATION_FAILED
+    return outcome
+
+
+def _raise_audit_append_error() -> Never:
+    raise AuditAppendError() from _AuditRepositoryFailure("audit repository operation failed")
+
+
 class PostgresAuditLedger:
     """Append and read immutable audit records through PostgreSQL transactions."""
 
@@ -45,39 +111,17 @@ class PostgresAuditLedger:
     def append(self, event: AuditEvent) -> AuditRecord:
         """Atomically append one canonical event and return its persisted row."""
 
-        try:
-            canonical_event = canonicalize_event(event)
-            event_json = event.model_dump(mode="json")
-            with (
-                self._connection_factory() as connection,
-                connection.cursor() as cursor,
-            ):
-                cursor.execute(
-                    "SELECT * FROM audit.append_event(%s, %s)",
-                    (canonical_event, Jsonb(event_json)),
-                )
-                record = _record_from_row(cursor.fetchone())
-            return record
-        except Exception:
-            diagnostic = _AuditRepositoryFailure("audit repository operation failed")
-        raise AuditAppendError() from diagnostic
+        outcome = _append_operation(self._connection_factory, event)
+        del self, event
+        if isinstance(outcome, _OperationFailure):
+            _raise_audit_append_error()
+        return outcome
 
     def records(self) -> tuple[AuditRecord, ...]:
         """Return the ordered ledger from a short, read-only transaction."""
 
-        try:
-            with (
-                self._connection_factory() as connection,
-                connection.cursor() as cursor,
-            ):
-                cursor.execute("SET TRANSACTION READ ONLY")
-                cursor.execute(
-                    "SELECT sequence_number, event_id, canonical_event, event_json, "
-                    "previous_hash, entry_hash, received_at "
-                    "FROM audit.ledger ORDER BY sequence_number"
-                )
-                records = tuple(_record_from_row(row) for row in cursor.fetchall())
-            return records
-        except Exception:
-            diagnostic = _AuditRepositoryFailure("audit repository operation failed")
-        raise AuditAppendError() from diagnostic
+        outcome = _records_operation(self._connection_factory)
+        del self
+        if isinstance(outcome, _OperationFailure):
+            _raise_audit_append_error()
+        return outcome
