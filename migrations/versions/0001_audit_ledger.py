@@ -184,12 +184,8 @@ def upgrade() -> None:
     op.execute("REVOKE ALL ON FUNCTION audit.reject_ledger_truncate() FROM PUBLIC")
     op.execute("REVOKE ALL ON FUNCTION audit.append_event(BYTEA, JSONB) FROM PUBLIC")
     op.execute(
-        "ALTER DEFAULT PRIVILEGES FOR ROLE trading_house_owner IN SCHEMA audit "
-        "REVOKE ALL ON FUNCTIONS FROM PUBLIC"
-    )
-    op.execute(
-        "ALTER DEFAULT PRIVILEGES FOR ROLE trading_house_owner IN SCHEMA audit_crypto "
-        "REVOKE ALL ON FUNCTIONS FROM PUBLIC"
+        "ALTER DEFAULT PRIVILEGES FOR ROLE trading_house_owner "
+        "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
     )
 
     op.execute("GRANT USAGE ON SCHEMA audit TO trading_house_runtime")
@@ -217,3 +213,6 @@ def downgrade() -> None:
     op.execute("DROP EXTENSION pgcrypto")
     op.execute("DROP SCHEMA audit_crypto")
     op.execute("DROP SCHEMA audit")
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE trading_house_owner GRANT EXECUTE ON FUNCTIONS TO PUBLIC"
+    )

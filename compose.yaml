@@ -10,7 +10,7 @@ services:
       TZ: UTC
       PGTZ: UTC
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - trading-house-postgres:/var/lib/postgresql
       - ./docker/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro

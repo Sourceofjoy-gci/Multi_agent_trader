@@ -144,3 +144,32 @@ def test_public_privileges_are_revoked_and_security_definer_is_pinned(
             True,
             ["search_path=pg_catalog"],
         )
+
+
+def test_owner_default_privileges_deny_public_execution_of_future_functions(
+    database: DatabaseHarness,
+) -> None:
+    try:
+        with (
+            psycopg.connect(database.migration_dsn) as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("SET ROLE trading_house_owner")
+            cursor.execute(
+                "CREATE FUNCTION audit.future_function_probe() "
+                "RETURNS INTEGER LANGUAGE SQL AS 'SELECT 1'"
+            )
+
+        with (
+            psycopg.connect(database.runtime_dsn) as connection,
+            connection.cursor() as cursor,
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
+        ):
+            cursor.execute("SELECT audit.future_function_probe()")
+    finally:
+        with (
+            psycopg.connect(database.migration_dsn) as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("SET ROLE trading_house_owner")
+            cursor.execute("DROP FUNCTION IF EXISTS audit.future_function_probe()")
