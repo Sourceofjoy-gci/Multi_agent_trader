@@ -71,9 +71,6 @@ dependencies = [
   "typer>=0.16,<1",
 ]
 
-[project.scripts]
-trading-house = "trading_house.cli:app"
-
 [dependency-groups]
 dev = [
   "hypothesis>=6,<7",
@@ -1259,6 +1256,13 @@ Expected: collection ERROR because `trading_house.cli` does not exist.
 
 - [ ] **Step 3: Implement thin commands and centralized error mapping**
 
+Add the console entry point only when `src/trading_house/cli.py` exists:
+
+```toml
+[project.scripts]
+trading-house = "trading_house.cli:app"
+```
+
 Commands construct dependencies, call one public service, and render either a
 small text result or deterministic JSON. A single wrapper maps typed errors to
 `typer.Exit(code=...)`. Unexpected errors return exit `1` with a correlation ID,
@@ -1283,7 +1287,7 @@ material.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/trading_house/cli.py tests/unit/test_cli.py tests/integration/test_cli.py
+git add pyproject.toml uv.lock src/trading_house/cli.py tests/unit/test_cli.py tests/integration/test_cli.py
 git commit -m "feat: add foundation operator commands"
 ```
 
