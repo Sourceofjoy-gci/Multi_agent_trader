@@ -7,7 +7,7 @@ from trading_house.core.errors import TimestampError
 
 def ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        raise TimestampError("timestamp must be timezone-aware")
+        raise TimestampError()
     return value.astimezone(UTC)
 
 
