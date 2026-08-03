@@ -9,8 +9,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    NonNegativeInt,
     PositiveInt,
     StringConstraints,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -129,3 +131,104 @@ class AgentOpinion(Stamped):
     evidence_against: tuple[NonEmptyStr, ...] = ()
     missing_information: tuple[NonEmptyStr, ...] = ()
     confidence: Probability
+
+
+class BaseRiskDecision(CanonicalModel):
+    proposal_id: NonEmptyStr
+    reasons: tuple[NonEmptyStr, ...]
+    checks_passed: tuple[NonEmptyStr, ...]
+    constitution_version: PositiveInt
+
+
+class ExecutableRiskDecision(BaseRiskDecision):
+    approved_volume_lots: PositiveFiniteFloat
+    stop_loss_price: PositiveFiniteFloat
+    take_profit_price: PositiveFiniteFloat | None
+    risk_money: PositiveFiniteFloat
+    risk_pct_of_book: PositiveFiniteFloat
+
+
+class ApprovedRiskDecision(ExecutableRiskDecision):
+    verdict: Literal["APPROVED"]
+
+
+class ResizedRiskDecision(ExecutableRiskDecision):
+    verdict: Literal["RESIZED"]
+
+
+class RejectedRiskDecision(BaseRiskDecision):
+    verdict: Literal["REJECTED"]
+    approved_volume_lots: Literal[0.0]  # type: ignore[valid-type]
+    stop_loss_price: None = None
+    take_profit_price: None = None
+    risk_money: Literal[0.0]  # type: ignore[valid-type]
+    risk_pct_of_book: Literal[0.0]  # type: ignore[valid-type]
+
+    @model_validator(mode="after")
+    def has_rejection_reason(self) -> Self:
+        if not self.reasons:
+            raise ValueError("rejected decisions require at least one reason")
+        return self
+
+
+RiskDecision = Annotated[
+    ApprovedRiskDecision | ResizedRiskDecision | RejectedRiskDecision,
+    Field(discriminator="verdict"),
+]
+RISK_DECISION_ADAPTER: TypeAdapter[RiskDecision] = TypeAdapter(RiskDecision)
+
+
+class OrderIntent(CanonicalModel):
+    intent_id: NonEmptyStr
+    proposal_id: NonEmptyStr
+    magic: PositiveInt
+    symbol: NonEmptyStr
+    side: Side
+    volume: PositiveFiniteFloat
+    sl: PositiveFiniteFloat
+    tp: PositiveFiniteFloat | None
+    deviation_points: NonNegativeInt
+    filling: NonNegativeInt
+    state: Literal["SUBMITTING", "CONFIRMED", "UNKNOWN", "RECONCILING", "FAILED", "REJECTED"]
+    t_submit_utc: datetime
+    broker_order_ticket: PositiveInt | None = None
+    broker_position_ticket: PositiveInt | None = None
+    fill_price: PositiveFiniteFloat | None = None
+    retcode: int | None = None
+
+    @field_validator("t_submit_utc")
+    @classmethod
+    def normalize_submit_time(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
+
+class PositionState(CanonicalModel):
+    position_ticket: PositiveInt
+    intent_id: NonEmptyStr | None
+    strategy_id: NonEmptyStr
+    book: Book
+    symbol: NonEmptyStr
+    side: Side
+    volume: PositiveFiniteFloat
+    open_price: PositiveFiniteFloat
+    current_sl: PositiveFiniteFloat
+    current_tp: PositiveFiniteFloat | None
+    opened_at_utc: datetime
+    lifecycle: Literal[
+        "OPEN_PROTECTED", "BREAKEVEN_ELIGIBLE", "TRAILING", "EXIT_PENDING", "CLOSED"
+    ]
+    r_multiple_open: FiniteFloat
+    mae_r: FiniteFloat
+    mfe_r: FiniteFloat
+    initial_risk_distance: PositiveFiniteFloat
+
+    @field_validator("opened_at_utc")
+    @classmethod
+    def normalize_opened_time(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
