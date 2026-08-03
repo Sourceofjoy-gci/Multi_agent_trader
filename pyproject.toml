@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trading-house"
+version = "0.1.0"
+description = "Safety-first foundation for an MT5 multi-agent trading house"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "alembic>=1.16,<2",
+  "cryptography>=45,<52",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.9,<3",
+  "pyyaml>=6,<7",
+  "rfc8785>=0.1,<1",
+  "typer>=0.16,<1",
+]
+
+[project.scripts]
+trading-house = "trading_house.cli:app"
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6,<7",
+  "mypy>=1.16,<2",
+  "pytest>=8,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.12,<1",
+  "testcontainers[postgres]>=4.10,<5",
+  "types-pyyaml>=6,<7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trading_house"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers --cov=trading_house --cov-report=term-missing --cov-fail-under=95"
+testpaths = ["tests"]
+markers = ["integration: requires PostgreSQL"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["trading_house"]
