@@ -2,14 +2,16 @@
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, NoReturn, Self, cast
+from typing import Annotated, Any, NoReturn, Self, cast
 from uuid import UUID
 
-from pydantic import ConfigDict, JsonValue, NonNegativeInt, PositiveInt, field_validator
+from pydantic import ConfigDict, Field, JsonValue, NonNegativeInt, PositiveInt, field_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
 from trading_house.core.schemas import CanonicalModel, NonEmptyStr
+
+SequenceNumber = Annotated[int, Field(ge=1, le=2**63 - 1)]
 
 
 class FrozenDict(dict[str, JsonValue]):
@@ -105,7 +107,7 @@ class AuditEvent(AuditModel):
 class AuditRecord(AuditModel):
     """An immutable row returned by the audit append/read boundary."""
 
-    sequence_number: PositiveInt
+    sequence_number: SequenceNumber
     event_id: UUID
     canonical_event: bytes
     event_json: JsonValue
@@ -139,7 +141,7 @@ class IntegrityReport(AuditModel):
 
     valid: bool
     checked_entries: NonNegativeInt
-    first_invalid_sequence: PositiveInt | None = None
+    first_invalid_sequence: SequenceNumber | None = None
     reason: NonEmptyStr | None = None
 
     def model_post_init(self, __context: Any) -> None:
@@ -149,5 +151,3 @@ class IntegrityReport(AuditModel):
             return
         if self.first_invalid_sequence is None or self.reason is None:
             raise ValueError("invalid reports require a failing sequence and reason")
-        if self.first_invalid_sequence != self.checked_entries + 1:
-            raise ValueError("failing sequence must immediately follow checked entries")

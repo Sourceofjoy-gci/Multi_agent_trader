@@ -55,6 +55,33 @@ def test_hash_preimage_matches_protocol(event_factory) -> None:
     assert compute_entry_hash(1, GENESIS_HASH, event_bytes) == expected
 
 
+def test_protocol_constants_and_golden_digest_are_pinned_to_literal_values() -> None:
+    event = AuditEvent(
+        schema_version=1,
+        event_id=UUID("12345678-1234-5678-1234-567812345678"),
+        event_type="risk.decision",
+        occurred_at=datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
+        actor="risk-engine",
+        actor_type="service",
+        correlation_id=None,
+        causation_id=None,
+        payload={"b": 2, "a": 1},
+    )
+
+    assert DOMAIN_SEPARATOR == b"trading-house:audit:v1"
+    assert bytes(32) == GENESIS_HASH
+    assert canonicalize_event(event) == (
+        b'{"actor":"risk-engine","actor_type":"service","causation_id":null,'
+        b'"correlation_id":null,"event_id":"12345678-1234-5678-1234-567812345678",'
+        b'"event_type":"risk.decision","occurred_at":"2026-08-03T12:00:00Z",'
+        b'"payload":{"a":1,"b":2},"schema_version":1,"source_component":null,'
+        b'"subject_id":null}'
+    )
+    assert compute_entry_hash(1, bytes(32), canonicalize_event(event)).hex() == (
+        "b8a243596ac39262a0365da2d66507eacc3a6d1c803210cfcdcf1f71f1f6bd96"
+    )
+
+
 @pytest.mark.parametrize("sequence_number", [0, -1, 2**63])
 def test_hash_rejects_out_of_range_sequence_numbers(sequence_number: int) -> None:
     with pytest.raises(SchemaValidationError):
@@ -65,6 +92,14 @@ def test_hash_rejects_out_of_range_sequence_numbers(sequence_number: int) -> Non
 def test_hash_rejects_non_sha256_previous_hashes(previous_hash: bytes) -> None:
     with pytest.raises(SchemaValidationError):
         compute_entry_hash(1, previous_hash, b"{}")
+
+
+@pytest.mark.parametrize("canonical_event", [bytearray(b"{}"), "{}", memoryview(b"{}")])
+def test_hash_rejects_non_bytes_canonical_event(canonical_event: object) -> None:
+    with pytest.raises(SchemaValidationError) as error:
+        compute_entry_hash(1, GENESIS_HASH, canonical_event)  # type: ignore[arg-type]
+
+    assert str(error.value) == "schema validation failed"
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -87,3 +122,13 @@ def test_canonicalization_uses_an_immutable_payload_snapshot(event_factory) -> N
     assert canonicalize_event(event) == before
     with pytest.raises(TypeError):
         event.payload["nested"] = {}  # type: ignore[index]
+
+
+def test_model_copy_detaches_deep_payload_update_aliases(event_factory) -> None:
+    replacement = {"nested": {"values": [1, 2]}}
+    copied = event_factory().model_copy(update={"payload": replacement})
+    replacement["nested"]["values"].append(3)
+
+    assert canonicalize_event(copied) == canonicalize_event(
+        event_factory(event_id=copied.event_id, payload={"nested": {"values": [1, 2]}})
+    )
