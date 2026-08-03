@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives import serialization
 
 from trading_house.constitution.models import Constitution, parse_constitution_yaml
 from trading_house.constitution.signing import decode_signature, load_public_key, verify_signature
-from trading_house.core.errors import ConfigurationError
+from trading_house.core.errors import ConfigurationError, SignatureVerificationError
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +30,16 @@ def load_constitution(
     except OSError as error:
         raise ConfigurationError() from error
 
-    signature = decode_signature(signature_path.read_bytes())
-    public_key = load_public_key(public_key_path.read_bytes())
+    try:
+        signature_bytes = signature_path.read_bytes()
+    except OSError as error:
+        raise SignatureVerificationError() from error
+    signature = decode_signature(signature_bytes)
+    try:
+        public_key_bytes = public_key_path.read_bytes()
+    except OSError as error:
+        raise SignatureVerificationError() from error
+    public_key = load_public_key(public_key_bytes)
     verify_signature(public_key, signature, yaml_bytes)
     constitution = parse_constitution_yaml(yaml_bytes)
     raw_public_key = public_key.public_bytes(

@@ -96,6 +96,45 @@ def test_loader_rejects_a_signature_with_wrong_decoded_length(tmp_path: Path) ->
         load_constitution(paths.constitution, paths.signature, paths.public_key)
 
 
+@pytest.mark.parametrize("missing_file", ["signature", "public_key"])
+def test_loader_maps_missing_verification_files_to_redacted_signature_error(
+    tmp_path: Path, missing_file: str
+) -> None:
+    paths = signed_fixture(tmp_path, valid_yaml())
+    missing_path = paths.signature if missing_file == "signature" else paths.public_key
+    missing_path.unlink()
+
+    with pytest.raises(SignatureVerificationError) as error:
+        load_constitution(paths.constitution, paths.signature, paths.public_key)
+
+    assert str(error.value) == "signature verification failed"
+    assert str(missing_path) not in str(error.value)
+    assert error.value.__cause__ is not None
+
+
+@pytest.mark.parametrize("unreadable_file", ["signature", "public_key"])
+def test_loader_maps_unreadable_verification_files_to_redacted_signature_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unreadable_file: str
+) -> None:
+    paths = signed_fixture(tmp_path, valid_yaml())
+    unreadable_path = paths.signature if unreadable_file == "signature" else paths.public_key
+    original_read_bytes = Path.read_bytes
+
+    def raise_for_unreadable_file(path: Path) -> bytes:
+        if path == unreadable_path:
+            raise OSError(f"cannot read sensitive file {path}")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", raise_for_unreadable_file)
+
+    with pytest.raises(SignatureVerificationError) as error:
+        load_constitution(paths.constitution, paths.signature, paths.public_key)
+
+    assert str(error.value) == "signature verification failed"
+    assert str(unreadable_path) not in str(error.value)
+    assert error.value.__cause__ is not None
+
+
 def test_loader_rejects_a_non_ed25519_public_key(tmp_path: Path) -> None:
     paths = signed_fixture(tmp_path, valid_yaml())
     private_key = Ed25519PrivateKey.generate()
