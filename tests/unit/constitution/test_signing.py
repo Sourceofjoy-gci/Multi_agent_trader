@@ -8,7 +8,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
 
-import trading_house.constitution.signing as signing
 from trading_house.constitution.signing import (
     generate_key_pair,
     load_private_key,
@@ -156,13 +155,14 @@ def test_generate_key_pair_creates_owner_only_private_key(tmp_path: Path) -> Non
     assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
 
 
-def test_generate_key_pair_rolls_back_only_its_private_file_when_public_publish_fails(
+def test_generate_key_pair_retains_its_private_file_without_cleanup_race_when_public_publish_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     private_path = tmp_path / "risk_constitution.private.pem"
     public_path = tmp_path / "risk_constitution.public.pem"
-    monkeypatch.setattr(signing, "os", os, raising=False)
     real_open = os.open
+    real_unlink = os.unlink
+    cleanup_attempted = False
 
     def fail_public_open(
         path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777
@@ -173,11 +173,45 @@ def test_generate_key_pair_rolls_back_only_its_private_file_when_public_publish_
 
     monkeypatch.setattr(os, "open", fail_public_open)
 
-    with pytest.raises(OSError, match="injected public publish failure"):
+    def replace_before_unlink(path: str | bytes | os.PathLike[str], *args: object) -> None:
+        nonlocal cleanup_attempted
+        if isinstance(path, (str, os.PathLike)) and Path(path) == private_path:
+            cleanup_attempted = True
+            private_path.write_bytes(b"replacement private key")
+        real_unlink(path, *args)
+
+    monkeypatch.setattr(os, "unlink", replace_before_unlink)
+
+    with pytest.raises(SignatureVerificationError) as error:
         generate_key_pair(private_path, public_path)
 
-    assert not private_path.exists()
+    assert str(error.value) == "signature verification failed"
+    assert error.value.__cause__ is not None
+    assert private_path.exists()
     assert not public_path.exists()
+    assert cleanup_attempted is False
+
+
+def test_generate_key_pair_never_reads_staged_private_bytes_into_public_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_path = tmp_path / "risk_constitution.private.pem"
+    public_path = tmp_path / "risk_constitution.public.pem"
+    swapped_private_pem = b"-----BEGIN PRIVATE KEY-----\nattacker private material\n"
+    original_read_bytes = Path.read_bytes
+
+    def swap_staged_source(path: Path) -> bytes:
+        if path.suffix == ".tmp":
+            return swapped_private_pem
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", swap_staged_source)
+
+    generate_key_pair(private_path, public_path)
+
+    public_bytes = public_path.read_bytes()
+    assert public_bytes.startswith(b"-----BEGIN PUBLIC KEY-----")
+    assert swapped_private_pem not in public_bytes
 
 
 def test_generate_key_pair_and_sign_file_use_required_formats(tmp_path: Path) -> None:
