@@ -8,7 +8,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from trading_house.audit.canonical import canonicalize_event
-from trading_house.audit.models import AuditEvent, AuditRecord
+from trading_house.audit.models import AuditEvent, AuditRecord, IntegrityReport
+from trading_house.audit.verification import verify_records
 from trading_house.core.errors import AuditAppendError
 
 
@@ -125,3 +126,8 @@ class PostgresAuditLedger:
         if isinstance(outcome, _OperationFailure):
             _raise_audit_append_error()
         return outcome
+
+    def verify(self) -> IntegrityReport:
+        """Read the ordered ledger and independently verify its integrity."""
+
+        return verify_records(self.records())

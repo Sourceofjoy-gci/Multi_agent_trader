@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import psycopg
@@ -12,13 +12,15 @@ from testcontainers.postgres import PostgresContainer
 
 MIGRATION_PASSWORD = "integration-migration-password"  # noqa: S105
 RUNTIME_PASSWORD = "integration-runtime-password"  # noqa: S105
+TEST_SUPERUSER_PASSWORD = "integration-test-superuser-password"  # noqa: S105
 
 
 @dataclass(frozen=True)
 class DatabaseHarness:
-    admin_dsn: str
-    migration_dsn: str
-    runtime_dsn: str
+    admin_dsn: str = field(repr=False)
+    migration_dsn: str = field(repr=False)
+    runtime_dsn: str = field(repr=False)
+    test_superuser_dsn: str = field(repr=False)
     alembic_config: Config
 
 
@@ -59,6 +61,11 @@ def _bootstrap_roles(container: PostgresContainer, admin_dsn: str) -> None:
         cursor.execute(
             sql.SQL("CREATE ROLE trading_house_runtime LOGIN PASSWORD {}").format(
                 sql.Literal(RUNTIME_PASSWORD)
+            )
+        )
+        cursor.execute(
+            sql.SQL("CREATE ROLE trading_house_test_superuser LOGIN SUPERUSER PASSWORD {}").format(
+                sql.Literal(TEST_SUPERUSER_PASSWORD)
             )
         )
         cursor.execute(
@@ -109,6 +116,11 @@ def database() -> Iterator[DatabaseHarness]:
                 container,
                 user="trading_house_runtime",
                 password=RUNTIME_PASSWORD,
+            ),
+            test_superuser_dsn=_dsn(
+                container,
+                user="trading_house_test_superuser",
+                password=TEST_SUPERUSER_PASSWORD,
             ),
             alembic_config=alembic_config,
         )
