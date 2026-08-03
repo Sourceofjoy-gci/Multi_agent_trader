@@ -1,6 +1,6 @@
 """Strict, immutable risk-constitution models."""
 
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Annotated, Literal, Self
 
 import yaml
@@ -17,6 +17,7 @@ from pydantic import (
 from trading_house.core.errors import ConfigurationError
 
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
+Percentage = Annotated[Decimal, Field(gt=0, le=Decimal("100"))]
 
 
 def _integer_to_decimal(value: object) -> object:
@@ -33,10 +34,10 @@ class ConstitutionModel(BaseModel):
 
 class BookLimits(ConstitutionModel):
     capital_fraction: PositiveDecimal
-    risk_per_trade_pct: PositiveDecimal
+    risk_per_trade_pct: Percentage
     max_concurrent_positions: PositiveInt
-    daily_loss_stop_pct: PositiveDecimal
-    max_drawdown_halt_pct: PositiveDecimal
+    daily_loss_stop_pct: Percentage
+    max_drawdown_halt_pct: Percentage
     max_gross_leverage: PositiveDecimal
 
     @field_validator(
@@ -58,9 +59,9 @@ class Books(ConstitutionModel):
 
 
 class FirmLimits(ConstitutionModel):
-    max_total_drawdown_halt_pct: PositiveDecimal
-    max_correlated_cluster_risk_pct: PositiveDecimal
-    max_single_symbol_risk_pct: PositiveDecimal
+    max_total_drawdown_halt_pct: Percentage
+    max_correlated_cluster_risk_pct: Percentage
+    max_single_symbol_risk_pct: Percentage
     max_orders_per_minute: PositiveInt
     max_consecutive_rejects: PositiveInt
 
@@ -101,6 +102,13 @@ class SafeModeTriggers(ConstitutionModel):
     def convert_integer_decimals(cls, value: object) -> object:
         return _integer_to_decimal(value)
 
+    @field_validator("reconciliation_mismatch", mode="before")
+    @classmethod
+    def reconciliation_mismatch_is_true_boolean(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("Input should be a valid boolean True")
+        return value
+
 
 class Constitution(ConstitutionModel):
     version: PositiveInt
@@ -109,6 +117,13 @@ class Constitution(ConstitutionModel):
     firm: FirmLimits
     prohibitions: Prohibitions
     safe_mode_triggers: SafeModeTriggers
+
+    @field_validator("signature_required", mode="before")
+    @classmethod
+    def signature_required_is_true_boolean(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("Input should be a valid boolean True")
+        return value
 
     @model_validator(mode="after")
     def capital_fractions_sum_to_one(self) -> Self:
@@ -136,5 +151,5 @@ def parse_constitution_yaml(data: bytes) -> Constitution:
         if not isinstance(parsed, dict):
             raise ConfigurationError()
         return Constitution.model_validate(parsed)
-    except (yaml.YAMLError, UnicodeDecodeError, ValidationError) as error:
+    except (yaml.YAMLError, UnicodeDecodeError, DecimalException, ValidationError) as error:
         raise ConfigurationError() from error
