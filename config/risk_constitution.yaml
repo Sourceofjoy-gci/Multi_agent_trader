@@ -1,0 +1,38 @@
+# Values are STARTING POINTS derived from Report A and Report B. They are raised
+# only by accumulated live evidence, never to chase a return target.
+version: 1
+signature_required: true
+books:
+  core:
+    capital_fraction: 0.90
+    risk_per_trade_pct: 0.35
+    max_concurrent_positions: 8
+    daily_loss_stop_pct: 1.5
+    max_drawdown_halt_pct: 8.0
+    max_gross_leverage: 5.0
+  sleeve:
+    capital_fraction: 0.10
+    risk_per_trade_pct: 1.5
+    max_concurrent_positions: 2
+    daily_loss_stop_pct: 8.0
+    max_drawdown_halt_pct: 40.0
+    max_gross_leverage: 20.0
+firm:
+  max_total_drawdown_halt_pct: 10.0
+  max_correlated_cluster_risk_pct: 1.0
+  max_single_symbol_risk_pct: 0.7
+  max_orders_per_minute: 30
+  max_consecutive_rejects: 5
+prohibitions:
+  martingale_sizing: forbidden
+  averaging_into_losers: forbidden_unless_declared_in_strategy_spec
+  stop_removal: forbidden
+  stop_widening: forbidden
+  leverage_increase_after_loss: forbidden
+  trading_without_protective_stop: forbidden
+safe_mode_triggers:
+  max_tick_age_seconds: 5
+  max_spread_multiple_of_median: 3.0
+  max_clock_drift_ms: 500
+  reconciliation_mismatch: true
+  slippage_breach_sigma: 3.0
