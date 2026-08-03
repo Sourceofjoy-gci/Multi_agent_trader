@@ -131,7 +131,7 @@ def _reject_existing_destination(path: Path) -> None:
 def _write_new_file(destination: Path, contents: bytes, mode: int) -> None:
     """Write bytes only through a newly and exclusively created descriptor."""
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(destination, flags, mode)

@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
 
+import trading_house.constitution.signing as signing
 from trading_house.constitution.signing import (
     generate_key_pair,
     load_private_key,
@@ -212,6 +213,57 @@ def test_generate_key_pair_never_reads_staged_private_bytes_into_public_output(
     public_bytes = public_path.read_bytes()
     assert public_bytes.startswith(b"-----BEGIN PUBLIC KEY-----")
     assert swapped_private_pem not in public_bytes
+
+
+def test_generate_key_pair_writes_exact_cryptography_pem_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_path = tmp_path / "risk_constitution.private.pem"
+    public_path = tmp_path / "risk_constitution.public.pem"
+    expected_private_key = Ed25519PrivateKey.generate()
+
+    class FixedKeyFactory:
+        @staticmethod
+        def generate() -> Ed25519PrivateKey:
+            return expected_private_key
+
+    monkeypatch.setattr(signing, "Ed25519PrivateKey", FixedKeyFactory)
+
+    generate_key_pair(private_path, public_path)
+
+    assert private_path.read_bytes() == expected_private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    assert public_path.read_bytes() == expected_private_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "O_BINARY"), reason="binary mode flag is platform-specific")
+def test_generate_key_pair_opens_destinations_in_binary_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_path = tmp_path / "risk_constitution.private.pem"
+    public_path = tmp_path / "risk_constitution.public.pem"
+    real_open = os.open
+    destination_flags: list[int] = []
+
+    def record_destination_flags(
+        path: str | bytes | os.PathLike[str], flags: int, mode: int = 0o777
+    ) -> int:
+        if isinstance(path, (str, os.PathLike)) and Path(path) in {private_path, public_path}:
+            destination_flags.append(flags)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", record_destination_flags)
+
+    generate_key_pair(private_path, public_path)
+
+    assert len(destination_flags) == 2
+    assert all(flags & os.O_BINARY for flags in destination_flags)
 
 
 def test_generate_key_pair_and_sign_file_use_required_formats(tmp_path: Path) -> None:
