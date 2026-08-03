@@ -114,6 +114,30 @@ def test_rejected_risk_decision_carries_no_executable_data() -> None:
     assert isinstance(decision, RejectedRiskDecision)
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    ["approved_volume_lots", "risk_money", "risk_pct_of_book"],
+)
+def test_rejected_risk_decision_rejects_boolean_zero_fields(field_name: str) -> None:
+    rejected_decision: dict[str, object] = {
+        "proposal_id": "proposal-1",
+        "verdict": "REJECTED",
+        "approved_volume_lots": 0.0,
+        "risk_money": 0.0,
+        "risk_pct_of_book": 0.0,
+        "reasons": ("daily loss halt",),
+        "checks_passed": (),
+        "constitution_version": 1,
+    }
+    rejected_decision[field_name] = False
+
+    with pytest.raises(ValidationError) as error:
+        RISK_DECISION_ADAPTER.validate_python(rejected_decision)
+
+    assert error.value.errors()[0]["loc"][-1] == field_name
+    assert "boolean" in error.value.errors()[0]["msg"]
+
+
 def test_rejected_decision_cannot_carry_executable_volume() -> None:
     with pytest.raises(ValidationError):
         RISK_DECISION_ADAPTER.validate_python(

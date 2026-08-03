@@ -164,6 +164,13 @@ class RejectedRiskDecision(BaseRiskDecision):
     risk_money: Literal[0.0]  # type: ignore[valid-type]
     risk_pct_of_book: Literal[0.0]  # type: ignore[valid-type]
 
+    @field_validator("approved_volume_lots", "risk_money", "risk_pct_of_book", mode="before")
+    @classmethod
+    def zero_fields_are_not_booleans(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("boolean values are not valid zero fields")
+        return value
+
     @model_validator(mode="after")
     def has_rejection_reason(self) -> Self:
         if not self.reasons:
