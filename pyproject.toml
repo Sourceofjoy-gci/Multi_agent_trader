@@ -34,7 +34,7 @@ dev = [
 packages = ["src/trading_house"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-config --strict-markers --cov=trading_house --cov-report=term-missing --cov-fail-under=95"
+addopts = "-ra --strict-config --strict-markers --import-mode=importlib --cov=trading_house --cov-report=term-missing --cov-fail-under=95"
 testpaths = ["tests"]
 markers = ["integration: requires PostgreSQL"]
 
