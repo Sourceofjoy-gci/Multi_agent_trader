@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 from trading_house import cli
 
 if TYPE_CHECKING:
-    from .conftest import DatabaseHarness
+    from ..conftest import DatabaseHarness
 
 pytestmark = pytest.mark.integration
 

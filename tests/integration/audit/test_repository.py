@@ -22,7 +22,7 @@ from trading_house.core.errors import AuditAppendError, SchemaValidationError
 from trading_house.database.connection import open_runtime_connection
 
 if TYPE_CHECKING:
-    from ..conftest import DatabaseHarness
+    from ...conftest import DatabaseHarness
 
 pytestmark = [
     pytest.mark.integration,

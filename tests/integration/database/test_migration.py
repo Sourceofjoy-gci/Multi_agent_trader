@@ -19,7 +19,7 @@ from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
 
 if TYPE_CHECKING:
-    from ..conftest import DatabaseHarness
+    from ...conftest import DatabaseHarness
 
 pytestmark = pytest.mark.integration
 

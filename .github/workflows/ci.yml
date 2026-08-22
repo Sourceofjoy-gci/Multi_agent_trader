@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Compose requires these to be present for `config` to resolve. They are
+  # throwaway values used only to validate the file; CI never starts the stack
+  # and never receives a private signing key.
+  POSTGRES_ADMIN_PASSWORD: ci-validation-only
+  TRADING_HOUSE_MIGRATION_PASSWORD: ci-validation-only
+  TRADING_HOUSE_RUNTIME_PASSWORD: ci-validation-only
+
+jobs:
+  linux:
+    name: Linux — full suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Verify the lock file is current
+        run: uv lock --check
+
+      - name: Install from the lock file
+        run: uv sync --locked --all-groups
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Types
+        run: uv run mypy
+
+      - name: Validate the Compose definition
+        run: docker compose config --quiet
+
+      # PostgreSQL 18 and the three roles are provisioned by testcontainers
+      # inside tests/conftest.py, which also applies migrations with migrator
+      # credentials. A service container would sit unused beside it.
+      - name: Tests — unit, property, integration, acceptance, with coverage gate
+        run: uv run pytest
+
+      - name: Constitution verifies from a clean checkout
+        run: uv run trading-house constitution verify
+
+      - name: No trading or agent dependency reached the tree
+        run: |
+          ! grep -rniE '^(from|import) (MetaTrader5|langgraph|openai|anthropic|ccxt)' src tests
+
+  windows:
+    name: Windows — no containers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Verify the lock file is current
+        run: uv lock --check
+
+      - name: Install from the lock file
+        run: uv sync --locked --all-groups
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Types
+        run: uv run mypy
+
+      # Windows runners cannot host the Linux containers the integration suite
+      # needs, so integration tests are excluded here. Coverage is therefore
+      # gated on the Linux job only: without integration tests the repository
+      # measures ~82%, which would fail the 95% threshold by construction.
+      - name: Tests — unit, property, architecture
+        run: uv run pytest -m "not integration" --no-cov
+
+      - name: Constitution verifies from a clean checkout
+        run: uv run trading-house constitution verify

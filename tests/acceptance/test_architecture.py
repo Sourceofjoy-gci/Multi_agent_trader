@@ -23,6 +23,11 @@ SIGNING_MODULE = SOURCE_ROOT / "constitution" / "signing.py"
 FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"MetaTrader5", "langgraph", "openai", "anthropic", "ccxt"})
 PRIVATE_KEY_SYMBOLS = frozenset({"load_pem_private_key", "Ed25519PrivateKey"})
 MIGRATION_CALL_NAMES = frozenset({"upgrade", "downgrade"})
+SIGNING_PRIMITIVES = frozenset({"sign_bytes", "sign_file", "load_private_key", "generate_key_pair"})
+# signing.py implements them; cli.py exposes the documented offline sign command.
+# Nothing on the runtime startup path may reach either.
+SIGNING_ALLOWED = frozenset({SIGNING_MODULE, SOURCE_ROOT / "cli.py"})
+RUNTIME_STARTUP_PATH = SOURCE_ROOT / "ops" / "health.py"
 
 
 def _source_files() -> list[Path]:
@@ -92,6 +97,31 @@ def test_the_signing_module_is_where_private_keys_actually_live() -> None:
     assert SIGNING_MODULE.exists()
     tree = ast.parse(SIGNING_MODULE.read_text(encoding="utf-8"))
     assert (_imported_names(tree) | _referenced_attributes(tree)) & PRIVATE_KEY_SYMBOLS
+
+
+def test_no_runtime_module_can_sign_the_constitution() -> None:
+    """Definition of Done: no runtime component can sign or rewrite the constitution."""
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        if path in SIGNING_ALLOWED:
+            continue
+        found = (_imported_names(tree) | _referenced_attributes(tree)) & SIGNING_PRIMITIVES
+        if found:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(found)
+
+    assert offenders == {}
+
+
+def test_the_readiness_path_never_reaches_signing() -> None:
+    """The startup gate verifies signatures; it must have no way to create one."""
+
+    tree = ast.parse(RUNTIME_STARTUP_PATH.read_text(encoding="utf-8"))
+    reachable = (_imported_names(tree) | _referenced_attributes(tree)) & (
+        SIGNING_PRIMITIVES | PRIVATE_KEY_SYMBOLS
+    )
+
+    assert reachable == set()
 
 
 def test_runtime_source_never_imports_the_alembic_command_api() -> None:

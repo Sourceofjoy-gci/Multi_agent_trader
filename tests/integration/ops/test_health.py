@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import psycopg
 import pytest
 from pydantic import SecretStr
 
@@ -12,6 +15,7 @@ from trading_house.audit.repository import PostgresAuditLedger
 from trading_house.constitution.loader import load_constitution
 from trading_house.core.clock import SystemClock
 from trading_house.core.errors import (
+    AuditIntegrityError,
     DatabaseUnavailableError,
     SignatureVerificationError,
 )
@@ -21,7 +25,7 @@ from trading_house.ops.health import HealthService
 from trading_house.settings import RuntimeSettings
 
 if TYPE_CHECKING:
-    from ..conftest import DatabaseHarness
+    from ...conftest import DatabaseHarness
 
 pytestmark = [
     pytest.mark.integration,
@@ -135,3 +139,42 @@ def test_gate_failure_message_never_exposes_the_dsn(database: DatabaseHarness) -
 
     assert "nothing" not in str(caught.value)
     assert str(caught.value) == "database connection failed"
+
+
+@contextmanager
+def _administrative_tamper(database: DatabaseHarness) -> Iterator[psycopg.Cursor[Any]]:
+    """Temporarily bypass only the row-mutation trigger, restoring it unconditionally."""
+
+    with (
+        psycopg.connect(database.test_superuser_dsn, autocommit=True) as connection,
+        connection.cursor() as cursor,
+    ):
+        cursor.execute("ALTER TABLE audit.ledger DISABLE TRIGGER reject_ledger_row_mutation")
+        try:
+            yield cursor
+        finally:
+            cursor.execute("ALTER TABLE audit.ledger ENABLE TRIGGER reject_ledger_row_mutation")
+
+
+def test_detected_tampering_prevents_ready_and_appends_nothing(
+    database: DatabaseHarness,
+) -> None:
+    """Definition of Done: audit corruption is detected *before* ready status."""
+
+    service = _service(database, _settings(database.runtime_dsn))
+    service.run()
+    assert len(_ledger(database).records()) == 2
+
+    with _administrative_tamper(database) as cursor:
+        cursor.execute(
+            "UPDATE audit.ledger "
+            "SET event_json = pg_catalog.jsonb_set(event_json, '{actor}', '\"attacker\"') "
+            "WHERE sequence_number = 1"
+        )
+
+    with pytest.raises(AuditIntegrityError):
+        service.run()
+
+    records = _ledger(database).records()
+    assert len(records) == 2, "a failed gate must not append startup events"
+    assert _ledger(database).verify().valid is False

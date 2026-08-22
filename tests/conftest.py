@@ -88,7 +88,7 @@ def _bootstrap_roles(container: PostgresContainer, admin_dsn: str) -> None:
 
 @pytest.fixture(scope="session")
 def database() -> Iterator[DatabaseHarness]:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[1]
     with PostgresContainer(
         "postgres:18-alpine",
         username="postgres",
