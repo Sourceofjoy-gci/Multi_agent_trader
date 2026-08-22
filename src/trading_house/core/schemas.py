@@ -3,10 +3,11 @@
 import math
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
     Field,
+    JsonValue,
     NonNegativeInt,
     PositiveInt,
     TypeAdapter,
@@ -16,6 +17,7 @@ from pydantic import (
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
+from trading_house.core.freezing import freeze_json
 from trading_house.core.values import (
     CanonicalModel as CanonicalModel,
 )
@@ -78,6 +80,11 @@ class RegimeAssessment(Stamped):
     liquidity_state: Literal["thin", "normal", "deep"]
     probabilities: dict[NonEmptyStr, Probability]
     uncertainty: Probability
+
+    @field_validator("probabilities")
+    @classmethod
+    def freeze_probabilities(cls, value: dict[str, float]) -> dict[str, float]:
+        return cast(dict[str, float], freeze_json(cast(JsonValue, value)))
 
     @model_validator(mode="after")
     def probabilities_sum_to_one(self) -> Self:

@@ -2,62 +2,17 @@
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, NoReturn, Self, cast
+from typing import Annotated, Any, Self
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, JsonValue, NonNegativeInt, PositiveInt, field_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
+from trading_house.core.freezing import freeze_json
 from trading_house.core.schemas import CanonicalModel, NonEmptyStr
 
 SequenceNumber = Annotated[int, Field(ge=1, le=2**63 - 1)]
-
-
-class FrozenDict(dict[str, JsonValue]):
-    """A dictionary that preserves the immutable model boundary recursively."""
-
-    @staticmethod
-    def _immutable(*_: object, **__: object) -> NoReturn:
-        raise TypeError("audit payload is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    __ior__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-
-
-class FrozenList(list[JsonValue]):
-    """A list that preserves the immutable model boundary recursively."""
-
-    @staticmethod
-    def _immutable(*_: object, **__: object) -> NoReturn:
-        raise TypeError("audit payload is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    __iadd__ = _immutable
-    __imul__ = _immutable
-    append = _immutable
-    clear = _immutable
-    extend = _immutable
-    insert = _immutable
-    pop = _immutable
-    remove = _immutable
-    reverse = _immutable
-    sort = _immutable
-
-
-def _freeze_json(value: JsonValue) -> JsonValue:
-    if isinstance(value, dict):
-        return cast(JsonValue, FrozenDict({key: _freeze_json(item) for key, item in value.items()}))
-    if isinstance(value, list):
-        return cast(JsonValue, FrozenList([_freeze_json(item) for item in value]))
-    return value
 
 
 class AuditModel(CanonicalModel):
@@ -99,7 +54,7 @@ class AuditEvent(AuditModel):
     @field_validator("payload")
     @classmethod
     def freeze_payload(cls, value: JsonValue) -> JsonValue:
-        return _freeze_json(value)
+        return freeze_json(value)
 
 
 class AuditRecord(AuditModel):
@@ -116,7 +71,7 @@ class AuditRecord(AuditModel):
     @field_validator("event_json")
     @classmethod
     def freeze_event_json(cls, value: JsonValue) -> JsonValue:
-        return _freeze_json(value)
+        return freeze_json(value)
 
     @field_validator("previous_hash", "entry_hash")
     @classmethod
