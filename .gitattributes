@@ -3,3 +3,9 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 *.md text eol=lf
+*.toml text eol=lf
+
+# Signature and key material is verified byte-for-byte. Git must never
+# translate line endings in these, on any platform.
+*.pem -text
+*.sig -text
