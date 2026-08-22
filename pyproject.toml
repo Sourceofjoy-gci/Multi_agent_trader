@@ -41,6 +41,9 @@ markers = ["integration: requires PostgreSQL"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# Specifications and plans embed illustrative Python that is deliberately not
+# formatted to this project's style. A Python formatter must not rewrite prose.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "S", "PT"]

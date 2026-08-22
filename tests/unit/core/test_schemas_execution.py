@@ -185,9 +185,7 @@ def test_order_intent_rejects_zero_stop(valid_intent: dict[str, object]) -> None
 
 
 def test_order_intent_normalizes_submit_time_to_utc(valid_intent: dict[str, object]) -> None:
-    valid_intent["t_submit_utc"] = datetime(
-        2026, 8, 3, 14, 0, tzinfo=timezone(timedelta(hours=2))
-    )
+    valid_intent["t_submit_utc"] = datetime(2026, 8, 3, 14, 0, tzinfo=timezone(timedelta(hours=2)))
 
     intent = OrderIntent(**valid_intent)
 

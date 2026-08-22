@@ -79,10 +79,7 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert model.firm.max_orders_per_minute == 30
     assert model.firm.max_consecutive_rejects == 5
     assert model.prohibitions.martingale_sizing == "forbidden"
-    assert (
-        model.prohibitions.averaging_into_losers
-        == "forbidden_unless_declared_in_strategy_spec"
-    )
+    assert model.prohibitions.averaging_into_losers == "forbidden_unless_declared_in_strategy_spec"
     assert model.prohibitions.stop_removal == "forbidden"
     assert model.prohibitions.stop_widening == "forbidden"
     assert model.prohibitions.leverage_increase_after_loss == "forbidden"
@@ -284,8 +281,10 @@ def test_yaml_float_scalars_remain_decimal(valid_data: dict[str, object]) -> Non
 
 @pytest.mark.parametrize("scalar", ["1:2.3", ".nan", ".inf"])
 def test_yaml_float_conversion_failures_are_redacted(scalar: str) -> None:
-    source = Path("config/risk_constitution.yaml").read_bytes().replace(
-        b"capital_fraction: 0.90", f"capital_fraction: {scalar}".encode()
+    source = (
+        Path("config/risk_constitution.yaml")
+        .read_bytes()
+        .replace(b"capital_fraction: 0.90", f"capital_fraction: {scalar}".encode())
     )
 
     with pytest.raises(ConfigurationError) as error:

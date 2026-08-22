@@ -65,9 +65,7 @@ class AuditModel(CanonicalModel):
 
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
-    def model_copy(
-        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
-    ) -> Self:
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
         del deep
         data = self.model_dump(mode="python", round_trip=True)
         if update is not None:

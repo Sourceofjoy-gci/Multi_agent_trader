@@ -80,9 +80,13 @@ def test_public_key_loader_rejects_another_key_algorithm() -> None:
 
 
 def test_private_key_loader_rejects_a_public_key_pem() -> None:
-    public_pem = Ed25519PrivateKey.generate().public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
+    public_pem = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
     )
 
     with pytest.raises(SignatureVerificationError):

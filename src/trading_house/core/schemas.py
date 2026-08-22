@@ -20,9 +20,7 @@ from pydantic import (
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
 
-NonEmptyStr = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)
-]
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 PositiveFiniteFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 NonNegativeFiniteFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
@@ -224,9 +222,7 @@ class PositionState(CanonicalModel):
     current_sl: PositiveFiniteFloat
     current_tp: PositiveFiniteFloat | None
     opened_at_utc: datetime
-    lifecycle: Literal[
-        "OPEN_PROTECTED", "BREAKEVEN_ELIGIBLE", "TRAILING", "EXIT_PENDING", "CLOSED"
-    ]
+    lifecycle: Literal["OPEN_PROTECTED", "BREAKEVEN_ELIGIBLE", "TRAILING", "EXIT_PENDING", "CLOSED"]
     r_multiple_open: FiniteFloat
     mae_r: FiniteFloat
     mfe_r: FiniteFloat
