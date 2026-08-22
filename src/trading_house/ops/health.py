@@ -12,6 +12,7 @@ ready state.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -42,14 +43,6 @@ class ConstitutionSource(Protocol):
     def __call__(self) -> LoadedConstitution: ...
 
 
-class ConnectionSource(Protocol):
-    def __call__(self) -> RuntimeConnection: ...
-
-
-class RevisionGate(Protocol):
-    def __call__(self, connection: RuntimeConnection, /) -> None: ...
-
-
 class AuditLedger(Protocol):
     def verify(self) -> IntegrityReport: ...
     def append(self, event: AuditEvent) -> AuditRecord: ...
@@ -72,15 +65,20 @@ def _iso_z(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-class HealthService:
-    """Report ready only after every Phase 0 foundation check has passed."""
+class HealthService[ConnectionT: RuntimeConnection]:
+    """Report ready only after every Phase 0 foundation check has passed.
+
+    The connection type is preserved from ``open_connection`` through to
+    ``assert_revision``, so callers keep their concrete driver type while the
+    gate itself needs nothing but ``close()``.
+    """
 
     def __init__(
         self,
         *,
         load_constitution: ConstitutionSource,
-        open_connection: ConnectionSource,
-        assert_revision: RevisionGate,
+        open_connection: Callable[[], ConnectionT],
+        assert_revision: Callable[[ConnectionT], None],
         ledger: AuditLedger,
         clock: Clock,
         application_version: str,

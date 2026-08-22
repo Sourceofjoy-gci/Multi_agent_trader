@@ -19,6 +19,9 @@ dependencies = [
   "typer>=0.16,<1",
 ]
 
+[project.scripts]
+trading-house = "trading_house.cli:app"
+
 [dependency-groups]
 dev = [
   "hypothesis>=6,<7",
