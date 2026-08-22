@@ -6,12 +6,9 @@ from enum import Enum
 from typing import Annotated, Literal, Self
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     NonNegativeInt,
     PositiveInt,
-    StringConstraints,
     TypeAdapter,
     field_validator,
     model_validator,
@@ -19,12 +16,24 @@ from pydantic import (
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
-
-NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
-FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
-PositiveFiniteFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
-NonNegativeFiniteFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
-Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+from trading_house.core.values import (
+    CanonicalModel as CanonicalModel,
+)
+from trading_house.core.values import (
+    FiniteFloat as FiniteFloat,
+)
+from trading_house.core.values import (
+    NonEmptyStr as NonEmptyStr,
+)
+from trading_house.core.values import (
+    NonNegativeFiniteFloat as NonNegativeFiniteFloat,
+)
+from trading_house.core.values import (
+    PositiveFiniteFloat as PositiveFiniteFloat,
+)
+from trading_house.core.values import (
+    Probability as Probability,
+)
 
 
 class Book(str, Enum):  # noqa: UP042
@@ -35,12 +44,6 @@ class Book(str, Enum):  # noqa: UP042
 class Side(str, Enum):  # noqa: UP042
     BUY = "BUY"
     SELL = "SELL"
-
-
-class CanonicalModel(BaseModel):
-    """Base model for canonical data exchanged between trading services."""
-
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
 
 class Stamped(CanonicalModel):
