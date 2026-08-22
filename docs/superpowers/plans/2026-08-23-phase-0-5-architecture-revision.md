@@ -180,6 +180,8 @@ Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 
 QuantityUnit = Literal["lots", "shares", "base_units", "contracts"]
 
+PositiveDecimal = Annotated[Decimal, Field(gt=0)]
+NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 Price = Annotated[Decimal, Field(gt=0)]
 BasisPoints = Annotated[Decimal, Field(ge=0)]
 InstrumentId = Annotated[str, StringConstraints(pattern=r"^[a-z]+\.[a-z0-9_]+$")]
@@ -438,7 +440,7 @@ git commit -m "fix: close the shallow-freeze hole in canonical models"
 
 **Interfaces:**
 - Produces: `FillPolicy`, `FinancingModel`, `InstrumentContract`.
-- Consumes: `AssetClass`, `InstrumentId`, `Price` from `trading_house.core.values`.
+- Consumes: `AssetClass`, `InstrumentId`, `PositiveDecimal` from `trading_house.core.values`. Do not redefine `PositiveDecimal` locally — `constitution/models.py` already has one, and a third definition is a review finding.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -540,9 +542,7 @@ from typing import Annotated, Self
 from pydantic import Field, model_validator
 
 from trading_house.core.values import CanonicalModel, NonEmptyStr
-from trading_house.core.values import AssetClass, InstrumentId
-
-PositiveDecimal = Annotated[Decimal, Field(gt=0)]
+from trading_house.core.values import AssetClass, InstrumentId, PositiveDecimal
 
 
 class FillPolicy(str, Enum):  # noqa: UP042
@@ -1833,6 +1833,8 @@ from trading_house.core.values import CanonicalModel, NonEmptyStr
 class Plane(Enum):
     """Where an agent runs decides what it may do (invariant I-11)."""
 
+    shell_permitted: bool  # declared for mypy strict; set in __init__
+
     RESEARCH_SANDBOX = ("research_sandbox", True)
     CONTROL = ("control", False)
     HOT = ("hot", False)
@@ -2079,6 +2081,8 @@ from trading_house.core.values import AssetClass, BookId, Horizon
 
 class PromotionStage(Enum):
     """Auto-deploy reaches paper. Only a human signature reaches capital."""
+
+    requires_human_signature: bool  # declared for mypy strict; set in __init__
 
     SANDBOX = ("sandbox", False)
     PAPER = ("paper", False)
