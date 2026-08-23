@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from trading_house.core.schemas import (
     Side,
     TradeProposal,
 )
+from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
@@ -74,16 +76,18 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
     OrderIntent: {
         "intent_id": "i-1",
         "proposal_id": "p-1",
-        "magic": 1,
-        "symbol": "EURUSD",
+        "book": "fx_scalp",
+        "instrument_id": "fx.eurusd",
         "side": Side.BUY,
-        "volume": 0.1,
-        "sl": 1.05,
-        "tp": None,
-        "deviation_points": 5,
-        "filling": 1,
-        "state": "SUBMITTING",
+        "quantity": PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
+        "stop_loss": Decimal("1.05"),
+        "take_profit": None,
+        "time_in_force": TimeInForce.IOC,
+        "max_slippage_bps": Decimal("2"),
+        "state": IntentState.SUBMITTING,
         "t_submit_utc": AWARE,
+        "venue_ref": None,
+        "outcome": None,
     },
     PositionState: {
         "position_ticket": 1,
@@ -209,8 +213,11 @@ def test_non_finite_prices_are_rejected(value: float) -> None:
 
 
 @given(st.floats(max_value=0.0, allow_nan=False, allow_infinity=False))
-def test_non_positive_volumes_are_rejected(value: float) -> None:
-    payload = {**BUILDERS[OrderIntent], "volume": value}
-
+def test_non_positive_quantities_are_rejected(value: float) -> None:
     with pytest.raises(ValidationError):
-        OrderIntent(**payload)
+        OrderIntent(
+            **{
+                **BUILDERS[OrderIntent],
+                "quantity": PositiveQuantity(amount=Decimal(str(value)), unit="lots"),
+            }
+        )

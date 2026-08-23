@@ -8,7 +8,6 @@ from typing import Annotated, Literal, Self, cast
 from pydantic import (
     Field,
     JsonValue,
-    NonNegativeInt,
     PositiveInt,
     TypeAdapter,
     field_validator,
@@ -18,6 +17,15 @@ from pydantic import (
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
 from trading_house.core.freezing import freeze_json
+from trading_house.core.values import (
+    BasisPoints,
+    BookId,
+    InstrumentId,
+    IntentState,
+    PositiveQuantity,
+    Price,
+    TimeInForce,
+)
 from trading_house.core.values import (
     CanonicalModel as CanonicalModel,
 )
@@ -36,6 +44,7 @@ from trading_house.core.values import (
 from trading_house.core.values import (
     Probability as Probability,
 )
+from trading_house.core.venue import ExecutionOutcome, VenueRef
 
 
 class Book(str, Enum):  # noqa: UP042
@@ -194,22 +203,22 @@ RISK_DECISION_ADAPTER: TypeAdapter[RiskDecision] = TypeAdapter(RiskDecision)
 
 
 class OrderIntent(CanonicalModel):
+    """One idempotent request to change a position. Neutral by construction."""
+
     intent_id: NonEmptyStr
     proposal_id: NonEmptyStr
-    magic: PositiveInt
-    symbol: NonEmptyStr
+    book: BookId
+    instrument_id: InstrumentId
     side: Side
-    volume: PositiveFiniteFloat
-    sl: PositiveFiniteFloat
-    tp: PositiveFiniteFloat | None
-    deviation_points: NonNegativeInt
-    filling: NonNegativeInt
-    state: Literal["SUBMITTING", "CONFIRMED", "UNKNOWN", "RECONCILING", "FAILED", "REJECTED"]
+    quantity: PositiveQuantity
+    stop_loss: Price
+    take_profit: Price | None
+    time_in_force: TimeInForce
+    max_slippage_bps: BasisPoints
+    state: IntentState
     t_submit_utc: datetime
-    broker_order_ticket: PositiveInt | None = None
-    broker_position_ticket: PositiveInt | None = None
-    fill_price: PositiveFiniteFloat | None = None
-    retcode: int | None = None
+    venue_ref: VenueRef | None = None
+    outcome: ExecutionOutcome | None = None
 
     @field_validator("t_submit_utc")
     @classmethod
