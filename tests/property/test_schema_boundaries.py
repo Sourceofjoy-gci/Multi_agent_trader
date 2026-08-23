@@ -23,7 +23,7 @@ from trading_house.core.schemas import (
     Side,
     TradeProposal,
 )
-from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
+from trading_house.core.values import IntentState, PositiveQuantity, Quantity, TimeInForce
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
@@ -212,12 +212,13 @@ def test_non_finite_prices_are_rejected(value: float) -> None:
         TradeProposal(**payload)
 
 
-@given(st.floats(max_value=0.0, allow_nan=False, allow_infinity=False))
-def test_non_positive_quantities_are_rejected(value: float) -> None:
+def test_order_intent_requires_a_positive_quantity_type() -> None:
+    """A zero-permitting Quantity must not satisfy OrderIntent.quantity."""
+    payload = {**BUILDERS[OrderIntent], "quantity": Quantity(amount=Decimal("0"), unit="lots")}
+
     with pytest.raises(ValidationError):
-        OrderIntent(
-            **{
-                **BUILDERS[OrderIntent],
-                "quantity": PositiveQuantity(amount=Decimal(str(value)), unit="lots"),
-            }
-        )
+        OrderIntent(**payload)
+
+
+def test_order_intent_quantity_is_annotated_positive() -> None:
+    assert OrderIntent.model_fields["quantity"].annotation is PositiveQuantity

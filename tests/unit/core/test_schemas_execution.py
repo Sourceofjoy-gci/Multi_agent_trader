@@ -253,7 +253,8 @@ def test_order_intent_normalizes_submit_time_to_utc() -> None:
             "t_submit_utc": datetime(2026, 8, 23, 11, 0, tzinfo=timezone(timedelta(hours=2))),
         }
     )
-    assert intent.t_submit_utc.hour == 9
+    assert intent.t_submit_utc == datetime(2026, 8, 23, 9, 0, tzinfo=UTC)
+    assert intent.t_submit_utc.tzinfo is UTC
 
 
 def test_order_intent_rejects_a_naive_submit_time() -> None:
