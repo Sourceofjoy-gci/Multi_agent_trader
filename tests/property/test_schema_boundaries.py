@@ -13,6 +13,12 @@ from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
 
 from trading_house.audit.models import AuditEvent
+from trading_house.brokers.base import (
+    MarketSnapshot,
+    Quote,
+    ReconciliationReport,
+    VenueHealth,
+)
 from trading_house.core.schemas import (
     AgentOpinion,
     CanonicalModel,
@@ -115,6 +121,27 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "actor": "property-suite",
         "actor_type": "test",
         "payload": {"ok": True},
+    },
+    Quote: {
+        "instrument_id": "fx.eurusd",
+        "bid": Decimal("1.1"),
+        "ask": Decimal("1.2"),
+        "observed_at": AWARE,
+    },
+    MarketSnapshot: {
+        "quotes": (),
+        "taken_at": AWARE,
+    },
+    VenueHealth: {
+        "connected": True,
+        "server_utc_offset_seconds": 0,
+        "last_quote_age_seconds": 0,
+    },
+    ReconciliationReport: {
+        "book": "fx_scalp",
+        "positions": (),
+        "unmatched_venue_refs": (),
+        "reconciled_at": AWARE,
     },
 }
 

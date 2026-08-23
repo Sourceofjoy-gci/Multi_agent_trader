@@ -4,6 +4,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from pydantic import NonNegativeInt, field_validator
+
+from trading_house.core.clock import ensure_utc
+from trading_house.core.errors import TimestampError
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import OrderIntent, PositionState
 from trading_house.core.values import (
@@ -22,16 +26,32 @@ class Quote(CanonicalModel):
     ask: Price
     observed_at: datetime
 
+    @field_validator("observed_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
 
 class MarketSnapshot(CanonicalModel):
     quotes: tuple[Quote, ...]
     taken_at: datetime
 
+    @field_validator("taken_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
 
 class VenueHealth(CanonicalModel):
     connected: bool
     server_utc_offset_seconds: int
-    last_quote_age_seconds: int
+    last_quote_age_seconds: NonNegativeInt
 
 
 class ReconciliationReport(CanonicalModel):
@@ -39,6 +59,14 @@ class ReconciliationReport(CanonicalModel):
     positions: tuple[PositionState, ...]
     unmatched_venue_refs: tuple[VenueRef, ...]
     reconciled_at: datetime
+
+    @field_validator("reconciled_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
 
 
 @runtime_checkable
