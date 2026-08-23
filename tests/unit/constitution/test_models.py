@@ -20,7 +20,7 @@ def valid_data() -> dict[str, object]:
             "fx_scalp": {
                 "capital_fraction": Decimal("0.30"),
                 "horizon": "scalp",
-                "asset_classes": ["fx"],
+                "asset_classes": ["fx", "metal"],
                 "risk_per_trade_pct": Decimal("0.35"),
                 "max_concurrent_positions": 10,
                 "daily_loss_stop_pct": Decimal("1.5"),
@@ -124,7 +124,7 @@ def test_checked_in_constitution_matches_spec() -> None:
     fx_scalp = model.books["fx_scalp"]
     assert fx_scalp.capital_fraction == Decimal("0.30")
     assert fx_scalp.horizon is Horizon.SCALP
-    assert fx_scalp.asset_classes == (AssetClass.FX,)
+    assert fx_scalp.asset_classes == (AssetClass.FX, AssetClass.METAL)
     assert fx_scalp.risk_per_trade_pct == Decimal("0.35")
     assert fx_scalp.max_concurrent_positions == 10
     assert fx_scalp.daily_loss_stop_pct == Decimal("1.5")
@@ -290,6 +290,24 @@ def test_mandatory_flags_reject_numeric_true_aliases(
 
     with pytest.raises(ValidationError, match="valid boolean"):
         Constitution.model_validate(valid_data)
+
+
+@pytest.mark.parametrize("yaml_scalar", ["1", '"true"'])
+def test_flat_by_session_close_rejects_non_boolean_true_aliases(yaml_scalar: str) -> None:
+    """A third mandatory-true flag must not regress the same hole twice-fixed elsewhere.
+
+    ``signature_required`` and ``reconciliation_mismatch`` are both guarded against
+    numeric/string aliases of ``True``; ``ScalpLimits.flat_by_session_close`` carries
+    the identical guard and must reject the same aliases end to end through
+    ``parse_constitution_yaml``.
+    """
+
+    source = CONSTITUTION_BYTES.replace(
+        b"flat_by_session_close: true", f"flat_by_session_close: {yaml_scalar}".encode()
+    )
+
+    with pytest.raises(ConfigurationError):
+        parse_constitution_yaml(source)
 
 
 def test_rejects_wrong_prohibition_literal(valid_data: dict[str, object]) -> None:

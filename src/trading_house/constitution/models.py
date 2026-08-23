@@ -52,6 +52,13 @@ class ScalpLimits(ConstitutionModel):
     def convert_integer_decimals(cls, value: object) -> object:
         return _integer_to_decimal(value)
 
+    @field_validator("flat_by_session_close", mode="before")
+    @classmethod
+    def flat_by_session_close_is_true_boolean(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("Input should be a valid boolean True")
+        return value
+
 
 class SwingLimits(ConstitutionModel):
     horizon: Literal[Horizon.SWING]

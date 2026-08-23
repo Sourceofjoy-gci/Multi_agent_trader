@@ -6,7 +6,7 @@ books:
   fx_scalp:
     capital_fraction: 0.30
     horizon: scalp
-    asset_classes: [fx]
+    asset_classes: [fx, metal]
     risk_per_trade_pct: 0.35
     max_concurrent_positions: 10
     daily_loss_stop_pct: 1.5
