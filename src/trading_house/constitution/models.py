@@ -1,5 +1,6 @@
 """Strict, immutable risk-constitution models."""
 
+from collections.abc import Mapping
 from decimal import Decimal, DecimalException
 from typing import Annotated, Literal, Self
 
@@ -8,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    NonNegativeInt,
     PositiveInt,
     ValidationError,
     field_validator,
@@ -15,6 +17,7 @@ from pydantic import (
 )
 
 from trading_house.core.errors import ConfigurationError
+from trading_house.core.values import AssetClass, BookId, Horizon
 
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
 Percentage = Annotated[Decimal, Field(gt=0, le=Decimal("100"))]
@@ -32,13 +35,56 @@ class ConstitutionModel(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
 
 
+class ScalpLimits(ConstitutionModel):
+    horizon: Literal[Horizon.SCALP]
+    max_orders_per_minute: PositiveInt
+    max_spread_multiple_at_entry: PositiveDecimal
+    min_expected_edge_after_cost_bps: PositiveDecimal
+    max_position_duration_seconds: PositiveInt
+    flat_by_session_close: Literal[True]
+
+    @field_validator(
+        "max_spread_multiple_at_entry",
+        "min_expected_edge_after_cost_bps",
+        mode="before",
+    )
+    @classmethod
+    def convert_integer_decimals(cls, value: object) -> object:
+        return _integer_to_decimal(value)
+
+
+class SwingLimits(ConstitutionModel):
+    horizon: Literal[Horizon.SWING]
+    max_overnight_positions: PositiveInt
+    max_weekend_exposure_pct: Percentage
+    max_swap_cost_pct_of_expected_edge: Percentage
+    gap_risk_multiple: PositiveDecimal
+    earnings_blackout_days: NonNegativeInt
+
+    @field_validator(
+        "max_weekend_exposure_pct",
+        "max_swap_cost_pct_of_expected_edge",
+        "gap_risk_multiple",
+        mode="before",
+    )
+    @classmethod
+    def convert_integer_decimals(cls, value: object) -> object:
+        return _integer_to_decimal(value)
+
+
+HorizonLimits = Annotated[ScalpLimits | SwingLimits, Field(discriminator="horizon")]
+
+
 class BookLimits(ConstitutionModel):
     capital_fraction: PositiveDecimal
+    horizon: Horizon
+    asset_classes: tuple[AssetClass, ...] = Field(min_length=1)
     risk_per_trade_pct: Percentage
     max_concurrent_positions: PositiveInt
     daily_loss_stop_pct: Percentage
     max_drawdown_halt_pct: Percentage
     max_gross_leverage: PositiveDecimal
+    limits: HorizonLimits
 
     @field_validator(
         "capital_fraction",
@@ -52,10 +98,25 @@ class BookLimits(ConstitutionModel):
     def convert_integer_decimals(cls, value: object) -> object:
         return _integer_to_decimal(value)
 
+    @field_validator("horizon", mode="before")
+    @classmethod
+    def convert_horizon_string(cls, value: object) -> object:
+        if isinstance(value, str):
+            return Horizon(value)
+        return value
 
-class Books(ConstitutionModel):
-    core: BookLimits
-    sleeve: BookLimits
+    @field_validator("asset_classes", mode="before")
+    @classmethod
+    def convert_asset_class_sequence(cls, value: object) -> object:
+        if isinstance(value, list | tuple):
+            return tuple(AssetClass(item) if isinstance(item, str) else item for item in value)
+        return value
+
+    @model_validator(mode="after")
+    def limits_match_the_declared_horizon(self) -> Self:
+        if self.limits.horizon is not self.horizon:
+            raise ValueError("horizon limits must match the book's declared horizon")
+        return self
 
 
 class FirmLimits(ConstitutionModel):
@@ -113,7 +174,7 @@ class SafeModeTriggers(ConstitutionModel):
 class Constitution(ConstitutionModel):
     version: PositiveInt
     signature_required: Literal[True]
-    books: Books
+    books: Mapping[BookId, BookLimits] = Field(min_length=1)
     firm: FirmLimits
     prohibitions: Prohibitions
     safe_mode_triggers: SafeModeTriggers
@@ -127,7 +188,8 @@ class Constitution(ConstitutionModel):
 
     @model_validator(mode="after")
     def capital_fractions_sum_to_one(self) -> Self:
-        if self.books.core.capital_fraction + self.books.sleeve.capital_fraction != Decimal("1"):
+        total = sum((book.capital_fraction for book in self.books.values()), Decimal(0))
+        if total != Decimal("1"):
             raise ValueError("book capital fractions must sum exactly to 1")
         return self
 

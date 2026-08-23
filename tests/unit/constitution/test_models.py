@@ -6,6 +6,9 @@ from pydantic import ValidationError
 
 from trading_house.constitution.models import Constitution, parse_constitution_yaml
 from trading_house.core.errors import ConfigurationError
+from trading_house.core.values import AssetClass, Horizon
+
+CONSTITUTION_BYTES = Path("config/risk_constitution.yaml").read_bytes()
 
 
 @pytest.fixture
@@ -14,21 +17,77 @@ def valid_data() -> dict[str, object]:
         "version": 1,
         "signature_required": True,
         "books": {
-            "core": {
-                "capital_fraction": Decimal("0.90"),
+            "fx_scalp": {
+                "capital_fraction": Decimal("0.30"),
+                "horizon": "scalp",
+                "asset_classes": ["fx"],
                 "risk_per_trade_pct": Decimal("0.35"),
-                "max_concurrent_positions": 8,
+                "max_concurrent_positions": 10,
                 "daily_loss_stop_pct": Decimal("1.5"),
-                "max_drawdown_halt_pct": Decimal("8.0"),
+                "max_drawdown_halt_pct": Decimal("6.0"),
+                "max_gross_leverage": Decimal("10.0"),
+                "limits": {
+                    "horizon": "scalp",
+                    "max_orders_per_minute": 15,
+                    "max_spread_multiple_at_entry": Decimal("1.5"),
+                    "min_expected_edge_after_cost_bps": Decimal("2.0"),
+                    "max_position_duration_seconds": 300,
+                    "flat_by_session_close": True,
+                },
+            },
+            "fx_swing": {
+                "capital_fraction": Decimal("0.45"),
+                "horizon": "swing",
+                "asset_classes": ["fx", "metal"],
+                "risk_per_trade_pct": Decimal("0.75"),
+                "max_concurrent_positions": 6,
+                "daily_loss_stop_pct": Decimal("2.5"),
+                "max_drawdown_halt_pct": Decimal("10.0"),
                 "max_gross_leverage": Decimal("5.0"),
+                "limits": {
+                    "horizon": "swing",
+                    "max_overnight_positions": 6,
+                    "max_weekend_exposure_pct": Decimal("15.0"),
+                    "max_swap_cost_pct_of_expected_edge": Decimal("20.0"),
+                    "gap_risk_multiple": Decimal("3.0"),
+                    "earnings_blackout_days": 0,
+                },
+            },
+            "equity_swing": {
+                "capital_fraction": Decimal("0.15"),
+                "horizon": "swing",
+                "asset_classes": ["equity_cfd"],
+                "risk_per_trade_pct": Decimal("0.50"),
+                "max_concurrent_positions": 4,
+                "daily_loss_stop_pct": Decimal("2.0"),
+                "max_drawdown_halt_pct": Decimal("8.0"),
+                "max_gross_leverage": Decimal("3.0"),
+                "limits": {
+                    "horizon": "swing",
+                    "max_overnight_positions": 4,
+                    "max_weekend_exposure_pct": Decimal("10.0"),
+                    "max_swap_cost_pct_of_expected_edge": Decimal("15.0"),
+                    "gap_risk_multiple": Decimal("4.0"),
+                    "earnings_blackout_days": 2,
+                },
             },
             "sleeve": {
                 "capital_fraction": Decimal("0.10"),
+                "horizon": "swing",
+                "asset_classes": ["fx", "metal"],
                 "risk_per_trade_pct": Decimal("1.5"),
                 "max_concurrent_positions": 2,
                 "daily_loss_stop_pct": Decimal("8.0"),
                 "max_drawdown_halt_pct": Decimal("40.0"),
                 "max_gross_leverage": Decimal("20.0"),
+                "limits": {
+                    "horizon": "swing",
+                    "max_overnight_positions": 2,
+                    "max_weekend_exposure_pct": Decimal("25.0"),
+                    "max_swap_cost_pct_of_expected_edge": Decimal("30.0"),
+                    "gap_risk_multiple": Decimal("5.0"),
+                    "earnings_blackout_days": 0,
+                },
             },
         },
         "firm": {
@@ -61,18 +120,45 @@ def test_checked_in_constitution_matches_spec() -> None:
 
     assert model.version == 1
     assert model.signature_required is True
-    assert model.books.core.capital_fraction == Decimal("0.90")
-    assert model.books.core.risk_per_trade_pct == Decimal("0.35")
-    assert model.books.core.max_concurrent_positions == 8
-    assert model.books.core.daily_loss_stop_pct == Decimal("1.5")
-    assert model.books.core.max_drawdown_halt_pct == Decimal("8.0")
-    assert model.books.core.max_gross_leverage == Decimal("5.0")
-    assert model.books.sleeve.capital_fraction == Decimal("0.10")
-    assert model.books.sleeve.risk_per_trade_pct == Decimal("1.5")
-    assert model.books.sleeve.max_concurrent_positions == 2
-    assert model.books.sleeve.daily_loss_stop_pct == Decimal("8.0")
-    assert model.books.sleeve.max_drawdown_halt_pct == Decimal("40.0")
-    assert model.books.sleeve.max_gross_leverage == Decimal("20.0")
+
+    fx_scalp = model.books["fx_scalp"]
+    assert fx_scalp.capital_fraction == Decimal("0.30")
+    assert fx_scalp.horizon is Horizon.SCALP
+    assert fx_scalp.asset_classes == (AssetClass.FX,)
+    assert fx_scalp.risk_per_trade_pct == Decimal("0.35")
+    assert fx_scalp.max_concurrent_positions == 10
+    assert fx_scalp.daily_loss_stop_pct == Decimal("1.5")
+    assert fx_scalp.max_drawdown_halt_pct == Decimal("6.0")
+    assert fx_scalp.max_gross_leverage == Decimal("10.0")
+    assert fx_scalp.limits.horizon is Horizon.SCALP
+    assert fx_scalp.limits.max_orders_per_minute == 15
+    assert fx_scalp.limits.max_spread_multiple_at_entry == Decimal("1.5")
+    assert fx_scalp.limits.min_expected_edge_after_cost_bps == Decimal("2.0")
+    assert fx_scalp.limits.max_position_duration_seconds == 300
+    assert fx_scalp.limits.flat_by_session_close is True
+
+    fx_swing = model.books["fx_swing"]
+    assert fx_swing.capital_fraction == Decimal("0.45")
+    assert fx_swing.horizon is Horizon.SWING
+    assert fx_swing.asset_classes == (AssetClass.FX, AssetClass.METAL)
+    assert fx_swing.limits.max_overnight_positions == 6
+    assert fx_swing.limits.max_weekend_exposure_pct == Decimal("15.0")
+    assert fx_swing.limits.max_swap_cost_pct_of_expected_edge == Decimal("20.0")
+    assert fx_swing.limits.gap_risk_multiple == Decimal("3.0")
+    assert fx_swing.limits.earnings_blackout_days == 0
+
+    equity_swing = model.books["equity_swing"]
+    assert equity_swing.capital_fraction == Decimal("0.15")
+    assert equity_swing.horizon is Horizon.SWING
+    assert equity_swing.asset_classes == (AssetClass.EQUITY_CFD,)
+    assert equity_swing.limits.earnings_blackout_days == 2
+
+    sleeve = model.books["sleeve"]
+    assert sleeve.capital_fraction == Decimal("0.10")
+    assert sleeve.horizon is Horizon.SWING
+    assert sleeve.asset_classes == (AssetClass.FX, AssetClass.METAL)
+    assert sleeve.max_gross_leverage == Decimal("20.0")
+
     assert model.firm.max_total_drawdown_halt_pct == Decimal("10.0")
     assert model.firm.max_correlated_cluster_risk_pct == Decimal("1.0")
     assert model.firm.max_single_symbol_risk_pct == Decimal("0.7")
@@ -91,6 +177,66 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert model.safe_mode_triggers.slippage_breach_sigma == Decimal("3.0")
 
 
+def test_books_may_be_declared_freely() -> None:
+    constitution = parse_constitution_yaml(CONSTITUTION_BYTES)
+    assert set(constitution.books) == {"fx_scalp", "fx_swing", "equity_swing", "sleeve"}
+
+
+def test_capital_fractions_must_sum_to_exactly_one() -> None:
+    source = CONSTITUTION_BYTES.replace(b"capital_fraction: 0.30", b"capital_fraction: 0.31")
+    with pytest.raises(ConfigurationError):
+        parse_constitution_yaml(source)
+
+
+def test_a_scalp_book_carries_scalp_limits() -> None:
+    book = parse_constitution_yaml(CONSTITUTION_BYTES).books["fx_scalp"]
+    assert book.horizon is Horizon.SCALP
+    assert book.limits.max_orders_per_minute > 0
+    assert book.limits.flat_by_session_close is True
+
+
+def test_a_swing_book_carries_swing_limits() -> None:
+    book = parse_constitution_yaml(CONSTITUTION_BYTES).books["fx_swing"]
+    assert book.horizon is Horizon.SWING
+    assert book.limits.max_weekend_exposure_pct > 0
+
+
+def test_horizon_limits_do_not_cross_apply() -> None:
+    """A swing limit silently applied to a scalp book is the failure this prevents."""
+
+    scalp = parse_constitution_yaml(CONSTITUTION_BYTES).books["fx_scalp"].limits
+    assert not hasattr(scalp, "max_weekend_exposure_pct")
+
+
+def test_a_book_declares_which_asset_classes_it_may_trade() -> None:
+    book = parse_constitution_yaml(CONSTITUTION_BYTES).books["equity_swing"]
+    assert book.asset_classes == (AssetClass.EQUITY_CFD,)
+
+
+def test_books_remain_frozen_and_closed() -> None:
+    constitution = parse_constitution_yaml(CONSTITUTION_BYTES)
+    with pytest.raises(ValidationError):
+        constitution.books["fx_scalp"].capital_fraction = Decimal("0.5")  # type: ignore[misc]
+
+
+def test_a_books_limits_must_match_its_declared_horizon(valid_data: dict[str, object]) -> None:
+    """A book's own ``horizon`` and its ``limits.horizon`` must agree.
+
+    The nested ``limits`` block is left as a fully valid ``ScalpLimits`` so
+    validation reaches the cross-field check rather than failing earlier on
+    the discriminated union's own shape.
+    """
+
+    books = valid_data["books"]
+    assert isinstance(books, dict)
+    fx_scalp = books["fx_scalp"]
+    assert isinstance(fx_scalp, dict)
+    fx_scalp["horizon"] = "swing"
+
+    with pytest.raises(ValidationError, match="horizon limits must match"):
+        Constitution.model_validate(valid_data)
+
+
 def test_capital_fractions_must_sum_exactly_to_one(valid_data: dict[str, object]) -> None:
     books = valid_data["books"]
     assert isinstance(books, dict)
@@ -102,12 +248,18 @@ def test_capital_fractions_must_sum_exactly_to_one(valid_data: dict[str, object]
         Constitution.model_validate(valid_data)
 
 
-def test_requires_both_books(valid_data: dict[str, object]) -> None:
-    books = valid_data["books"]
-    assert isinstance(books, dict)
-    books.pop("sleeve")
+def test_requires_at_least_one_book(valid_data: dict[str, object]) -> None:
+    """``Books`` no longer pins fixed keys; a mapping still may not be empty.
 
-    with pytest.raises(ValidationError, match="sleeve"):
+    This replaces the old ``test_requires_both_books``: with books now a freely
+    declared ``Mapping[BookId, BookLimits]`` there is no fixed pair of book
+    names to require. The equivalent invariant is that at least one book must
+    be declared, enforced by ``Field(min_length=1)``.
+    """
+
+    valid_data["books"] = {}
+
+    with pytest.raises(ValidationError, match="at least 1 item"):
         Constitution.model_validate(valid_data)
 
 
@@ -159,9 +311,9 @@ def test_forbids_unknown_fields(valid_data: dict[str, object]) -> None:
 def test_forbids_nested_unknown_fields(valid_data: dict[str, object]) -> None:
     books = valid_data["books"]
     assert isinstance(books, dict)
-    core = books["core"]
-    assert isinstance(core, dict)
-    core["unapproved_limit"] = Decimal("1")
+    fx_scalp = books["fx_scalp"]
+    assert isinstance(fx_scalp, dict)
+    fx_scalp["unapproved_limit"] = Decimal("1")
 
     with pytest.raises(ValidationError, match="Extra inputs"):
         Constitution.model_validate(valid_data)
@@ -179,9 +331,11 @@ def test_rejects_negative_limits(valid_data: dict[str, object]) -> None:
 @pytest.mark.parametrize(
     "field_path",
     [
-        ("books", "core", "risk_per_trade_pct"),
-        ("books", "core", "daily_loss_stop_pct"),
-        ("books", "core", "max_drawdown_halt_pct"),
+        ("books", "fx_scalp", "risk_per_trade_pct"),
+        ("books", "fx_scalp", "daily_loss_stop_pct"),
+        ("books", "fx_scalp", "max_drawdown_halt_pct"),
+        ("books", "fx_swing", "limits", "max_weekend_exposure_pct"),
+        ("books", "fx_swing", "limits", "max_swap_cost_pct_of_expected_edge"),
         ("firm", "max_total_drawdown_halt_pct"),
         ("firm", "max_correlated_cluster_risk_pct"),
         ("firm", "max_single_symbol_risk_pct"),
@@ -204,11 +358,12 @@ def test_percentage_limits_reject_values_above_100(
 def test_percentage_limit_accepts_100(valid_data: dict[str, object]) -> None:
     books = valid_data["books"]
     assert isinstance(books, dict)
-    core = books["core"]
-    assert isinstance(core, dict)
-    core["risk_per_trade_pct"] = Decimal("100")
+    fx_scalp = books["fx_scalp"]
+    assert isinstance(fx_scalp, dict)
+    fx_scalp["risk_per_trade_pct"] = Decimal("100")
 
-    assert Constitution.model_validate(valid_data).books.core.risk_per_trade_pct == Decimal("100")
+    model = Constitution.model_validate(valid_data)
+    assert model.books["fx_scalp"].risk_per_trade_pct == Decimal("100")
 
 
 def test_models_are_immutable(valid_data: dict[str, object]) -> None:
@@ -234,57 +389,17 @@ def test_yaml_failures_raise_redacted_configuration_error(payload: bytes) -> Non
     assert "do-not-disclose" not in str(error.value)
 
 
-def test_yaml_float_scalars_remain_decimal(valid_data: dict[str, object]) -> None:
-    source = (
-        "version: 1\n"
-        "signature_required: true\n"
-        "books:\n"
-        "  core:\n"
-        "    capital_fraction: 0.90\n"
-        "    risk_per_trade_pct: 0.35\n"
-        "    max_concurrent_positions: 8\n"
-        "    daily_loss_stop_pct: 1.5\n"
-        "    max_drawdown_halt_pct: 8.0\n"
-        "    max_gross_leverage: 5.0\n"
-        "  sleeve:\n"
-        "    capital_fraction: 0.10\n"
-        "    risk_per_trade_pct: 1.5\n"
-        "    max_concurrent_positions: 2\n"
-        "    daily_loss_stop_pct: 8.0\n"
-        "    max_drawdown_halt_pct: 40.0\n"
-        "    max_gross_leverage: 20.0\n"
-        "firm:\n"
-        "  max_total_drawdown_halt_pct: 10.0\n"
-        "  max_correlated_cluster_risk_pct: 1.0\n"
-        "  max_single_symbol_risk_pct: 0.7\n"
-        "  max_orders_per_minute: 30\n"
-        "  max_consecutive_rejects: 5\n"
-        "prohibitions:\n"
-        "  martingale_sizing: forbidden\n"
-        "  averaging_into_losers: forbidden_unless_declared_in_strategy_spec\n"
-        "  stop_removal: forbidden\n"
-        "  stop_widening: forbidden\n"
-        "  leverage_increase_after_loss: forbidden\n"
-        "  trading_without_protective_stop: forbidden\n"
-        "safe_mode_triggers:\n"
-        "  max_tick_age_seconds: 5\n"
-        "  max_spread_multiple_of_median: 3.0\n"
-        "  max_clock_drift_ms: 500\n"
-        "  reconciliation_mismatch: true\n"
-        "  slippage_breach_sigma: 3.0\n"
-    )
+def test_yaml_float_scalars_remain_decimal() -> None:
+    model = parse_constitution_yaml(CONSTITUTION_BYTES)
 
-    model = parse_constitution_yaml(source.encode())
-
-    assert model.books.core.capital_fraction == Decimal("0.90")
+    assert model.books["fx_scalp"].capital_fraction == Decimal("0.30")
+    assert isinstance(model.books["fx_scalp"].capital_fraction, Decimal)
 
 
 @pytest.mark.parametrize("scalar", ["1:2.3", ".nan", ".inf"])
 def test_yaml_float_conversion_failures_are_redacted(scalar: str) -> None:
-    source = (
-        Path("config/risk_constitution.yaml")
-        .read_bytes()
-        .replace(b"capital_fraction: 0.90", f"capital_fraction: {scalar}".encode())
+    source = CONSTITUTION_BYTES.replace(
+        b"capital_fraction: 0.30", f"capital_fraction: {scalar}".encode()
     )
 
     with pytest.raises(ConfigurationError) as error:

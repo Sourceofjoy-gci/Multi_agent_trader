@@ -3,20 +3,70 @@
 version: 1
 signature_required: true
 books:
-  core:
-    capital_fraction: 0.90
+  fx_scalp:
+    capital_fraction: 0.30
+    horizon: scalp
+    asset_classes: [fx]
     risk_per_trade_pct: 0.35
-    max_concurrent_positions: 8
+    max_concurrent_positions: 10
     daily_loss_stop_pct: 1.5
-    max_drawdown_halt_pct: 8.0
+    max_drawdown_halt_pct: 6.0
+    max_gross_leverage: 10.0
+    limits:
+      horizon: scalp
+      max_orders_per_minute: 15
+      max_spread_multiple_at_entry: 1.5
+      min_expected_edge_after_cost_bps: 2.0
+      max_position_duration_seconds: 300
+      flat_by_session_close: true
+  fx_swing:
+    capital_fraction: 0.45
+    horizon: swing
+    asset_classes: [fx, metal]
+    risk_per_trade_pct: 0.75
+    max_concurrent_positions: 6
+    daily_loss_stop_pct: 2.5
+    max_drawdown_halt_pct: 10.0
     max_gross_leverage: 5.0
+    limits:
+      horizon: swing
+      max_overnight_positions: 6
+      max_weekend_exposure_pct: 15.0
+      max_swap_cost_pct_of_expected_edge: 20.0
+      gap_risk_multiple: 3.0
+      earnings_blackout_days: 0
+  equity_swing:
+    capital_fraction: 0.15
+    horizon: swing
+    asset_classes: [equity_cfd]
+    risk_per_trade_pct: 0.50
+    max_concurrent_positions: 4
+    daily_loss_stop_pct: 2.0
+    max_drawdown_halt_pct: 8.0
+    max_gross_leverage: 3.0
+    limits:
+      horizon: swing
+      max_overnight_positions: 4
+      max_weekend_exposure_pct: 10.0
+      max_swap_cost_pct_of_expected_edge: 15.0
+      gap_risk_multiple: 4.0
+      earnings_blackout_days: 2
   sleeve:
     capital_fraction: 0.10
+    horizon: swing
+    asset_classes: [fx, metal]
     risk_per_trade_pct: 1.5
     max_concurrent_positions: 2
     daily_loss_stop_pct: 8.0
     max_drawdown_halt_pct: 40.0
     max_gross_leverage: 20.0
+    limits:
+      horizon: swing
+      max_overnight_positions: 2
+      max_weekend_exposure_pct: 25.0
+      max_swap_cost_pct_of_expected_edge: 30.0
+      gap_risk_multiple: 5.0
+      earnings_blackout_days: 0
 firm:
   max_total_drawdown_halt_pct: 10.0
   max_correlated_cluster_risk_pct: 1.0
