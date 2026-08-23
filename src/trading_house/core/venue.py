@@ -4,16 +4,16 @@
 reference, where forensics can reach them and the risk engine cannot.
 """
 
-from decimal import Decimal
 from enum import Enum
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 
-from pydantic import Field, PositiveInt, model_validator
+from pydantic import PositiveInt, model_validator
 
 from trading_house.core.values import (
     CanonicalModel,
     NonEmptyStr,
     PositiveQuantity,
+    Price,
 )
 
 
@@ -82,7 +82,7 @@ class ExecutionOutcome(CanonicalModel):
     accepted: bool
     venue_ref: VenueRef | None
     filled_quantity: PositiveQuantity | None
-    fill_price: Annotated[Decimal, Field(gt=0)] | None
+    fill_price: Price | None
     reject_reason: RejectReason | None
 
     @model_validator(mode="after")
@@ -93,6 +93,10 @@ class ExecutionOutcome(CanonicalModel):
             raise ValueError("a rejected outcome requires a reject_reason")
         if not self.accepted and (self.filled_quantity is not None or self.fill_price is not None):
             raise ValueError("a rejected outcome cannot carry a fill")
+        if self.accepted and self.venue_ref is None:
+            raise ValueError("an accepted outcome requires a venue_ref")
+        if (self.filled_quantity is None) != (self.fill_price is None):
+            raise ValueError("filled_quantity and fill_price must be present together")
         return self
 
 

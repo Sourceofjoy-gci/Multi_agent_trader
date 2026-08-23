@@ -97,3 +97,55 @@ def test_a_rejected_outcome_carries_no_fill() -> None:
 def test_precheck_failure_requires_a_reason() -> None:
     with pytest.raises(ValidationError, match="reject_reason"):
         PrecheckResult(would_accept=False, reject_reason=None)
+
+
+def test_an_accepted_outcome_requires_a_venue_reference() -> None:
+    with pytest.raises(ValidationError, match="venue_ref"):
+        ExecutionOutcome(
+            accepted=True,
+            venue_ref=None,
+            filled_quantity=PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
+            fill_price=Decimal("1.1"),
+            reject_reason=None,
+        )
+
+
+def test_an_accepted_order_may_be_working_without_a_fill() -> None:
+    """A GTC or DAY order can be accepted and not yet filled."""
+    outcome = ExecutionOutcome(
+        accepted=True,
+        venue_ref=Mt5VenueRef(**REF),
+        filled_quantity=None,
+        fill_price=None,
+        reject_reason=None,
+    )
+    assert outcome.filled_quantity is None
+
+
+@pytest.mark.parametrize(
+    ("quantity", "price"),
+    [
+        (PositiveQuantity(amount=Decimal("0.1"), unit="lots"), None),
+        (None, Decimal("1.1")),
+    ],
+)
+def test_a_half_specified_fill_is_rejected(quantity: object, price: object) -> None:
+    with pytest.raises(ValidationError, match="together"):
+        ExecutionOutcome(
+            accepted=True,
+            venue_ref=Mt5VenueRef(**REF),
+            filled_quantity=quantity,
+            fill_price=price,
+            reject_reason=None,
+        )
+
+
+def test_a_rejected_outcome_may_not_carry_a_fill() -> None:
+    with pytest.raises(ValidationError):
+        ExecutionOutcome(
+            accepted=False,
+            venue_ref=None,
+            filled_quantity=PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
+            fill_price=Decimal("1.1"),
+            reject_reason=RejectReason.MARKET_CLOSED,
+        )
