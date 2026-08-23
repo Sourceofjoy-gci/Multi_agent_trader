@@ -1,11 +1,12 @@
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from trading_house.core.values import (
     AssetClass,
     Horizon,
+    InstrumentId,
     PositiveQuantity,
     Quantity,
     TimeInForce,
@@ -46,3 +47,14 @@ def test_enums_use_stable_wire_values() -> None:
     assert AssetClass.EQUITY_CFD.value == "equity_cfd"
     assert Horizon.SCALP.value == "scalp"
     assert TimeInForce.GTC.value == "GTC"
+
+
+@pytest.mark.parametrize("value", ["fx.eurusd", "metal.xauusd", "equity_cfd.aapl"])
+def test_instrument_id_accepts_the_asset_class_convention(value: str) -> None:
+    assert TypeAdapter(InstrumentId).validate_python(value) == value
+
+
+@pytest.mark.parametrize("value", ["EURUSD", "fx.", "fx..x", "_fx.x", "fx_.eurusd", "Fx.eurusd"])
+def test_instrument_id_rejects_malformed_identifiers(value: str) -> None:
+    with pytest.raises(ValidationError):
+        TypeAdapter(InstrumentId).validate_python(value)

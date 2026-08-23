@@ -184,7 +184,7 @@ PositiveDecimal = Annotated[Decimal, Field(gt=0)]
 NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 Price = Annotated[Decimal, Field(gt=0)]
 BasisPoints = Annotated[Decimal, Field(ge=0)]
-InstrumentId = Annotated[str, StringConstraints(pattern=r"^[a-z]+\.[a-z0-9_]+$")]
+InstrumentId = Annotated[str, StringConstraints(pattern=r"^[a-z]+(_[a-z]+)*\.[a-z0-9_]+$")]
 BookId = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]*$", max_length=64)]
 
 
