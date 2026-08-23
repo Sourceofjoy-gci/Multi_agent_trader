@@ -113,3 +113,28 @@ class PrecheckResult(CanonicalModel):
         if self.would_accept and self.reject_reason is not None:
             raise ValueError("a passing precheck cannot carry a reject_reason")
         return self
+
+
+class RecoveryAction(str, Enum):  # noqa: UP042
+    """The only three responses to a venue rejection.
+
+    There is deliberately no widen-the-stop action: the constitution forbids
+    stop widening, and recovery may not breach a prohibition (I-15).
+    """
+
+    RETRY_WITH_FRESH_PRICE = "retry_with_fresh_price"
+    REFRESH_CONTRACT_AND_RESIZE = "refresh_contract_and_resize"
+    ENTER_SAFE_MODE = "enter_safe_mode"
+
+
+_RECOVERY: dict[RejectClass, RecoveryAction] = {
+    RejectClass.TRANSIENT: RecoveryAction.RETRY_WITH_FRESH_PRICE,
+    RejectClass.CONTRACTUAL: RecoveryAction.REFRESH_CONTRACT_AND_RESIZE,
+    RejectClass.AUTHORITY: RecoveryAction.ENTER_SAFE_MODE,
+}
+
+
+def recovery_for(reason: RejectReason) -> RecoveryAction:
+    """Map a rejection to its only permitted recovery."""
+
+    return _RECOVERY[REJECT_CLASS[reason]]
