@@ -7,14 +7,14 @@ from pydantic import ValidationError
 from trading_house.core.schemas import (
     RISK_DECISION_ADAPTER,
     ApprovedRiskDecision,
-    Book,
     OrderIntent,
     PositionState,
     RejectedRiskDecision,
     ResizedRiskDecision,
     Side,
+    TradeProposal,
 )
-from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
+from trading_house.core.values import IntentState, PositiveQuantity, Quantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, Venue
 
 
@@ -50,19 +50,20 @@ def valid_position() -> dict[str, object]:
         "position_ticket": 1,
         "intent_id": "intent-1",
         "strategy_id": "momentum",
-        "book": Book.CORE,
-        "symbol": "EURUSD",
+        "book": "fx_scalp",
+        "instrument_id": "fx.eurusd",
         "side": Side.BUY,
-        "volume": 0.1,
-        "open_price": 1.1,
-        "current_sl": 1.08,
-        "current_tp": 1.12,
+        "quantity": PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
+        "open_price": Decimal("1.1"),
+        "current_sl": Decimal("1.08"),
+        "current_tp": Decimal("1.12"),
         "opened_at_utc": datetime(2026, 8, 3, 12, 0, tzinfo=UTC),
         "lifecycle": "OPEN_PROTECTED",
         "r_multiple_open": 0.0,
         "mae_r": -0.1,
         "mfe_r": 0.2,
-        "initial_risk_distance": 0.02,
+        "initial_risk_distance": Decimal("0.02"),
+        "venue_ref": None,
     }
 
 
@@ -71,11 +72,11 @@ def test_approved_risk_decision_requires_positive_executable_fields() -> None:
         {
             "proposal_id": "proposal-1",
             "verdict": "APPROVED",
-            "approved_volume_lots": 0.1,
-            "stop_loss_price": 1.08,
-            "take_profit_price": 1.12,
-            "risk_money": 10.0,
-            "risk_pct_of_book": 0.35,
+            "approved_quantity": {"amount": Decimal("0.1"), "unit": "lots"},
+            "stop_loss_price": Decimal("1.08"),
+            "take_profit_price": Decimal("1.12"),
+            "risk_money": Decimal("10.0"),
+            "risk_pct_of_book": Decimal("0.35"),
             "reasons": ("within limits",),
             "checks_passed": ("daily loss",),
             "constitution_version": 1,
@@ -83,7 +84,7 @@ def test_approved_risk_decision_requires_positive_executable_fields() -> None:
     )
 
     assert isinstance(decision, ApprovedRiskDecision)
-    assert decision.approved_volume_lots == 0.1
+    assert decision.approved_quantity.amount == Decimal("0.1")
 
 
 def test_resized_risk_decision_requires_positive_executable_fields() -> None:
@@ -91,11 +92,11 @@ def test_resized_risk_decision_requires_positive_executable_fields() -> None:
         {
             "proposal_id": "proposal-1",
             "verdict": "RESIZED",
-            "approved_volume_lots": 0.05,
-            "stop_loss_price": 1.08,
+            "approved_quantity": {"amount": Decimal("0.05"), "unit": "lots"},
+            "stop_loss_price": Decimal("1.08"),
             "take_profit_price": None,
-            "risk_money": 5.0,
-            "risk_pct_of_book": 0.15,
+            "risk_money": Decimal("5.0"),
+            "risk_pct_of_book": Decimal("0.15"),
             "reasons": ("reduced for exposure",),
             "checks_passed": ("daily loss",),
             "constitution_version": 1,
@@ -103,7 +104,7 @@ def test_resized_risk_decision_requires_positive_executable_fields() -> None:
     )
 
     assert isinstance(decision, ResizedRiskDecision)
-    assert decision.risk_money == 5.0
+    assert decision.risk_money == Decimal("5.0")
 
 
 def test_rejected_risk_decision_carries_no_executable_data() -> None:
@@ -111,11 +112,11 @@ def test_rejected_risk_decision_carries_no_executable_data() -> None:
         {
             "proposal_id": "proposal-1",
             "verdict": "REJECTED",
-            "approved_volume_lots": 0.0,
+            "approved_quantity": {"amount": Decimal("0"), "unit": "lots"},
             "stop_loss_price": None,
             "take_profit_price": None,
-            "risk_money": 0.0,
-            "risk_pct_of_book": 0.0,
+            "risk_money": Decimal("0"),
+            "risk_pct_of_book": Decimal("0"),
             "reasons": ("daily loss halt",),
             "checks_passed": (),
             "constitution_version": 1,
@@ -125,41 +126,93 @@ def test_rejected_risk_decision_carries_no_executable_data() -> None:
     assert isinstance(decision, RejectedRiskDecision)
 
 
+def test_rejected_decision_carries_a_zero_quantity_not_a_literal() -> None:
+    decision = RejectedRiskDecision(
+        proposal_id="p-1",
+        reasons=("daily_loss_stop",),
+        checks_passed=(),
+        constitution_version=1,
+        verdict="REJECTED",
+        approved_quantity=Quantity(amount=Decimal("0"), unit="lots"),
+        stop_loss_price=None,
+        take_profit_price=None,
+        risk_money=Decimal("0"),
+        risk_pct_of_book=Decimal("0"),
+    )
+    assert decision.approved_quantity.amount == Decimal("0")
+
+
+def test_an_executable_decision_cannot_carry_a_zero_quantity() -> None:
+    """PositiveQuantity makes a zero-volume live order unrepresentable."""
+
+    with pytest.raises(ValidationError):
+        ApprovedRiskDecision(
+            proposal_id="p-1",
+            reasons=(),
+            checks_passed=("all",),
+            constitution_version=1,
+            verdict="APPROVED",
+            approved_quantity=PositiveQuantity(amount=Decimal("0"), unit="lots"),
+            stop_loss_price=Decimal("1.09"),
+            take_profit_price=None,
+            risk_money=Decimal("50"),
+            risk_pct_of_book=Decimal("0.25"),
+        )
+
+
+def test_no_canonical_model_still_uses_lot_denominated_floats() -> None:
+    forbidden = {"approved_volume_lots", "required_liquidity_lots", "volume"}
+    for model in (TradeProposal, ApprovedRiskDecision, RejectedRiskDecision, PositionState):
+        assert forbidden.isdisjoint(model.model_fields), model.__name__
+
+
+def test_position_state_records_its_book_and_venue_reference() -> None:
+    assert "book" in PositionState.model_fields
+    assert "venue_ref" in PositionState.model_fields
+
+
 @pytest.mark.parametrize(
     "field_name",
-    ["approved_volume_lots", "risk_money", "risk_pct_of_book"],
+    ["approved_quantity", "risk_money", "risk_pct_of_book"],
 )
 def test_rejected_risk_decision_rejects_boolean_zero_fields(field_name: str) -> None:
+    """`zero_fields_are_not_booleans` was deleted as redundant (task-6 brief):
+    `Quantity` already rejects a boolean amount and strict `Decimal` fields
+    reject `bool` outright. This proves that hole did not silently reopen.
+    """
     rejected_decision: dict[str, object] = {
         "proposal_id": "proposal-1",
         "verdict": "REJECTED",
-        "approved_volume_lots": 0.0,
-        "risk_money": 0.0,
-        "risk_pct_of_book": 0.0,
+        "approved_quantity": {"amount": Decimal("0"), "unit": "lots"},
+        "risk_money": Decimal("0"),
+        "risk_pct_of_book": Decimal("0"),
         "reasons": ("daily loss halt",),
         "checks_passed": (),
         "constitution_version": 1,
     }
-    rejected_decision[field_name] = False
+    if field_name == "approved_quantity":
+        rejected_decision["approved_quantity"] = {"amount": False, "unit": "lots"}
+    else:
+        rejected_decision[field_name] = False
 
     with pytest.raises(ValidationError) as error:
         RISK_DECISION_ADAPTER.validate_python(rejected_decision)
 
-    assert error.value.errors()[0]["loc"][-1] == field_name
-    assert "boolean" in error.value.errors()[0]["msg"]
+    expected_loc = "amount" if field_name == "approved_quantity" else field_name
+    assert error.value.errors()[0]["loc"][-1] == expected_loc
 
 
-def test_rejected_decision_cannot_carry_executable_volume() -> None:
+def test_rejected_decision_cannot_carry_executable_quantity() -> None:
     with pytest.raises(ValidationError):
         RISK_DECISION_ADAPTER.validate_python(
             {
                 "proposal_id": "p-1",
                 "verdict": "REJECTED",
-                "approved_volume_lots": 1.0,
-                "stop_loss_price": 1.08,
+                "approved_quantity": {"amount": Decimal("1.0"), "unit": "lots"},
+                "stop_loss_price": Decimal("1.08"),
                 "take_profit_price": None,
-                "risk_money": 10.0,
-                "risk_pct_of_book": 0.35,
+                "risk_money": Decimal("10.0"),
+                "risk_pct_of_book": Decimal("0.35"),
                 "reasons": ["daily_loss_halt"],
                 "checks_passed": [],
                 "constitution_version": 1,
@@ -173,9 +226,9 @@ def test_rejected_decision_requires_a_reason() -> None:
             {
                 "proposal_id": "p-1",
                 "verdict": "REJECTED",
-                "approved_volume_lots": 0.0,
-                "risk_money": 0.0,
-                "risk_pct_of_book": 0.0,
+                "approved_quantity": {"amount": Decimal("0"), "unit": "lots"},
+                "risk_money": Decimal("0"),
+                "risk_pct_of_book": Decimal("0"),
                 "reasons": [],
                 "checks_passed": [],
                 "constitution_version": 1,
@@ -265,7 +318,7 @@ def test_order_intent_rejects_a_naive_submit_time() -> None:
 
 
 def test_position_state_requires_positive_initial_risk(valid_position: dict[str, object]) -> None:
-    valid_position["initial_risk_distance"] = 0.0
+    valid_position["initial_risk_distance"] = Decimal("0")
     with pytest.raises(ValidationError, match="greater than 0"):
         PositionState(**valid_position)
 
@@ -280,7 +333,7 @@ def test_position_state_normalizes_open_time_and_is_frozen(
 
     assert position.opened_at_utc == datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
     with pytest.raises(ValidationError, match="frozen"):
-        position.volume = 0.2  # type: ignore[misc]
+        position.quantity = PositiveQuantity(amount=Decimal("0.2"), unit="lots")  # type: ignore[misc]
 
 
 def test_position_state_rejects_unknown_lifecycle(valid_position: dict[str, object]) -> None:

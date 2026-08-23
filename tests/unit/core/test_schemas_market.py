@@ -1,16 +1,17 @@
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
 from trading_house.core.schemas import (
     AgentOpinion,
-    Book,
     RegimeAssessment,
     Side,
     Stamped,
     TradeProposal,
 )
+from trading_house.core.values import PositiveQuantity
 
 
 @pytest.fixture
@@ -31,20 +32,20 @@ def valid_proposal(stamp: dict[str, object]) -> dict[str, object]:
         "proposal_id": "proposal-1",
         "strategy_id": "momentum",
         "strategy_version": "1.0.0",
-        "book": Book.CORE,
-        "symbol": "EURUSD",
+        "book": "fx_scalp",
+        "instrument_id": "fx.eurusd",
         "side": Side.BUY,
         "horizon_seconds": 60,
         "entry_condition": "breakout",
-        "entry_price_ref": 1.1,
-        "invalidation_price": 1.09,
+        "entry_price_ref": Decimal("1.1"),
+        "invalidation_price": Decimal("1.09"),
         "max_holding_seconds": 3600,
         "expected_return_bps": 10.0,
         "expected_return_stdev_bps": 5.0,
         "expected_cost_bps": 1.0,
         "win_probability": 0.6,
         "calibration_id": "calibration-1",
-        "required_liquidity_lots": 0.1,
+        "required_liquidity": PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
         "regime_ref": "regime-1",
         "features_snapshot_id": "features-1",
     }
@@ -107,7 +108,7 @@ def test_sell_proposal_requires_invalidation_above_entry(
     valid_proposal: dict[str, object],
 ) -> None:
     valid_proposal["side"] = Side.SELL
-    valid_proposal["invalidation_price"] = 1.1
+    valid_proposal["invalidation_price"] = Decimal("1.1")
     with pytest.raises(ValidationError, match="SELL invalidation"):
         TradeProposal(**valid_proposal)
 

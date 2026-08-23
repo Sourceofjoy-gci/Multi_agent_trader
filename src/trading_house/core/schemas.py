@@ -2,6 +2,7 @@
 
 import math
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Literal, Self, cast
 
@@ -24,6 +25,7 @@ from trading_house.core.values import (
     IntentState,
     PositiveQuantity,
     Price,
+    Quantity,
     TimeInForce,
 )
 from trading_house.core.values import (
@@ -45,11 +47,6 @@ from trading_house.core.values import (
     Probability as Probability,
 )
 from trading_house.core.venue import ExecutionOutcome, VenueRef
-
-
-class Book(str, Enum):  # noqa: UP042
-    CORE = "core"
-    SLEEVE = "sleeve"
 
 
 class Side(str, Enum):  # noqa: UP042
@@ -106,20 +103,20 @@ class TradeProposal(Stamped):
     proposal_id: NonEmptyStr
     strategy_id: NonEmptyStr
     strategy_version: NonEmptyStr
-    book: Book
-    symbol: NonEmptyStr
+    book: BookId
+    instrument_id: InstrumentId
     side: Side
     horizon_seconds: PositiveInt
     entry_condition: NonEmptyStr
-    entry_price_ref: PositiveFiniteFloat
-    invalidation_price: PositiveFiniteFloat
+    entry_price_ref: Price
+    invalidation_price: Price
     max_holding_seconds: PositiveInt
     expected_return_bps: FiniteFloat
     expected_return_stdev_bps: NonNegativeFiniteFloat
     expected_cost_bps: NonNegativeFiniteFloat
     win_probability: Probability
     calibration_id: NonEmptyStr
-    required_liquidity_lots: PositiveFiniteFloat
+    required_liquidity: PositiveQuantity
     regime_ref: NonEmptyStr
     features_snapshot_id: NonEmptyStr
     rationale: NonEmptyStr | None = None
@@ -158,11 +155,11 @@ class BaseRiskDecision(CanonicalModel):
 
 
 class ExecutableRiskDecision(BaseRiskDecision):
-    approved_volume_lots: PositiveFiniteFloat
-    stop_loss_price: PositiveFiniteFloat
-    take_profit_price: PositiveFiniteFloat | None
-    risk_money: PositiveFiniteFloat
-    risk_pct_of_book: PositiveFiniteFloat
+    approved_quantity: PositiveQuantity
+    stop_loss_price: Price
+    take_profit_price: Price | None
+    risk_money: Annotated[Decimal, Field(gt=0)]
+    risk_pct_of_book: Annotated[Decimal, Field(gt=0)]
 
 
 class ApprovedRiskDecision(ExecutableRiskDecision):
@@ -175,18 +172,11 @@ class ResizedRiskDecision(ExecutableRiskDecision):
 
 class RejectedRiskDecision(BaseRiskDecision):
     verdict: Literal["REJECTED"]
-    approved_volume_lots: Literal[0.0]  # type: ignore[valid-type]
+    approved_quantity: Quantity
     stop_loss_price: None = None
     take_profit_price: None = None
-    risk_money: Literal[0.0]  # type: ignore[valid-type]
-    risk_pct_of_book: Literal[0.0]  # type: ignore[valid-type]
-
-    @field_validator("approved_volume_lots", "risk_money", "risk_pct_of_book", mode="before")
-    @classmethod
-    def zero_fields_are_not_booleans(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("boolean values are not valid zero fields")
-        return value
+    risk_money: Annotated[Decimal, Field(ge=0, le=0)]
+    risk_pct_of_book: Annotated[Decimal, Field(ge=0, le=0)]
 
     @model_validator(mode="after")
     def has_rejection_reason(self) -> Self:
@@ -233,19 +223,20 @@ class PositionState(CanonicalModel):
     position_ticket: PositiveInt
     intent_id: NonEmptyStr | None
     strategy_id: NonEmptyStr
-    book: Book
-    symbol: NonEmptyStr
+    book: BookId
+    instrument_id: InstrumentId
     side: Side
-    volume: PositiveFiniteFloat
-    open_price: PositiveFiniteFloat
-    current_sl: PositiveFiniteFloat
-    current_tp: PositiveFiniteFloat | None
+    quantity: PositiveQuantity
+    open_price: Price
+    current_sl: Price
+    current_tp: Price | None
     opened_at_utc: datetime
     lifecycle: Literal["OPEN_PROTECTED", "BREAKEVEN_ELIGIBLE", "TRAILING", "EXIT_PENDING", "CLOSED"]
     r_multiple_open: FiniteFloat
     mae_r: FiniteFloat
     mfe_r: FiniteFloat
-    initial_risk_distance: PositiveFiniteFloat
+    initial_risk_distance: Price
+    venue_ref: VenueRef | None = None
 
     @field_validator("opened_at_utc")
     @classmethod
