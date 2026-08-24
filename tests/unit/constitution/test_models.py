@@ -92,8 +92,10 @@ def valid_data() -> dict[str, object]:
         },
         "firm": {
             "max_total_drawdown_halt_pct": Decimal("10.0"),
+            "max_aggregate_open_risk_pct": Decimal("4.0"),
             "max_correlated_cluster_risk_pct": Decimal("1.0"),
-            "max_single_symbol_risk_pct": Decimal("0.7"),
+            "max_single_instrument_risk_pct": Decimal("0.7"),
+            "max_gross_leverage": Decimal("8.0"),
             "max_orders_per_minute": 30,
             "max_consecutive_rejects": 5,
         },
@@ -106,11 +108,20 @@ def valid_data() -> dict[str, object]:
             "trading_without_protective_stop": "forbidden",
         },
         "safe_mode_triggers": {
-            "max_tick_age_seconds": Decimal("5"),
-            "max_spread_multiple_of_median": Decimal("3.0"),
-            "max_clock_drift_ms": 500,
-            "reconciliation_mismatch": True,
-            "slippage_breach_sigma": Decimal("3.0"),
+            Horizon.SCALP: {
+                "max_tick_age_seconds": Decimal("2"),
+                "max_spread_multiple_of_median": Decimal("3.0"),
+                "max_clock_drift_ms": 500,
+                "reconciliation_mismatch": True,
+                "slippage_breach_sigma": Decimal("3.0"),
+            },
+            Horizon.SWING: {
+                "max_tick_age_seconds": Decimal("30"),
+                "max_spread_multiple_of_median": Decimal("3.0"),
+                "max_clock_drift_ms": 500,
+                "reconciliation_mismatch": True,
+                "slippage_breach_sigma": Decimal("3.0"),
+            },
         },
     }
 
@@ -160,8 +171,10 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert sleeve.max_gross_leverage == Decimal("20.0")
 
     assert model.firm.max_total_drawdown_halt_pct == Decimal("10.0")
+    assert model.firm.max_aggregate_open_risk_pct == Decimal("4.0")
     assert model.firm.max_correlated_cluster_risk_pct == Decimal("1.0")
-    assert model.firm.max_single_symbol_risk_pct == Decimal("0.7")
+    assert model.firm.max_single_instrument_risk_pct == Decimal("0.7")
+    assert model.firm.max_gross_leverage == Decimal("8.0")
     assert model.firm.max_orders_per_minute == 30
     assert model.firm.max_consecutive_rejects == 5
     assert model.prohibitions.martingale_sizing == "forbidden"
@@ -170,16 +183,31 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert model.prohibitions.stop_widening == "forbidden"
     assert model.prohibitions.leverage_increase_after_loss == "forbidden"
     assert model.prohibitions.trading_without_protective_stop == "forbidden"
-    assert model.safe_mode_triggers.max_tick_age_seconds == Decimal("5")
-    assert model.safe_mode_triggers.max_spread_multiple_of_median == Decimal("3.0")
-    assert model.safe_mode_triggers.max_clock_drift_ms == 500
-    assert model.safe_mode_triggers.reconciliation_mismatch is True
-    assert model.safe_mode_triggers.slippage_breach_sigma == Decimal("3.0")
+    assert model.safe_mode_triggers[Horizon.SCALP].max_tick_age_seconds == Decimal("2")
+    assert model.safe_mode_triggers[Horizon.SWING].max_tick_age_seconds == Decimal("30")
+    assert model.safe_mode_triggers[Horizon.SCALP].max_spread_multiple_of_median == Decimal("3.0")
+    assert model.safe_mode_triggers[Horizon.SCALP].max_clock_drift_ms == 500
+    assert model.safe_mode_triggers[Horizon.SCALP].reconciliation_mismatch is True
+    assert model.safe_mode_triggers[Horizon.SCALP].slippage_breach_sigma == Decimal("3.0")
 
 
 def test_books_may_be_declared_freely() -> None:
     constitution = parse_constitution_yaml(CONSTITUTION_BYTES)
     assert set(constitution.books) == {"fx_scalp", "fx_swing", "equity_swing", "sleeve"}
+
+
+def test_safe_mode_triggers_are_declared_per_horizon() -> None:
+    triggers = parse_constitution_yaml(CONSTITUTION_BYTES).safe_mode_triggers
+    assert set(triggers) == {Horizon.SCALP, Horizon.SWING}
+    assert (
+        triggers[Horizon.SCALP].max_tick_age_seconds < triggers[Horizon.SWING].max_tick_age_seconds
+    )
+
+
+def test_every_declared_book_horizon_has_safe_mode_triggers() -> None:
+    constitution = parse_constitution_yaml(CONSTITUTION_BYTES)
+    declared = {book.horizon for book in constitution.books.values()}
+    assert declared <= set(constitution.safe_mode_triggers)
 
 
 def test_capital_fractions_must_sum_to_exactly_one() -> None:
@@ -275,11 +303,11 @@ def test_requires_signature(valid_data: dict[str, object]) -> None:
     "field_path",
     [
         ("signature_required",),
-        ("safe_mode_triggers", "reconciliation_mismatch"),
+        ("safe_mode_triggers", Horizon.SCALP, "reconciliation_mismatch"),
     ],
 )
 def test_mandatory_flags_reject_numeric_true_aliases(
-    valid_data: dict[str, object], field_path: tuple[str, ...], alias: object
+    valid_data: dict[str, object], field_path: tuple[str | Horizon, ...], alias: object
 ) -> None:
     target: dict[str, object] = valid_data
     for key in field_path[:-1]:
@@ -340,7 +368,7 @@ def test_forbids_nested_unknown_fields(valid_data: dict[str, object]) -> None:
 def test_rejects_negative_limits(valid_data: dict[str, object]) -> None:
     firm = valid_data["firm"]
     assert isinstance(firm, dict)
-    firm["max_single_symbol_risk_pct"] = Decimal("-0.7")
+    firm["max_single_instrument_risk_pct"] = Decimal("-0.7")
 
     with pytest.raises(ValidationError, match="greater than 0"):
         Constitution.model_validate(valid_data)
@@ -355,8 +383,9 @@ def test_rejects_negative_limits(valid_data: dict[str, object]) -> None:
         ("books", "fx_swing", "limits", "max_weekend_exposure_pct"),
         ("books", "fx_swing", "limits", "max_swap_cost_pct_of_expected_edge"),
         ("firm", "max_total_drawdown_halt_pct"),
+        ("firm", "max_aggregate_open_risk_pct"),
         ("firm", "max_correlated_cluster_risk_pct"),
-        ("firm", "max_single_symbol_risk_pct"),
+        ("firm", "max_single_instrument_risk_pct"),
     ],
 )
 def test_percentage_limits_reject_values_above_100(

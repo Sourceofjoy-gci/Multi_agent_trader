@@ -127,16 +127,27 @@ class BookLimits(ConstitutionModel):
 
 
 class FirmLimits(ConstitutionModel):
+    """Cross-book budgets binding the whole firm (I-16).
+
+    These are the only place correlation and leverage budgets may live: all
+    books share one broker account and therefore one margin pool, so a
+    per-book budget would hide correlated exposure instead of containing it.
+    """
+
     max_total_drawdown_halt_pct: Percentage
+    max_aggregate_open_risk_pct: Percentage
     max_correlated_cluster_risk_pct: Percentage
-    max_single_symbol_risk_pct: Percentage
+    max_single_instrument_risk_pct: Percentage
+    max_gross_leverage: PositiveDecimal
     max_orders_per_minute: PositiveInt
     max_consecutive_rejects: PositiveInt
 
     @field_validator(
         "max_total_drawdown_halt_pct",
+        "max_aggregate_open_risk_pct",
         "max_correlated_cluster_risk_pct",
-        "max_single_symbol_risk_pct",
+        "max_single_instrument_risk_pct",
+        "max_gross_leverage",
         mode="before",
     )
     @classmethod
@@ -184,7 +195,7 @@ class Constitution(ConstitutionModel):
     books: Mapping[BookId, BookLimits] = Field(min_length=1)
     firm: FirmLimits
     prohibitions: Prohibitions
-    safe_mode_triggers: SafeModeTriggers
+    safe_mode_triggers: Mapping[Horizon, SafeModeTriggers]
 
     @field_validator("signature_required", mode="before")
     @classmethod
@@ -193,11 +204,27 @@ class Constitution(ConstitutionModel):
             raise ValueError("Input should be a valid boolean True")
         return value
 
+    @field_validator("safe_mode_triggers", mode="before")
+    @classmethod
+    def convert_safe_mode_trigger_keys(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                Horizon(key) if isinstance(key, str) else key: item for key, item in value.items()
+            }
+        return value
+
     @model_validator(mode="after")
     def capital_fractions_sum_to_one(self) -> Self:
         total = sum((book.capital_fraction for book in self.books.values()), Decimal(0))
         if total != Decimal("1"):
             raise ValueError("book capital fractions must sum exactly to 1")
+        return self
+
+    @model_validator(mode="after")
+    def every_book_horizon_has_triggers(self) -> Self:
+        missing = {book.horizon for book in self.books.values()} - set(self.safe_mode_triggers)
+        if missing:
+            raise ValueError("every declared book horizon requires safe-mode triggers")
         return self
 
 
