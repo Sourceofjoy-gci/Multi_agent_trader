@@ -196,3 +196,12 @@ def test_forbidden_import_detection_actually_works(forbidden: str) -> None:
     tree = ast.parse(f"import {forbidden}\n")
 
     assert _imported_top_level(tree) & FORBIDDEN_TOP_LEVEL_IMPORTS == {forbidden}
+
+
+def test_no_agent_provider_reaches_the_database_or_broker() -> None:
+    """I-11: the provider boundary must not be able to see credentials."""
+
+    tree = ast.parse((SOURCE_ROOT / "agents" / "providers" / "base.py").read_text(encoding="utf-8"))
+    forbidden = {"psycopg", "trading_house.settings", "trading_house.database"}
+    assert not _imported_top_level(tree) & {"psycopg"}
+    assert not {name for name in _imported_names(tree) if name in forbidden}
