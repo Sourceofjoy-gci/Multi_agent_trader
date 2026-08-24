@@ -1,4 +1,4 @@
-"""Verified loading for the risk constitution."""
+"""Verified loading for any signed artifact, plus the risk constitution atop it."""
 
 import hashlib
 from dataclasses import dataclass
@@ -12,6 +12,15 @@ from trading_house.core.errors import ConfigurationError, SignatureVerificationE
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedArtifact:
+    """Exact verified bytes plus immutable provenance."""
+
+    content: bytes
+    sha256: str
+    public_key_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
 class LoadedConstitution:
     """A parsed constitution and immutable verification metadata."""
 
@@ -20,13 +29,13 @@ class LoadedConstitution:
     public_key_fingerprint: str
 
 
-def load_constitution(
-    yaml_path: Path, signature_path: Path, public_key_path: Path
-) -> LoadedConstitution:
-    """Verify exact YAML bytes before parsing and return verified metadata."""
+def load_signed(
+    artifact_path: Path, signature_path: Path, public_key_path: Path
+) -> VerifiedArtifact:
+    """Verify exact bytes before any decoding. Never parses."""
 
     try:
-        yaml_bytes = yaml_path.read_bytes()
+        artifact_bytes = artifact_path.read_bytes()
     except OSError as error:
         raise ConfigurationError() from error
 
@@ -40,14 +49,26 @@ def load_constitution(
     except OSError as error:
         raise SignatureVerificationError() from error
     public_key = load_public_key(public_key_bytes)
-    verify_signature(public_key, signature, yaml_bytes)
-    constitution = parse_constitution_yaml(yaml_bytes)
+    verify_signature(public_key, signature, artifact_bytes)
     raw_public_key = public_key.public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    return LoadedConstitution(
-        constitution=constitution,
-        constitution_sha256=hashlib.sha256(yaml_bytes).hexdigest(),
+    return VerifiedArtifact(
+        content=artifact_bytes,
+        sha256=hashlib.sha256(artifact_bytes).hexdigest(),
         public_key_fingerprint=hashlib.sha256(raw_public_key).hexdigest(),
+    )
+
+
+def load_constitution(
+    yaml_path: Path, signature_path: Path, public_key_path: Path
+) -> LoadedConstitution:
+    """Verify exact YAML bytes before parsing and return verified metadata."""
+
+    verified = load_signed(yaml_path, signature_path, public_key_path)
+    return LoadedConstitution(
+        constitution=parse_constitution_yaml(verified.content),
+        constitution_sha256=verified.sha256,
+        public_key_fingerprint=verified.public_key_fingerprint,
     )

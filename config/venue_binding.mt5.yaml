@@ -1,0 +1,13 @@
+# The venue-specific projection of neutral book and instrument ids onto MT5
+# facts (magic ranges, server symbols). The risk constitution stays
+# venue-neutral; this file carries everything that would change if the firm
+# switched brokers. Signed separately with the same Ed25519 loader (spec 3.3).
+venue: mt5
+books:
+  fx_scalp:     { magic_range: [110000, 119999] }
+  fx_swing:     { magic_range: [120000, 129999] }
+  equity_swing: { magic_range: [130000, 139999] }
+  sleeve:       { magic_range: [140000, 149999] }
+instruments:
+  fx.eurusd:    { server_symbol: "EURUSD.raw" }
+  metal.xauusd: { server_symbol: "XAUUSD" }
