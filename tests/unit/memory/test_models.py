@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -87,4 +87,20 @@ def test_a_fact_rejects_a_naive_availability_time() -> None:
             value=1.5,
             observed_at=WHEN,
             availability_time=WHEN.replace(tzinfo=None),
+        )
+
+
+def test_a_fact_rejects_availability_time_before_observed_at() -> None:
+    """The DDL mirrors this as facts_availability_not_before_observation."""
+
+    with pytest.raises(ValidationError, match="availability_time"):
+        ObservedFact(
+            fact_id="f-1",
+            store=MemoryStore.A,
+            written_by=WriterKind.DETERMINISTIC,
+            instrument_id="fx.eurusd",
+            metric="slippage_bps",
+            value=1.5,
+            observed_at=WHEN,
+            availability_time=WHEN - timedelta(seconds=1),
         )

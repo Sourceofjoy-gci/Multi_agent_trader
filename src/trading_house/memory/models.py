@@ -58,6 +58,12 @@ class ObservedFact(_PointInTime):
             raise ValueError("only deterministic post-trade code may write a fact")
         return self
 
+    @model_validator(mode="after")
+    def availability_not_before_observation(self) -> Self:
+        if self.availability_time < self.observed_at:
+            raise ValueError("availability_time must not precede observed_at")
+        return self
+
 
 class AgentBelief(_PointInTime):
     """Store B: an agent's opinion. Never eligible for Store A."""
