@@ -29,6 +29,7 @@ from trading_house.core.schemas import (
     TradeProposal,
 )
 from trading_house.core.values import IntentState, PositiveQuantity, Quantity, TimeInForce
+from trading_house.memory.models import AgentBelief, MemoryStore, ObservedFact, WriterKind
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
@@ -142,6 +143,23 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "positions": (),
         "unmatched_venue_refs": (),
         "reconciled_at": AWARE,
+    },
+    ObservedFact: {
+        "fact_id": "f-1",
+        "store": MemoryStore.A,
+        "written_by": WriterKind.DETERMINISTIC,
+        "instrument_id": "fx.eurusd",
+        "metric": "slippage_bps",
+        "value": 1.5,
+        "observed_at": AWARE,
+        "availability_time": AWARE,
+    },
+    AgentBelief: {
+        "belief_id": "b-1",
+        "store": MemoryStore.B,
+        "agent_run_id": "r-1",
+        "claim": "EURUSD trends after London open",
+        "availability_time": AWARE,
     },
 }
 
