@@ -21,8 +21,8 @@ def valid_data() -> dict[str, object]:
                 "capital_fraction": Decimal("0.30"),
                 "horizon": "scalp",
                 "asset_classes": ["fx", "metal"],
-                "risk_per_trade_pct": Decimal("0.35"),
-                "max_concurrent_positions": 10,
+                "risk_per_trade_pct": Decimal("0.25"),
+                "max_concurrent_positions": 3,
                 "daily_loss_stop_pct": Decimal("1.5"),
                 "max_drawdown_halt_pct": Decimal("6.0"),
                 "max_gross_leverage": Decimal("10.0"),
@@ -125,8 +125,8 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert fx_scalp.capital_fraction == Decimal("0.30")
     assert fx_scalp.horizon is Horizon.SCALP
     assert fx_scalp.asset_classes == (AssetClass.FX, AssetClass.METAL)
-    assert fx_scalp.risk_per_trade_pct == Decimal("0.35")
-    assert fx_scalp.max_concurrent_positions == 10
+    assert fx_scalp.risk_per_trade_pct == Decimal("0.25")
+    assert fx_scalp.max_concurrent_positions == 3
     assert fx_scalp.daily_loss_stop_pct == Decimal("1.5")
     assert fx_scalp.max_drawdown_halt_pct == Decimal("6.0")
     assert fx_scalp.max_gross_leverage == Decimal("10.0")

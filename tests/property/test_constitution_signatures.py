@@ -116,14 +116,26 @@ def test_mutated_yaml_never_silently_parses_into_the_same_limits(index_seed: int
 
 
 def test_loader_rejects_a_tampered_constitution(tmp_path: Path) -> None:
-    tampered = tmp_path / "risk_constitution.yaml"
-    tampered.write_bytes(
-        CONSTITUTION_BYTES.replace(b"risk_per_trade_pct: 0.35", b"risk_per_trade_pct: 9.99")
-    )
+    """Any single-byte edit to the checked-in file must fail the loader's verification.
+
+    This mutates an arbitrary byte rather than string-replacing a specific limit's
+    literal value: tying the tamper to one field's exact text (e.g. a particular
+    ``risk_per_trade_pct``) silently stops testing anything the moment that literal
+    value changes elsewhere in the config (a no-op replace leaves the bytes identical
+    to the checked-in file, which then still verifies, and the test passes for the
+    wrong reason without ever tampering anything). A byte-level mutation via the
+    module's own ``_mutate_one_byte`` helper stays meaningful regardless of book
+    contents. ``index_seed=0`` is deterministic and always a valid index into a
+    non-empty file, so this needs no ``@given``/``tmp_path`` combination (which
+    Hypothesis's function-scoped-fixture health check rejects).
+    """
+
+    tampered_path = tmp_path / "risk_constitution.yaml"
+    tampered_path.write_bytes(_mutate_one_byte(CONSTITUTION_BYTES, index_seed=0))
 
     with pytest.raises(SignatureVerificationError):
         load_constitution(
-            tampered,
+            tampered_path,
             CONFIG_DIR / "risk_constitution.yaml.sig",
             CONFIG_DIR / "risk_constitution.public.pem",
         )
