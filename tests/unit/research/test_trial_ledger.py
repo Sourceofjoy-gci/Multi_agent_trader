@@ -10,7 +10,7 @@ def _trial(index: int, status: TrialStatus) -> Trial:
         spec_id="s-1",
         agent_run_id="r-1",
         status=status,
-        sharpe=1.0,
+        sharpe=1.0 if status is TrialStatus.COMPLETED else None,
         registered_at_sequence=index,
     )
 
@@ -48,3 +48,20 @@ def test_a_completed_trial_requires_a_sharpe() -> None:
 
 def test_every_trial_names_the_agent_run_that_produced_it() -> None:
     assert "agent_run_id" in Trial.model_fields
+
+
+@pytest.mark.parametrize("status", [TrialStatus.ABANDONED, TrialStatus.FAILED])
+def test_unfinished_trials_may_have_no_sharpe(status: TrialStatus) -> None:
+    """I-12 needs abandoned and failed trials recorded, and they have no result."""
+
+    trial = Trial(
+        trial_id="t-1",
+        spec_id="s-1",
+        agent_run_id="r-1",
+        status=status,
+        sharpe=None,
+        registered_at_sequence=1,
+    )
+
+    assert trial.sharpe is None
+    assert trial.status is status
