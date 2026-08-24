@@ -28,6 +28,11 @@ SIGNING_PRIMITIVES = frozenset({"sign_bytes", "sign_file", "load_private_key", "
 # Nothing on the runtime startup path may reach either.
 SIGNING_ALLOWED = frozenset({SIGNING_MODULE, SOURCE_ROOT / "cli.py"})
 RUNTIME_STARTUP_PATH = SOURCE_ROOT / "ops" / "health.py"
+# I-11: the provider boundary must never be able to reach broker credentials,
+# the database that stores runtime state, or process settings.
+CREDENTIAL_BEARING = frozenset(
+    {"trading_house.settings", "trading_house.database", "trading_house.brokers", "psycopg"}
+)
 
 
 def _source_files() -> list[Path]:
@@ -55,6 +60,29 @@ def _imported_names(tree: ast.Module) -> set[str]:
         if isinstance(node, ast.Import | ast.ImportFrom):
             names.update(alias.name for alias in node.names)
     return names
+
+
+def _imported_modules(tree: ast.Module) -> set[str]:
+    """Fully-qualified module paths, for both import forms."""
+
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return modules
+
+
+def _reaches(tree: ast.Module, forbidden: frozenset[str]) -> set[str]:
+    """Modules imported that are, or live under, a forbidden path."""
+
+    return {
+        module
+        for module in _imported_modules(tree)
+        if any(module == root or module.startswith(f"{root}.") for root in forbidden)
+    }
 
 
 def _referenced_attributes(tree: ast.Module) -> set[str]:
@@ -202,6 +230,21 @@ def test_no_agent_provider_reaches_the_database_or_broker() -> None:
     """I-11: the provider boundary must not be able to see credentials."""
 
     tree = ast.parse((SOURCE_ROOT / "agents" / "providers" / "base.py").read_text(encoding="utf-8"))
-    forbidden = {"psycopg", "trading_house.settings", "trading_house.database"}
-    assert not _imported_top_level(tree) & {"psycopg"}
-    assert not {name for name in _imported_names(tree) if name in forbidden}
+
+    assert not _reaches(tree, CREDENTIAL_BEARING)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.settings import RuntimeSettings",
+        "from trading_house.database import open_runtime_connection",
+        "from trading_house.brokers.base import BrokerAdapter",
+        "import psycopg",
+        "from psycopg import connect",
+    ],
+)
+def test_credential_reach_detection_actually_works(statement: str) -> None:
+    """Prove the provider guard fires, so a passing suite is not a false negative."""
+
+    assert _reaches(ast.parse(statement + "\n"), CREDENTIAL_BEARING)

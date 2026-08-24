@@ -53,6 +53,8 @@ def test_a_run_records_everything_needed_to_reconstruct_it() -> None:
         "diff_sha256",
         "outcome",
         "tokens_used",
+        "cost_usd_millis_used",
+        "tool_calls_used",
         "started_at",
         "finished_at",
     }

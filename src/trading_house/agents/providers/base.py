@@ -78,6 +78,8 @@ class AgentRun(CanonicalModel):
     diff_sha256: NonEmptyStr | None
     outcome: RunOutcome
     tokens_used: NonNegativeInt
+    cost_usd_millis_used: NonNegativeInt
+    tool_calls_used: NonNegativeInt
     started_at: datetime
     finished_at: datetime
 
