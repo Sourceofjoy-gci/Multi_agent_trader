@@ -83,6 +83,13 @@ HorizonLimits = Annotated[ScalpLimits | SwingLimits, Field(discriminator="horizo
 
 
 class BookLimits(ConstitutionModel):
+    """A single book's own budgets.
+
+    ``risk_per_trade_pct``, ``daily_loss_stop_pct``, ``max_drawdown_halt_pct`` and
+    ``max_gross_leverage`` are all relative to this book's own capital, i.e.
+    ``capital_fraction`` of total firm equity, not firm equity directly.
+    """
+
     capital_fraction: PositiveDecimal
     horizon: Horizon
     asset_classes: tuple[AssetClass, ...] = Field(min_length=1)
@@ -132,6 +139,9 @@ class FirmLimits(ConstitutionModel):
     These are the only place correlation and leverage budgets may live: all
     books share one broker account and therefore one margin pool, so a
     per-book budget would hide correlated exposure instead of containing it.
+    Every percentage and leverage figure here is relative to total firm
+    equity, unlike ``BookLimits``'s figures, which are relative to that
+    book's own ``capital_fraction`` slice.
     """
 
     max_total_drawdown_halt_pct: Percentage

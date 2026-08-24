@@ -2,6 +2,16 @@
 # only by accumulated live evidence, never to chase a return target.
 version: 1
 signature_required: true
+# Percentage convention: a book's own percentage fields (risk_per_trade_pct,
+# daily_loss_stop_pct, max_drawdown_halt_pct) and its max_gross_leverage are
+# relative to THAT BOOK'S OWN capital, i.e. its capital_fraction share of
+# total firm equity -- not total firm equity directly. Firm-level percentage
+# and leverage fields under `firm:` below are relative to total firm equity.
+#
+# Worked example: fx_scalp allows 3 concurrent positions at risk_per_trade_pct
+# 0.25% each, within a capital_fraction of 0.30 (a 30% slice of firm equity).
+# In firm-equity terms that worst case is 3 x 0.25% x 0.30 = 0.225% of firm
+# equity at risk simultaneously -- not 0.75%.
 books:
   fx_scalp:
     capital_fraction: 0.30

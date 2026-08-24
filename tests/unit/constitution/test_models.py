@@ -210,6 +210,25 @@ def test_every_declared_book_horizon_has_safe_mode_triggers() -> None:
     assert declared <= set(constitution.safe_mode_triggers)
 
 
+def test_missing_horizon_safe_mode_triggers_is_rejected() -> None:
+    """fx_swing, equity_swing, and sleeve are all swing-horizon books.
+
+    Removing the ``swing:`` safe-mode-trigger block (the last block in the
+    file) must fail closed rather than silently leaving those three books
+    with no safe-mode coverage. This is a truncation, not a key rename: a
+    rename would instead fail earlier and for a different reason, in the
+    ``Horizon(key)`` conversion, so it would not exercise
+    ``every_book_horizon_has_triggers`` at all.
+    """
+
+    marker = b"\n  swing:\n"
+    assert CONSTITUTION_BYTES.count(marker) == 1
+    source = CONSTITUTION_BYTES[: CONSTITUTION_BYTES.index(marker)] + b"\n"
+
+    with pytest.raises(ConfigurationError):
+        parse_constitution_yaml(source)
+
+
 def test_capital_fractions_must_sum_to_exactly_one() -> None:
     source = CONSTITUTION_BYTES.replace(b"capital_fraction: 0.30", b"capital_fraction: 0.31")
     with pytest.raises(ConfigurationError):
