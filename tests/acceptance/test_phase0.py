@@ -41,6 +41,8 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 CONSTITUTION = CONFIG_DIR / "risk_constitution.yaml"
 SIGNATURE = CONFIG_DIR / "risk_constitution.yaml.sig"
 PUBLIC_KEY = CONFIG_DIR / "risk_constitution.public.pem"
+VENUE_BINDING = CONFIG_DIR / "venue_binding.mt5.yaml"
+VENUE_BINDING_SIGNATURE = CONFIG_DIR / "venue_binding.mt5.yaml.sig"
 FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"MetaTrader5", "langgraph", "openai", "anthropic", "ccxt"})
 
 
@@ -67,6 +69,8 @@ def test_checked_in_verification_artifacts_exist() -> None:
     assert CONSTITUTION.is_file()
     assert SIGNATURE.is_file()
     assert PUBLIC_KEY.is_file()
+    assert VENUE_BINDING.is_file()
+    assert VENUE_BINDING_SIGNATURE.is_file()
     assert not list(CONFIG_DIR.glob("*private*")), "no private key may be checked in"
 
 

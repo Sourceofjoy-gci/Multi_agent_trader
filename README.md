@@ -1,9 +1,9 @@
-# Trading House — Phase 0 Safety Foundation
+# Trading House — Phase 0 / 0.5 Safety Foundation
 
-> **Phase 0 cannot trade.** There is no broker connection, no strategy, no
-> sizing, no order path, and no LLM agent. That absence is deliberate and is
-> enforced by tests. **Phase 1 may begin only after the acceptance suite below
-> is green.**
+> **This repository still cannot trade.** There is no broker connection, no
+> strategy, no sizing, no order path, and no LLM agent. That absence is
+> deliberate and is enforced by tests. **Phase 1 may begin only after the
+> acceptance suite below is green.**
 
 Phase 0 establishes five guarantees:
 
@@ -17,8 +17,15 @@ Phase 0 establishes five guarantees:
 5. Startup reports ready only after configuration, database, migration and
    audit-integrity checks all pass.
 
+Phase 0.5 revises the contracts those guarantees protect, without adding a
+trading path: canonical data (`core/values.py`, `core/instruments.py`,
+`core/schemas.py`) is venue-neutral, broker-shaped facts (MT5 magic numbers,
+retcodes, server symbols) live only behind the venue-ref indirection in
+`core/venue.py` and the signed venue binding, and the risk constitution is
+split into four horizon-scoped books — see [Books](#books) below.
+
 Design: [Phase 0 foundation](docs/superpowers/specs/2026-08-03-phase-0-foundation-design.md).
-Next: [Phase 0.5 architecture revision](docs/superpowers/specs/2026-08-22-trading-house-architecture-revision-design.md).
+Revision: [Phase 0.5 architecture revision](docs/superpowers/specs/2026-08-22-trading-house-architecture-revision-design.md).
 
 ## Prerequisites
 
@@ -81,6 +88,32 @@ Database owners and superusers can always alter PostgreSQL data, so permissions
 alone are not presented as tamper-proof. The independently recomputed hash chain
 is what makes tampering *detectable* — see `audit verify`.
 
+## Books
+
+The signed risk constitution declares four books, each with its own capital
+fraction and horizon-scoped limits:
+
+| Book | Horizon | Capital fraction | Asset classes |
+|---|---|---|---|
+| `fx_scalp` | scalp | 0.30 | fx, metal |
+| `fx_swing` | swing | 0.45 | fx, metal |
+| `equity_swing` | swing | 0.15 | equity_cfd |
+| `sleeve` | swing | 0.10 | fx, metal |
+
+All four trade through one MT5 account and therefore share one margin pool.
+A book accounts for its own risk — capital fraction, per-trade risk, drawdown
+halts, leverage — but does not *ring-fence* it: an `fx_scalp` EURUSD long and
+an `fx_swing` EURUSD long are the same underlying market exposure held under
+two book labels, and only the firm-level limits in `risk_constitution.yaml`
+(`max_aggregate_open_risk_pct`, `max_correlated_cluster_risk_pct`,
+`max_single_instrument_risk_pct`, `max_gross_leverage`) see and cap that
+combined exposure. See `tests/acceptance/test_risk_authority.py`.
+
+Book identity is venue-neutral. The signed venue binding
+(`config/venue_binding.mt5.yaml`) is the only place that maps each book to an
+MT5 magic-number range, and each canonical instrument (`fx.eurusd`,
+`metal.xauusd`) to a server symbol — see `constitution binding` below.
+
 ## Operator commands
 
 ```bash
@@ -90,6 +123,7 @@ uv run trading-house --help
 | Command | Purpose |
 |---|---|
 | `trading-house constitution verify` | Verify the signature and report version and hashes |
+| `trading-house constitution binding` | Verify the signed venue binding and report its venue, books, and instruments |
 | `trading-house constitution sign` | Sign exact constitution bytes offline |
 | `trading-house db check` | Confirm the database is reachable and at the expected revision |
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
@@ -103,6 +137,17 @@ stderr. No command prints a path, credential, or key.
 ```bash
 uv run trading-house constitution verify
 ```
+
+### Verify the venue binding
+
+```bash
+uv run trading-house constitution binding
+```
+
+Reports the venue (`mt5`), and the sorted books and instruments the signed
+binding covers. The binding carries everything that would change if the firm
+switched brokers — magic-number ranges per book, server symbols per
+instrument — so the constitution itself never has to.
 
 ### Sign a constitution offline
 
@@ -121,6 +166,20 @@ rename, and drops the key reference before exit.
 `config/risk_constitution.public.pem` is committed. The acceptance suite fails if
 anything matching `*private*` appears in `config/`. `.gitattributes` marks
 `*.pem` and `*.sig` binary so no platform rewrites the bytes the signature covers.
+
+Two artifacts are signed offline with the same key and the same command shape,
+and both are checked in alongside their signatures:
+
+| Signed artifact | Signature | Carries |
+|---|---|---|
+| `config/risk_constitution.yaml` | `config/risk_constitution.yaml.sig` | Venue-neutral risk limits, per book and firm-wide |
+| `config/venue_binding.mt5.yaml` | `config/venue_binding.mt5.yaml.sig` | The MT5-specific projection: magic-number range per book, server symbol per instrument |
+
+Re-sign the binding the same way as the constitution, pointing at its own path:
+
+```bash
+uv run trading-house constitution sign --constitution config/venue_binding.mt5.yaml --private-key .local/keys/risk_constitution.private.pem --signature-output config/venue_binding.mt5.yaml.sig --force
+```
 
 ### Check readiness
 
@@ -174,7 +233,7 @@ and the gate is enforced on Linux.
 | `tests/unit` | Contracts, clocks, errors, signing, canonical hashing, CLI |
 | `tests/property` | Hypothesis invariants for UTC, signatures, canonical JSON, chains |
 | `tests/integration` | Real PostgreSQL: migrations, privileges, appends, tamper detection |
-| `tests/acceptance` | Architecture guards and the Phase 0 end-to-end gate |
+| `tests/acceptance` | Architecture guards and the Phase 0 / 0.5 end-to-end gates |
 
 ### The Phase 0 acceptance gate
 
@@ -186,7 +245,15 @@ This applies migrations with migrator credentials, verifies the checked-in
 constitution, appends as the runtime role, recomputes the chain, runs the
 readiness gate, re-verifies, and asserts no broker or agent dependency exists.
 
-## What Phase 0 deliberately excludes
+`tests/acceptance/test_phase0_5.py` adds the Phase 0.5 gate: the revised,
+venue-neutral constitution verifies and still declares all four books, the
+signed venue binding verifies and covers every one of those books, the
+constitution YAML names no venue, and `core/values.py`, `core/instruments.py`
+and `core/schemas.py` never reference a broker-specific encoding (magic
+numbers, retcodes, fill modes). `core/venue.py` is deliberately exempt — it is
+the one place `Mt5VenueRef` is allowed to carry those facts.
+
+## What this foundation deliberately excludes
 
 MetaTrader 5 or any broker; strategies, sizing, risk evaluation or execution;
 market data and backtesting; LangGraph or any LLM SDK; web APIs and dashboards;

@@ -16,7 +16,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
 import typer
@@ -25,6 +25,7 @@ from pydantic import JsonValue, ValidationError
 
 from trading_house import __version__
 from trading_house.audit.repository import PostgresAuditLedger
+from trading_house.constitution.binding import load_venue_binding
 from trading_house.constitution.loader import load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
 from trading_house.core.clock import SystemClock
@@ -48,6 +49,8 @@ from trading_house.settings import RuntimeSettings
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
 DEFAULT_SIGNATURE = Path("config/risk_constitution.yaml.sig")
 DEFAULT_PUBLIC_KEY = Path("config/risk_constitution.public.pem")
+DEFAULT_BINDING = Path("config/venue_binding.mt5.yaml")
+DEFAULT_BINDING_SIGNATURE = Path("config/venue_binding.mt5.yaml.sig")
 DEFAULT_ALEMBIC_CONFIG = Path("alembic.ini")
 
 EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
@@ -152,6 +155,25 @@ def constitution_verify(
             "constitution_version": loaded.constitution.version,
             "constitution_sha256": loaded.constitution_sha256,
             "public_key_fingerprint": loaded.public_key_fingerprint,
+        }
+
+    _run(operation)
+
+
+@constitution_app.command("binding")
+def constitution_binding(
+    binding: Annotated[Path, typer.Option("--binding")] = DEFAULT_BINDING,
+    signature: Annotated[Path, typer.Option("--signature")] = DEFAULT_BINDING_SIGNATURE,
+    public_key: Annotated[Path, typer.Option("--public-key")] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Verify the signed venue binding and report its coverage."""
+
+    def operation() -> dict[str, JsonValue]:
+        loaded = load_venue_binding(binding, signature, public_key)
+        return {
+            "venue": loaded.venue,
+            "books": cast(list[JsonValue], sorted(loaded.books)),
+            "instruments": cast(list[JsonValue], sorted(loaded.instruments)),
         }
 
     _run(operation)
