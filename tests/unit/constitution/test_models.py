@@ -40,7 +40,7 @@ def valid_data() -> dict[str, object]:
                 "horizon": "swing",
                 "asset_classes": ["fx", "metal"],
                 "risk_per_trade_pct": Decimal("0.75"),
-                "max_concurrent_positions": 6,
+                "max_concurrent_positions": 3,
                 "daily_loss_stop_pct": Decimal("2.5"),
                 "max_drawdown_halt_pct": Decimal("10.0"),
                 "max_gross_leverage": Decimal("5.0"),
@@ -58,7 +58,7 @@ def valid_data() -> dict[str, object]:
                 "horizon": "swing",
                 "asset_classes": ["equity_cfd"],
                 "risk_per_trade_pct": Decimal("0.50"),
-                "max_concurrent_positions": 4,
+                "max_concurrent_positions": 3,
                 "daily_loss_stop_pct": Decimal("2.0"),
                 "max_drawdown_halt_pct": Decimal("8.0"),
                 "max_gross_leverage": Decimal("3.0"),
@@ -284,6 +284,37 @@ def test_a_books_limits_must_match_its_declared_horizon(valid_data: dict[str, ob
         Constitution.model_validate(valid_data)
 
 
+def test_concurrency_cannot_outrun_the_daily_stop(valid_data: dict[str, object]) -> None:
+    """A correlated cluster of concurrent positions must be arrested by the
+    daily loss stop, not breach it (fix-wave finding 7)."""
+
+    books = valid_data["books"]
+    assert isinstance(books, dict)
+    fx_scalp = books["fx_scalp"]
+    assert isinstance(fx_scalp, dict)
+    fx_scalp["max_concurrent_positions"] = 10
+    fx_scalp["risk_per_trade_pct"] = Decimal("0.5")
+    fx_scalp["daily_loss_stop_pct"] = Decimal("1.5")
+
+    with pytest.raises(ValidationError, match="exceeds daily_loss_stop_pct"):
+        Constitution.model_validate(valid_data)
+
+
+def test_concurrency_at_the_daily_stop_boundary_is_permitted(valid_data: dict[str, object]) -> None:
+    """The check is <=, not <: sitting exactly at the stop is coherent, not a breach."""
+
+    books = valid_data["books"]
+    assert isinstance(books, dict)
+    fx_scalp = books["fx_scalp"]
+    assert isinstance(fx_scalp, dict)
+    fx_scalp["max_concurrent_positions"] = 3
+    fx_scalp["risk_per_trade_pct"] = Decimal("0.5")
+    fx_scalp["daily_loss_stop_pct"] = Decimal("1.5")
+
+    model = Constitution.model_validate(valid_data)
+    assert model.books["fx_scalp"].max_concurrent_positions == 3
+
+
 def test_capital_fractions_must_sum_exactly_to_one(valid_data: dict[str, object]) -> None:
     books = valid_data["books"]
     assert isinstance(books, dict)
@@ -422,11 +453,17 @@ def test_percentage_limits_reject_values_above_100(
 
 
 def test_percentage_limit_accepts_100(valid_data: dict[str, object]) -> None:
+    """Also widens max_concurrent_positions to 1 and daily_loss_stop_pct to 100
+    so this stays a pure test of the Percentage upper bound and does not trip
+    the unrelated concurrency-vs-stop coherence check below."""
+
     books = valid_data["books"]
     assert isinstance(books, dict)
     fx_scalp = books["fx_scalp"]
     assert isinstance(fx_scalp, dict)
     fx_scalp["risk_per_trade_pct"] = Decimal("100")
+    fx_scalp["max_concurrent_positions"] = 1
+    fx_scalp["daily_loss_stop_pct"] = Decimal("100")
 
     model = Constitution.model_validate(valid_data)
     assert model.books["fx_scalp"].risk_per_trade_pct == Decimal("100")

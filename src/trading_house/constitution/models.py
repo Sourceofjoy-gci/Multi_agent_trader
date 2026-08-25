@@ -132,16 +132,38 @@ class BookLimits(ConstitutionModel):
             raise ValueError("horizon limits must match the book's declared horizon")
         return self
 
+    @model_validator(mode="after")
+    def concurrency_cannot_outrun_the_daily_stop(self) -> Self:
+        """A fully correlated cluster of concurrent positions must be arrested
+        by the daily loss stop, not breach it. If every open position at
+        ``risk_per_trade_pct`` moves against the book at once, the combined
+        loss must not exceed ``daily_loss_stop_pct``."""
+
+        worst_case = self.max_concurrent_positions * self.risk_per_trade_pct
+        if worst_case > self.daily_loss_stop_pct:
+            raise ValueError(
+                f"max_concurrent_positions ({self.max_concurrent_positions}) x "
+                f"risk_per_trade_pct ({self.risk_per_trade_pct}) = {worst_case} exceeds "
+                f"daily_loss_stop_pct ({self.daily_loss_stop_pct}); a correlated cluster "
+                "would breach the stop instead of being arrested by it"
+            )
+        return self
+
 
 class FirmLimits(ConstitutionModel):
     """Cross-book budgets binding the whole firm (I-16).
 
-    These are the only place correlation and leverage budgets may live: all
-    books share one broker account and therefore one margin pool, so a
-    per-book budget would hide correlated exposure instead of containing it.
-    Every percentage and leverage figure here is relative to total firm
-    equity, unlike ``BookLimits``'s figures, which are relative to that
-    book's own ``capital_fraction`` slice.
+    Correlation and aggregate-risk budgets (``max_aggregate_open_risk_pct``,
+    ``max_correlated_cluster_risk_pct``, ``max_single_instrument_risk_pct``)
+    are firm-only: all books share one broker account and therefore one
+    margin pool, so a per-book budget would hide correlated exposure instead
+    of containing it. Leverage is different -- ``max_gross_leverage`` exists
+    at BOTH levels: a per-book ceiling is necessary (it bounds that book's
+    own risk-taking) but not sufficient, because the books draw on the same
+    shared margin pool. This firm-level value is what actually binds across
+    that pool. Every percentage and leverage figure here is relative to
+    total firm equity, unlike ``BookLimits``'s figures, which are relative to
+    that book's own ``capital_fraction`` slice.
     """
 
     max_total_drawdown_halt_pct: Percentage

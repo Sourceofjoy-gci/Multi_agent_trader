@@ -58,6 +58,19 @@ def _verify_args() -> list[str]:
     ]
 
 
+def _binding_args() -> list[str]:
+    return [
+        "constitution",
+        "binding",
+        "--binding",
+        str(CONFIG_DIR / "venue_binding.mt5.yaml"),
+        "--signature",
+        str(CONFIG_DIR / "venue_binding.mt5.yaml.sig"),
+        "--public-key",
+        str(CONFIG_DIR / "risk_constitution.public.pem"),
+    ]
+
+
 def _raiser(error: Exception):
     def _raise(*_: object, **__: object) -> Any:
         raise error
@@ -110,6 +123,27 @@ def test_signature_failure_uses_stable_exit_code(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == cli.ExitCode.SIGNATURE
     assert "PRIVATE" not in result.stdout
     assert "signature verification failed" in result.stderr
+
+
+def test_constitution_binding_reports_venue_books_and_instruments() -> None:
+    result = runner.invoke(cli.app, _binding_args())
+
+    assert result.exit_code == cli.ExitCode.OK
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["venue"] == "mt5"
+    assert "fx_scalp" in payload["books"]
+    assert "fx.eurusd" in payload["instruments"]
+
+
+def test_constitution_binding_signature_failure_uses_stable_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "load_venue_binding", _raiser(SignatureVerificationError()))
+
+    result = runner.invoke(cli.app, _binding_args())
+
+    assert result.exit_code == cli.ExitCode.SIGNATURE
 
 
 def test_configuration_failure_uses_stable_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:

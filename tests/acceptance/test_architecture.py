@@ -33,6 +33,16 @@ RUNTIME_STARTUP_PATH = SOURCE_ROOT / "ops" / "health.py"
 CREDENTIAL_BEARING = frozenset(
     {"trading_house.settings", "trading_house.database", "trading_house.brokers", "psycopg"}
 )
+AGENTS_ROOT = SOURCE_ROOT / "agents"
+# The reverse of CREDENTIAL_BEARING: no process holding broker credentials may
+# execute agent-authored code (I-11's other direction). These are exactly the
+# modules that could hold or reach credentials.
+CREDENTIAL_HOLDING_ROOTS = (
+    SOURCE_ROOT / "brokers",
+    SOURCE_ROOT / "database",
+    SOURCE_ROOT / "settings.py",
+)
+AGENTS_MODULE = frozenset({"trading_house.agents"})
 
 
 def _source_files() -> list[Path]:
@@ -227,11 +237,21 @@ def test_forbidden_import_detection_actually_works(forbidden: str) -> None:
 
 
 def test_no_agent_provider_reaches_the_database_or_broker() -> None:
-    """I-11: the provider boundary must not be able to see credentials."""
+    """I-11: no module anywhere under agents/ may be able to see credentials.
 
-    tree = ast.parse((SOURCE_ROOT / "agents" / "providers" / "base.py").read_text(encoding="utf-8"))
+    Walking every file (not just providers/base.py) means a future concrete
+    provider under agents/providers/ -- precisely where a credential reach
+    would occur -- stays covered instead of the guard silently going blind.
+    """
 
-    assert not _reaches(tree, CREDENTIAL_BEARING)
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(AGENTS_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        reached = _reaches(tree, CREDENTIAL_BEARING)
+        if reached:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
 
 
 @pytest.mark.parametrize(
@@ -248,3 +268,33 @@ def test_credential_reach_detection_actually_works(statement: str) -> None:
     """Prove the provider guard fires, so a passing suite is not a false negative."""
 
     assert _reaches(ast.parse(statement + "\n"), CREDENTIAL_BEARING)
+
+
+def test_no_credential_holding_module_imports_agent_authored_code() -> None:
+    """I-11, the unguarded direction: no process holding broker credentials
+    (brokers/, database/, settings.py) may execute agent-authored code."""
+
+    offenders: dict[str, list[str]] = {}
+    for root in CREDENTIAL_HOLDING_ROOTS:
+        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            reached = _reaches(tree, AGENTS_MODULE)
+            if reached:
+                offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import trading_house.agents",
+        "from trading_house.agents.providers.base import AgentRun",
+        "from trading_house.agents.providers import base",
+    ],
+)
+def test_credential_holder_reach_into_agents_detection_actually_works(statement: str) -> None:
+    """Prove the reverse guard fires, so a passing suite is not a false negative."""
+
+    assert _reaches(ast.parse(statement + "\n"), AGENTS_MODULE)

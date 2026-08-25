@@ -4,8 +4,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol, Self, runtime_checkable
 
-from pydantic import NonNegativeInt, PositiveInt, model_validator
+from pydantic import NonNegativeInt, PositiveInt, field_validator, model_validator
 
+from trading_house.core.clock import ensure_utc
+from trading_house.core.errors import TimestampError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
 
 
@@ -59,11 +61,28 @@ class SandboxHandle(CanonicalModel):
             raise ValueError("a sandbox may never hold broker credentials")
         return self
 
+    @model_validator(mode="after")
+    def no_network_egress_is_modelled(self) -> Self:
+        """Spec: the research sandbox has no network egress except a package
+        mirror, which this phase does not model. Until it is, egress stays
+        unrepresentable rather than silently permitted."""
+
+        if self.network_egress_allowed:
+            raise ValueError("no sandbox may be granted network egress in this phase")
+        return self
+
 
 class AgentTask(CanonicalModel):
     task_id: NonEmptyStr
     plane: Plane
     instruction_sha256: NonEmptyStr
+
+    @field_validator("plane")
+    @classmethod
+    def hot_plane_hosts_no_agents(cls, value: Plane) -> Plane:
+        if value is Plane.HOT:
+            raise ValueError("the hot path hosts no agents at all")
+        return value
 
 
 class AgentRun(CanonicalModel):
@@ -83,8 +102,33 @@ class AgentRun(CanonicalModel):
     started_at: datetime
     finished_at: datetime
 
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
+    @model_validator(mode="after")
+    def timestamps_are_ordered(self) -> Self:
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at must not precede started_at")
+        return self
+
 
 @runtime_checkable
 class AgentProvider(Protocol):
     def capabilities(self) -> ProviderCapabilities: ...
     def run(self, task: AgentTask, sandbox: SandboxHandle, budget: RunBudget) -> AgentRun: ...
+
+
+def may_execute_agent_code(capabilities: ProviderCapabilities, sandbox: SandboxHandle) -> bool:
+    """I-11: a shell-capable provider may only run where the plane permits a shell.
+
+    ``False`` exactly when ``capabilities.can_run_shell`` is True but
+    ``sandbox.plane.shell_permitted`` is False -- a shell-capable provider
+    paired with a plane that must not run one.
+    """
+
+    return capabilities.can_run_shell <= sandbox.plane.shell_permitted

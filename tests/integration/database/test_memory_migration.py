@@ -68,8 +68,14 @@ def test_trials_are_append_only(database: DatabaseHarness) -> None:
     with psycopg.connect(database.migration_dsn) as connection, connection.cursor() as cursor:
         cursor.execute("SET ROLE trading_house_owner")
         cursor.execute(
-            "INSERT INTO research.trials (trial_id, spec_id, agent_run_id, status) "
-            "VALUES ('t-append-only-check', 'spec-1', 'run-1', 'registered')"
+            "INSERT INTO research.trials ("
+            "trial_id, spec_id, agent_run_id, status, registered_at_sequence, "
+            "previous_hash, entry_hash"
+            ") VALUES ("
+            "'t-append-only-check', 'spec-1', 'run-1', 'abandoned', 1, "
+            "pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), "
+            "pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')"
+            ")"
         )
         with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
             cursor.execute("DELETE FROM research.trials")

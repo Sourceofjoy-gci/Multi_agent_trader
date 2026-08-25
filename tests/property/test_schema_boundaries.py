@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args
 from uuid import uuid4
 
 import pytest
@@ -12,7 +12,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
 
-from trading_house.audit.models import AuditEvent
+from trading_house.agents.providers.base import AgentRun, RunOutcome
+from trading_house.audit.models import AuditEvent, AuditRecord
 from trading_house.brokers.base import (
     MarketSnapshot,
     Quote,
@@ -29,6 +30,7 @@ from trading_house.core.schemas import (
     TradeProposal,
 )
 from trading_house.core.values import IntentState, PositiveQuantity, Quantity, TimeInForce
+from trading_house.core.venue import Mt5VenueRef, Venue
 from trading_house.memory.models import AgentBelief, MemoryStore, ObservedFact, WriterKind
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
@@ -96,7 +98,6 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "outcome": None,
     },
     PositionState: {
-        "position_ticket": 1,
         "intent_id": "i-1",
         "strategy_id": "s-1",
         "book": "fx_scalp",
@@ -112,7 +113,7 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "mae_r": 0.0,
         "mfe_r": 0.0,
         "initial_risk_distance": Decimal("0.05"),
-        "venue_ref": None,
+        "venue_ref": Mt5VenueRef(venue=Venue.MT5, magic=110001, server_symbol="EURUSD.raw"),
     },
     AuditEvent: {
         "schema_version": 1,
@@ -122,6 +123,30 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "actor": "property-suite",
         "actor_type": "test",
         "payload": {"ok": True},
+    },
+    AuditRecord: {
+        "sequence_number": 1,
+        "event_id": uuid4(),
+        "canonical_event": b"{}",
+        "event_json": {"ok": True},
+        "previous_hash": bytes(32),
+        "entry_hash": bytes(32),
+        "received_at": AWARE,
+    },
+    AgentRun: {
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "provider_id": "provider-1",
+        "model_id": "model-1",
+        "prompt_sha256": "prompt-hash",
+        "transcript_sha256": "transcript-hash",
+        "diff_sha256": None,
+        "outcome": RunOutcome.COMPLETED,
+        "tokens_used": 100,
+        "cost_usd_millis_used": 100,
+        "tool_calls_used": 1,
+        "started_at": AWARE,
+        "finished_at": AWARE,
     },
     Quote: {
         "instrument_id": "fx.eurusd",
@@ -188,6 +213,44 @@ def _canonical_models() -> set[type[BaseModel]]:
             found.add(subclass)
             pending.append(subclass)
     return found
+
+
+def _declares_a_datetime_field(model: type[BaseModel]) -> bool:
+    """True if any of the model's fields is (or contains) ``datetime``.
+
+    Handles both a bare ``datetime`` annotation and ``datetime | None`` so a
+    future optional timestamp field does not slip past this check.
+    """
+
+    return any(
+        field.annotation is datetime or datetime in get_args(field.annotation)
+        for field in model.model_fields.values()
+    )
+
+
+def test_every_datetime_bearing_canonical_model_has_a_builder() -> None:
+    """Close the hole, not just the instance (I-10, CRITICAL fix-wave finding 1).
+
+    A model can ship with a live naive-datetime hole simply by never being
+    registered in ``BUILDERS`` -- ``test_naive_datetimes_are_rejected_everywhere``
+    is vacuous for anything missing from that dict. This walks the same
+    subclass tree ``_canonical_models()`` uses and demands a builder for every
+    *concrete* (leaf) model that declares a datetime field. Abstract bases
+    that exist only to be subclassed (``Stamped``, ``_PointInTime``,
+    ``AuditModel``) are skipped: they have no builder of their own because
+    nothing constructs them directly -- their concrete subclasses are checked
+    instead, and each one already appears in ``BUILDERS``.
+    """
+
+    offenders = sorted(
+        model.__name__
+        for model in _canonical_models()
+        if not model.__subclasses__()  # leaf: no concrete subclass will be checked instead
+        and _declares_a_datetime_field(model)
+        and model not in BUILDERS
+    )
+
+    assert offenders == []
 
 
 @pytest.mark.parametrize("model", MODELS, ids=lambda model: model.__name__)

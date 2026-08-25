@@ -175,6 +175,11 @@ class RejectedRiskDecision(BaseRiskDecision):
     approved_quantity: Quantity
     stop_loss_price: None = None
     take_profit_price: None = None
+    # ge=0, le=0 is not a typo: it pins the value to exactly zero. A rejected
+    # decision must carry no risk, and Decimal has no Literal[0]-style way to
+    # say that, so the range is collapsed to a single permitted value instead.
+    # Widening either bound would silently permit non-zero risk on a REJECTED
+    # decision.
     risk_money: Annotated[Decimal, Field(ge=0, le=0)]
     risk_pct_of_book: Annotated[Decimal, Field(ge=0, le=0)]
 
@@ -220,7 +225,6 @@ class OrderIntent(CanonicalModel):
 
 
 class PositionState(CanonicalModel):
-    position_ticket: PositiveInt
     intent_id: NonEmptyStr | None
     strategy_id: NonEmptyStr
     book: BookId
@@ -236,7 +240,7 @@ class PositionState(CanonicalModel):
     mae_r: FiniteFloat
     mfe_r: FiniteFloat
     initial_risk_distance: Price
-    venue_ref: VenueRef | None = None
+    venue_ref: VenueRef
 
     @field_validator("opened_at_utc")
     @classmethod

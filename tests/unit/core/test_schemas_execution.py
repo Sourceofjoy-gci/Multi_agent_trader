@@ -47,7 +47,6 @@ def valid_intent() -> dict[str, object]:
 @pytest.fixture
 def valid_position() -> dict[str, object]:
     return {
-        "position_ticket": 1,
         "intent_id": "intent-1",
         "strategy_id": "momentum",
         "book": "fx_scalp",
@@ -63,7 +62,7 @@ def valid_position() -> dict[str, object]:
         "mae_r": -0.1,
         "mfe_r": 0.2,
         "initial_risk_distance": Decimal("0.02"),
-        "venue_ref": None,
+        "venue_ref": Mt5VenueRef(venue=Venue.MT5, magic=110001, server_symbol="EURUSD.raw"),
     }
 
 
@@ -169,6 +168,23 @@ def test_no_canonical_model_still_uses_lot_denominated_floats() -> None:
 def test_position_state_records_its_book_and_venue_reference() -> None:
     assert "book" in PositionState.model_fields
     assert "venue_ref" in PositionState.model_fields
+
+
+def test_position_state_carries_no_venue_encoding() -> None:
+    """Mirrors test_order_intent_carries_no_venue_encoding: position_ticket
+    duplicated Mt5VenueRef.position_ticket and forced integer position
+    identity, which a venue using UUID or string ids cannot satisfy."""
+
+    forbidden = {"position_ticket", "magic", "retcode", "broker_position_ticket"}
+    assert forbidden.isdisjoint(PositionState.model_fields)
+
+
+def test_position_state_requires_a_venue_reference(valid_position: dict[str, object]) -> None:
+    """A live position always exists at a venue."""
+
+    valid_position["venue_ref"] = None
+    with pytest.raises(ValidationError):
+        PositionState(**valid_position)
 
 
 @pytest.mark.parametrize(

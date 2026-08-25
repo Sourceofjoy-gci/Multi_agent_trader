@@ -1,6 +1,9 @@
 """A generated strategy is data until it is signed."""
 
 from enum import Enum
+from typing import Self
+
+from pydantic import model_validator
 
 from trading_house.core.values import AssetClass, BookId, CanonicalModel, Horizon, NonEmptyStr
 
@@ -35,3 +38,11 @@ class StrategyPackage(CanonicalModel):
     validation_report_sha256: NonEmptyStr
     signature_sha256: NonEmptyStr | None
     stage: PromotionStage
+
+    @model_validator(mode="after")
+    def only_a_human_signature_reaches_capital(self) -> Self:
+        if self.stage.requires_human_signature and self.signature_sha256 is None:
+            raise ValueError(
+                f"stage {self.stage.value!r} requires a human signature before it can be reached"
+            )
+        return self

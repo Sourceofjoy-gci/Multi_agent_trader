@@ -1,4 +1,8 @@
-"""Ed25519 signing helpers for the risk constitution."""
+"""Ed25519 signing helpers for signed artifacts (constitution, venue binding, and more).
+
+These helpers are artifact-agnostic: they sign and verify exact bytes and know
+nothing about YAML, the constitution schema, or any particular file's meaning.
+"""
 
 import base64
 import os
@@ -93,11 +97,11 @@ def generate_key_pair(private_path: Path, public_path: Path) -> None:
         raise SignatureVerificationError() from error
 
 
-def sign_file(constitution_path: Path, private_path: Path, signature_path: Path) -> None:
-    """Sign exact constitution bytes and write their Base64 signature."""
+def sign_file(artifact_path: Path, private_path: Path, signature_path: Path) -> None:
+    """Sign exact artifact bytes and write their Base64 signature."""
 
     private_key = load_private_key(private_path.read_bytes())
-    signature = sign_bytes(private_key, constitution_path.read_bytes())
+    signature = sign_bytes(private_key, artifact_path.read_bytes())
     signature_path.parent.mkdir(parents=True, exist_ok=True)
     signature_path.write_bytes(base64.b64encode(signature) + b"\n")
 

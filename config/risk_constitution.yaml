@@ -34,7 +34,7 @@ books:
     horizon: swing
     asset_classes: [fx, metal]
     risk_per_trade_pct: 0.75
-    max_concurrent_positions: 6
+    max_concurrent_positions: 3
     daily_loss_stop_pct: 2.5
     max_drawdown_halt_pct: 10.0
     max_gross_leverage: 5.0
@@ -50,7 +50,7 @@ books:
     horizon: swing
     asset_classes: [equity_cfd]
     risk_per_trade_pct: 0.50
-    max_concurrent_positions: 4
+    max_concurrent_positions: 3
     daily_loss_stop_pct: 2.0
     max_drawdown_halt_pct: 8.0
     max_gross_leverage: 3.0

@@ -4,10 +4,13 @@ from pydantic import ValidationError
 from trading_house.agents.providers.base import (
     AgentProvider,
     AgentRun,
+    AgentTask,
     Plane,
+    ProviderCapabilities,
     RunBudget,
     RunOutcome,
     SandboxHandle,
+    may_execute_agent_code,
 )
 
 
@@ -67,3 +70,57 @@ def test_budget_exceeded_is_a_first_class_outcome() -> None:
 
 def test_provider_surface_is_two_methods() -> None:
     assert {n for n in vars(AgentProvider) if not n.startswith("_")} == {"capabilities", "run"}
+
+
+def test_a_sandbox_may_not_be_granted_network_egress() -> None:
+    """Spec: the research sandbox has no network egress except a package
+    mirror, which this phase does not model -- so it stays unrepresentable."""
+
+    with pytest.raises(ValidationError, match="egress"):
+        SandboxHandle(
+            sandbox_id="s-1",
+            plane=Plane.RESEARCH_SANDBOX,
+            network_egress_allowed=True,
+            has_broker_credentials=False,
+        )
+
+
+def test_a_hot_plane_task_is_unrepresentable() -> None:
+    """Spec: the hot path hosts no agents at all."""
+
+    with pytest.raises(ValidationError, match="hot"):
+        AgentTask(task_id="t-1", plane=Plane.HOT, instruction_sha256="h-1")
+
+
+@pytest.mark.parametrize(
+    ("plane", "can_run_shell", "expected"),
+    [
+        (Plane.RESEARCH_SANDBOX, True, True),
+        (Plane.RESEARCH_SANDBOX, False, True),
+        (Plane.CONTROL, False, True),
+        (Plane.CONTROL, True, False),
+        (Plane.HOT, False, True),
+        (Plane.HOT, True, False),
+    ],
+)
+def test_may_execute_agent_code_matches_the_plane_capability_matrix(
+    plane: Plane, can_run_shell: bool, expected: bool
+) -> None:
+    """A shell-capable provider paired with a non-shell plane is the only
+    forbidden combination (I-11)."""
+
+    capabilities = ProviderCapabilities(
+        can_write_code=True,
+        can_run_shell=can_run_shell,
+        supports_tools=True,
+        max_context=1000,
+        deterministic_seed=True,
+    )
+    sandbox = SandboxHandle(
+        sandbox_id="s-1",
+        plane=plane,
+        network_egress_allowed=False,
+        has_broker_credentials=False,
+    )
+
+    assert may_execute_agent_code(capabilities, sandbox) is expected

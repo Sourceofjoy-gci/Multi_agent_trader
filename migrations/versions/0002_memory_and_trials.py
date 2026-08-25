@@ -43,13 +43,27 @@ def upgrade() -> None:
         """
     )
 
+    # Spec 2.4: both memory stores are append-only and hash-chained. previous_hash
+    # and entry_hash are added here, matching memory.observed_facts exactly, so the
+    # chain has somewhere to live. Populating them (computing entry_hash from the
+    # row plus the prior tail hash, as audit.append_event does) is a later phase --
+    # this migration only puts the columns and their size CHECKs in place so no
+    # further migration is needed once that computation exists.
     op.execute(
         """
         CREATE TABLE memory.agent_beliefs (
             belief_id TEXT PRIMARY KEY,
             agent_run_id TEXT NOT NULL,
             claim TEXT NOT NULL,
-            availability_time TIMESTAMPTZ NOT NULL
+            availability_time TIMESTAMPTZ NOT NULL,
+            previous_hash BYTEA NOT NULL,
+            entry_hash BYTEA NOT NULL,
+            CONSTRAINT beliefs_previous_hash_size CHECK (
+                pg_catalog.octet_length(previous_hash) = 32
+            ),
+            CONSTRAINT beliefs_entry_hash_size CHECK (
+                pg_catalog.octet_length(entry_hash) = 32
+            )
         )
         """
     )
@@ -62,7 +76,21 @@ def upgrade() -> None:
             agent_run_id TEXT NOT NULL,
             status TEXT NOT NULL,
             sharpe DOUBLE PRECISION,
-            registered_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
+            registered_at_sequence BIGINT NOT NULL,
+            previous_hash BYTEA NOT NULL,
+            entry_hash BYTEA NOT NULL,
+            CONSTRAINT trials_registered_at_sequence_positive CHECK (
+                registered_at_sequence > 0
+            ),
+            CONSTRAINT trials_status_known CHECK (
+                status IN ('completed', 'abandoned', 'failed')
+            ),
+            CONSTRAINT trials_previous_hash_size CHECK (
+                pg_catalog.octet_length(previous_hash) = 32
+            ),
+            CONSTRAINT trials_entry_hash_size CHECK (
+                pg_catalog.octet_length(entry_hash) = 32
+            )
         )
         """
     )
