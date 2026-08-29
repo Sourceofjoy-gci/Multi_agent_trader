@@ -125,32 +125,52 @@ def test_a_disabled_symbol_is_rejected() -> None:
         )
 
 
-def test_long_only_symbols_are_not_shortable() -> None:
+def test_long_only_symbols_cannot_open_short() -> None:
     contract = to_instrument_contract(
         _info(trade_mode=SYMBOL_TRADE_MODE_LONGONLY), instrument_id="equity_cfd.aapl"
     )
 
-    assert contract.shortable is False
+    assert contract.can_open_short is False
 
 
 @pytest.mark.parametrize(
-    ("trade_mode", "opens", "shortable"),
+    ("trade_mode", "can_open_long", "can_open_short"),
     [
         (SYMBOL_TRADE_MODE_FULL, True, True),
         (SYMBOL_TRADE_MODE_LONGONLY, True, False),
-        (SYMBOL_TRADE_MODE_SHORTONLY, True, True),
+        (SYMBOL_TRADE_MODE_SHORTONLY, False, True),
         (SYMBOL_TRADE_MODE_CLOSEONLY, False, False),
     ],
 )
 def test_trade_mode_drives_both_permission_flags(
-    trade_mode: int, opens: bool, shortable: bool
+    trade_mode: int, can_open_long: bool, can_open_short: bool
 ) -> None:
-    """CLOSEONLY must be distinguishable from LONGONLY: it permits no new orders."""
+    """SHORTONLY must be distinguishable from FULL, and CLOSEONLY from LONGONLY:
+    each direction of new-order permission has to be legible on its own."""
 
     contract = to_instrument_contract(_info(trade_mode=trade_mode), instrument_id="fx.eurusd")
 
-    assert contract.opens_new_positions is opens
-    assert contract.shortable is shortable
+    assert contract.can_open_long is can_open_long
+    assert contract.can_open_short is can_open_short
+
+
+def test_no_two_trade_modes_produce_the_same_permissions() -> None:
+    """A collapse here means a consumer cannot tell what it may actually do."""
+
+    modes = [
+        SYMBOL_TRADE_MODE_FULL,
+        SYMBOL_TRADE_MODE_LONGONLY,
+        SYMBOL_TRADE_MODE_SHORTONLY,
+        SYMBOL_TRADE_MODE_CLOSEONLY,
+    ]
+    pairs = [
+        (c.can_open_long, c.can_open_short)
+        for c in (
+            to_instrument_contract(_info(trade_mode=m), instrument_id="fx.eurusd") for m in modes
+        )
+    ]
+
+    assert len(set(pairs)) == len(modes)
 
 
 @pytest.mark.parametrize(

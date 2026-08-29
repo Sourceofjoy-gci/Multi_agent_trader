@@ -40,10 +40,8 @@ _PREFIX_ASSET_CLASS = {
     "equity_cfd": AssetClass.EQUITY_CFD,
 }
 
-_SHORTABLE_TRADE_MODES = frozenset({SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_SHORTONLY})
-_OPENING_TRADE_MODES = frozenset(
-    {SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_LONGONLY, SYMBOL_TRADE_MODE_SHORTONLY}
-)
+_LONG_TRADE_MODES = frozenset({SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_LONGONLY})
+_SHORT_TRADE_MODES = frozenset({SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_SHORTONLY})
 _RETURN_EXECUTION_MODES = frozenset(
     {SYMBOL_TRADE_EXECUTION_MARKET, SYMBOL_TRADE_EXECUTION_EXCHANGE}
 )
@@ -115,7 +113,7 @@ def to_instrument_contract(
         freeze_distance=max(decimal_of(info.trade_freeze_level) * point, price_increment),
         session_calendar_id=f"{asset_class.value}.default",
         financing=_financing_for(asset_class),
-        opens_new_positions=info.trade_mode in _OPENING_TRADE_MODES,
-        shortable=info.trade_mode in _SHORTABLE_TRADE_MODES,
+        can_open_long=info.trade_mode in _LONG_TRADE_MODES,
+        can_open_short=info.trade_mode in _SHORT_TRADE_MODES,
         supported_fills=fills,
     )
