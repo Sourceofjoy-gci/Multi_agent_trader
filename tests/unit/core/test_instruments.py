@@ -20,6 +20,7 @@ VALID: dict[str, object] = {
     "freeze_distance": Decimal("0.0001"),
     "session_calendar_id": "fx.24x5",
     "financing": FinancingModel.SWAP,
+    "opens_new_positions": True,
     "shortable": True,
     "supported_fills": frozenset({FillPolicy.IOC, FillPolicy.FOK}),
 }

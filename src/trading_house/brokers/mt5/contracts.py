@@ -26,6 +26,7 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_EXECUTION_MARKET,
     SYMBOL_TRADE_MODE_DISABLED,
     SYMBOL_TRADE_MODE_FULL,
+    SYMBOL_TRADE_MODE_LONGONLY,
     SYMBOL_TRADE_MODE_SHORTONLY,
     Mt5SymbolInfo,
 )
@@ -40,6 +41,9 @@ _PREFIX_ASSET_CLASS = {
 }
 
 _SHORTABLE_TRADE_MODES = frozenset({SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_SHORTONLY})
+_OPENING_TRADE_MODES = frozenset(
+    {SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_LONGONLY, SYMBOL_TRADE_MODE_SHORTONLY}
+)
 _RETURN_EXECUTION_MODES = frozenset(
     {SYMBOL_TRADE_EXECUTION_MARKET, SYMBOL_TRADE_EXECUTION_EXCHANGE}
 )
@@ -62,7 +66,11 @@ def asset_class_for(instrument_id: str) -> AssetClass:
 
 
 def supported_fills(filling_mode: int, trade_exemode: int) -> frozenset[FillPolicy]:
-    """Derive fill policies from the bitmask AND the execution mode."""
+    """Derive fill policies from the bitmask AND the execution mode.
+
+    Always returns at least ``{RETURN}`` — never empty — which is what makes
+    ``InstrumentContract.supported_fills``'s ``min_length=1`` safe.
+    """
 
     policies: set[FillPolicy] = set()
     if filling_mode & SYMBOL_FILLING_FOK:
@@ -92,8 +100,6 @@ def to_instrument_contract(
     point = decimal_of(info.point)
     price_increment = decimal_of(info.trade_tick_size)
     fills = supported_fills(info.filling_mode, info.trade_exemode)
-    if not fills:
-        raise ConfigurationError()
 
     return InstrumentContract(
         instrument_id=instrument_id,
@@ -109,6 +115,7 @@ def to_instrument_contract(
         freeze_distance=max(decimal_of(info.trade_freeze_level) * point, price_increment),
         session_calendar_id=f"{asset_class.value}.default",
         financing=_financing_for(asset_class),
+        opens_new_positions=info.trade_mode in _OPENING_TRADE_MODES,
         shortable=info.trade_mode in _SHORTABLE_TRADE_MODES,
         supported_fills=fills,
     )

@@ -45,6 +45,8 @@ class InstrumentContract(CanonicalModel):
     freeze_distance: PositiveDecimal
     session_calendar_id: NonEmptyStr
     financing: FinancingModel
+    # Whether new positions may be opened at all (false for close-only symbols).
+    opens_new_positions: bool
     shortable: bool
     supported_fills: frozenset[FillPolicy] = Field(min_length=1)
 

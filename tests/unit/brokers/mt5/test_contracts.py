@@ -8,9 +8,11 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_FILLING_IOC,
     SYMBOL_TRADE_EXECUTION_INSTANT,
     SYMBOL_TRADE_EXECUTION_MARKET,
+    SYMBOL_TRADE_MODE_CLOSEONLY,
     SYMBOL_TRADE_MODE_DISABLED,
     SYMBOL_TRADE_MODE_FULL,
     SYMBOL_TRADE_MODE_LONGONLY,
+    SYMBOL_TRADE_MODE_SHORTONLY,
     Mt5SymbolInfo,
 )
 from trading_house.brokers.mt5.contracts import (
@@ -129,6 +131,26 @@ def test_long_only_symbols_are_not_shortable() -> None:
     )
 
     assert contract.shortable is False
+
+
+@pytest.mark.parametrize(
+    ("trade_mode", "opens", "shortable"),
+    [
+        (SYMBOL_TRADE_MODE_FULL, True, True),
+        (SYMBOL_TRADE_MODE_LONGONLY, True, False),
+        (SYMBOL_TRADE_MODE_SHORTONLY, True, True),
+        (SYMBOL_TRADE_MODE_CLOSEONLY, False, False),
+    ],
+)
+def test_trade_mode_drives_both_permission_flags(
+    trade_mode: int, opens: bool, shortable: bool
+) -> None:
+    """CLOSEONLY must be distinguishable from LONGONLY: it permits no new orders."""
+
+    contract = to_instrument_contract(_info(trade_mode=trade_mode), instrument_id="fx.eurusd")
+
+    assert contract.opens_new_positions is opens
+    assert contract.shortable is shortable
 
 
 @pytest.mark.parametrize(
