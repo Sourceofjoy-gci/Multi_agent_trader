@@ -10,6 +10,8 @@ class ExitCode(IntEnum):
     MIGRATION = 5
     AUDIT_INTEGRITY = 6
     AUDIT_APPEND = 7
+    BROKER = 8
+    ACCOUNT_MODE = 9
 
 
 class TradingHouseError(Exception):
@@ -67,3 +69,15 @@ class AuditIntegrityError(TradingHouseError):
     """Raised when audit-log integrity validation fails."""
 
     public_message = "audit integrity verification failed"
+
+
+class BrokerUnavailableError(TradingHouseError):
+    """Raised when the broker terminal cannot be reached or initialised."""
+
+    public_message = "broker terminal unavailable"
+
+
+class NonDemoAccountError(TradingHouseError):
+    """Raised when the connected account is not a demo account."""
+
+    public_message = "refusing to operate a non-demo account"

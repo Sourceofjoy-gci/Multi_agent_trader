@@ -32,10 +32,12 @@ from trading_house.core.clock import SystemClock
 from trading_house.core.errors import (
     AuditAppendError,
     AuditIntegrityError,
+    BrokerUnavailableError,
     ConfigurationError,
     DatabaseUnavailableError,
     ExitCode,
     MigrationMismatchError,
+    NonDemoAccountError,
     SchemaValidationError,
     SignatureVerificationError,
     TimestampError,
@@ -62,6 +64,8 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     MigrationMismatchError: ExitCode.MIGRATION,
     AuditAppendError: ExitCode.AUDIT_APPEND,
     AuditIntegrityError: ExitCode.AUDIT_INTEGRITY,
+    BrokerUnavailableError: ExitCode.BROKER,
+    NonDemoAccountError: ExitCode.ACCOUNT_MODE,
 }
 
 

@@ -9,9 +9,11 @@ from trading_house.core.venue import (
     ExecutionOutcome,
     Mt5VenueRef,
     PrecheckResult,
+    RecoveryAction,
     RejectClass,
     RejectReason,
     Venue,
+    recovery_for,
 )
 
 REF: dict[str, object] = {
@@ -149,3 +151,10 @@ def test_a_rejected_outcome_may_not_carry_a_fill() -> None:
             fill_price=Decimal("1.1"),
             reject_reason=RejectReason.MARKET_CLOSED,
         )
+
+
+def test_unknown_reject_reason_fails_closed_to_safe_mode() -> None:
+    """An unclassifiable broker response must not be guessed as retryable."""
+
+    assert REJECT_CLASS[RejectReason.UNKNOWN] is RejectClass.AUTHORITY
+    assert recovery_for(RejectReason.UNKNOWN) is RecoveryAction.ENTER_SAFE_MODE

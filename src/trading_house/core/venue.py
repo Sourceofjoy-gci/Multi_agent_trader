@@ -41,6 +41,7 @@ class RejectReason(str, Enum):  # noqa: UP042
     INSUFFICIENT_FUNDS = "insufficient_funds"
     TRADE_DISABLED = "trade_disabled"
     ACCOUNT_DISABLED = "account_disabled"
+    UNKNOWN = "unknown"
 
 
 REJECT_CLASS: dict[RejectReason, RejectClass] = {
@@ -55,6 +56,7 @@ REJECT_CLASS: dict[RejectReason, RejectClass] = {
     RejectReason.INSUFFICIENT_FUNDS: RejectClass.AUTHORITY,
     RejectReason.TRADE_DISABLED: RejectClass.AUTHORITY,
     RejectReason.ACCOUNT_DISABLED: RejectClass.AUTHORITY,
+    RejectReason.UNKNOWN: RejectClass.AUTHORITY,
 }
 
 

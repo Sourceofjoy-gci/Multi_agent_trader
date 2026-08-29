@@ -465,3 +465,10 @@ def test_failed_sign_leaves_no_temporary_files(tmp_path: Path) -> None:
     )
 
     assert list(output_dir.iterdir()) == []
+
+
+def test_broker_errors_have_stable_exit_codes() -> None:
+    from trading_house.core.errors import BrokerUnavailableError, NonDemoAccountError
+
+    assert cli.EXIT_CODES[BrokerUnavailableError] == cli.ExitCode.BROKER
+    assert cli.EXIT_CODES[NonDemoAccountError] == cli.ExitCode.ACCOUNT_MODE
