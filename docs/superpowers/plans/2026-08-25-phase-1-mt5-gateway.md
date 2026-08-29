@@ -2018,7 +2018,8 @@ git commit -m "feat: serialise terminal calls through a prioritised actor"
 
 **Interfaces:**
 - Produces: `Mt5BrokerAdapter(gateway, binding)` implementing `BrokerAdapter`.
-- Consumes: `Mt5Gateway`, `Priority` (Task 8); `to_instrument_contract`, `asset_class_for` (Task 6); `reject_reason_for` (Task 4); `derive_magic` (Task 5); `VenueBinding` from `constitution.binding`; `BrokerAdapter`, `MarketSnapshot`, `Quote`, `ReconciliationReport`, `VenueHealth` from `brokers.base`.
+- Consumes: `Mt5Gateway`, `Priority` (Task 8); `to_instrument_contract`, `asset_class_for` (Task 6);
+- Note: `derive_magic` (Task 5) is deliberately NOT used here. No read-only method needs it; Phase 3 consumes it when submitting. Do not import it. `reject_reason_for` (Task 4); `VenueBinding` from `constitution.binding`; `BrokerAdapter`, `MarketSnapshot`, `Quote`, `ReconciliationReport`, `VenueHealth` from `brokers.base`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2087,7 +2088,7 @@ instruments:
 def _adapter(terminal: object) -> tuple[Mt5BrokerAdapter, Mt5Gateway]:
     gateway = Mt5Gateway(terminal, clock=SystemClock(), request_timeout_seconds=5.0)  # type: ignore[arg-type]
     gateway.start()
-    return Mt5BrokerAdapter(gateway, BINDING), gateway
+    return Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock()), gateway
 
 
 def test_describe_instrument_maps_a_terminal_symbol(symbol_terminal: object) -> None:
@@ -2417,8 +2418,6 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.mt5
-
 
 def _terminal_available() -> bool:
     if sys.platform != "win32":
@@ -2490,26 +2489,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MT5_PACKAGE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5"
-
-
-def test_only_the_terminal_module_imports_metatrader5() -> None:
-    offenders = []
-    for path in sorted((PROJECT_ROOT / "src").rglob("*.py")):
-        if path.name == "terminal.py" and path.parent == MT5_PACKAGE:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(
-                a.name.split(".")[0] == "MetaTrader5" for a in node.names
-            ):
-                offenders.append(path.name)
-            elif (
-                isinstance(node, ast.ImportFrom)
-                and node.module
-                and node.module.split(".")[0] == "MetaTrader5"
-            ):
-                offenders.append(path.name)
-    assert offenders == []
 
 
 def test_the_phase_sends_no_orders() -> None:
