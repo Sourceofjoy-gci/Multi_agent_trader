@@ -44,6 +44,8 @@ PUBLIC_KEY = CONFIG_DIR / "risk_constitution.public.pem"
 VENUE_BINDING = CONFIG_DIR / "venue_binding.mt5.yaml"
 VENUE_BINDING_SIGNATURE = CONFIG_DIR / "venue_binding.mt5.yaml.sig"
 FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"MetaTrader5", "langgraph", "openai", "anthropic", "ccxt"})
+PHASE_0_PACKAGES = ("core", "audit", "constitution", "database", "ops")
+PHASE_0_MODULES = ("settings.py", "cli.py")
 
 
 def _runtime_factory(database: DatabaseHarness):
@@ -133,14 +135,25 @@ def test_a_missing_signature_prevents_startup(tmp_path: Path) -> None:
 
 
 def test_phase0_ships_no_trading_or_agent_dependency() -> None:
+    """MetaTrader5 is Phase 1's narrowly-scoped, platform-conditional exception
+    (see test_architecture.py's single-file import exemption); every other
+    trading or agent framework remains undeclared in every phase."""
+
     declared = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
-    for package in FORBIDDEN_TOP_LEVEL_IMPORTS:
+    for package in FORBIDDEN_TOP_LEVEL_IMPORTS - {"MetaTrader5"}:
         assert package.lower() not in declared
 
 
-def test_no_source_module_imports_a_trading_or_agent_package() -> None:
+def test_phase0_packages_never_import_a_broker_or_agent_framework() -> None:
+    """Phase 0's guarantee was about ITS packages, and stays true forever even
+    as later phases add venues."""
+
+    source_root = PROJECT_ROOT / "src" / "trading_house"
+    paths = [p for package in PHASE_0_PACKAGES for p in (source_root / package).rglob("*.py")]
+    paths += [source_root / module for module in PHASE_0_MODULES]
+
     offenders: list[str] = []
-    for path in sorted((PROJECT_ROOT / "src" / "trading_house").rglob("*.py")):
+    for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
