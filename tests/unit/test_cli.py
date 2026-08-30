@@ -632,3 +632,16 @@ def test_a_demo_account_reconciles_every_declared_book(
         "gateway.reconciled",
         "gateway.disconnected",
     ]
+
+
+def test_an_unverifiable_venue_binding_fails_the_gate_rather_than_degrading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binding that is present but whose signature does not verify is a
+    tampering signal, not an absent venue. Degrading it to 'step not
+    performed' would let an edited symbol map pass unnoticed."""
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda: _StubTerminal())
+
+    with pytest.raises(SignatureVerificationError):
+        _reconciler(tmp_path, _RecordingLedger())()

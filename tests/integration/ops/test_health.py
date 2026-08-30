@@ -230,7 +230,9 @@ def test_venue_reconciliation_reaches_the_report_without_disturbing_the_chain(
     assert report.ready is True
     assert report.books_reconciled == ("fx_scalp", "fx_swing")
     assert report.open_positions == 2
-    _ledger(database).verify()
+
+    integrity = _ledger(database).verify()
+    assert integrity.valid is True
 
 
 def test_a_venue_holding_positions_never_blocks_readiness(database: DatabaseHarness) -> None:
