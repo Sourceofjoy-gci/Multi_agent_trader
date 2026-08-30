@@ -12,9 +12,7 @@ __all__ = ["Mt5BrokerAdapter"]
 
 def __getattr__(name: str) -> Any:
     if name == "Mt5BrokerAdapter":
-        from trading_house.brokers.mt5.adapter import (  # type: ignore[import-not-found]
-            Mt5BrokerAdapter,
-        )
+        from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
 
         return Mt5BrokerAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,62 +1,14 @@
 import threading
 import time
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC
 
 import pytest
 
-from trading_house.brokers.mt5.boundary import (
-    ACCOUNT_TRADE_MODE_DEMO,
-    ACCOUNT_TRADE_MODE_REAL,
-    Mt5CheckResult,
-    Mt5Position,
-    Mt5SymbolInfo,
-    Mt5Tick,
-)
+from tests.unit.brokers.mt5.conftest import FakeTerminal
+from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_REAL
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.core.clock import SystemClock
 from trading_house.core.errors import BrokerUnavailableError, NonDemoAccountError
-
-
-class FakeTerminal:
-    """A TerminalPort that needs no MetaTrader 5 and no Windows."""
-
-    def __init__(
-        self, *, trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, initialises: bool = True
-    ) -> None:
-        self.trade_mode = trade_mode
-        self.initialises = initialises
-        self.shutdown_calls = 0
-        self.gate = threading.Event()
-        self.gate.set()
-
-    def initialize(self) -> bool:
-        return self.initialises
-
-    def shutdown(self) -> None:
-        self.shutdown_calls += 1
-
-    def account_trade_mode(self) -> int:
-        return self.trade_mode
-
-    def server_utc_offset_seconds(self) -> int:
-        return 0
-
-    def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None:
-        self.gate.wait(5)
-        return None
-
-    def symbol_tick(self, server_symbol: str) -> Mt5Tick | None:
-        return Mt5Tick(bid=1.1, ask=1.2, observed_at=datetime(2026, 8, 25, tzinfo=UTC))
-
-    def positions(self) -> Sequence[Mt5Position]:
-        return ()
-
-    def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None:
-        return Mt5CheckResult(retcode=10009, comment="done")
-
-    def last_error(self) -> tuple[int, str]:
-        return 0, "ok"
 
 
 def _gateway(terminal: FakeTerminal) -> Mt5Gateway:

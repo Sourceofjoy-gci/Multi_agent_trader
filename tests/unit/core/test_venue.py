@@ -30,9 +30,16 @@ def test_venue_ref_builds_and_is_frozen() -> None:
         ref.magic = 2
 
 
-def test_venue_ref_rejects_a_non_positive_magic() -> None:
+def test_venue_ref_rejects_a_negative_magic() -> None:
     with pytest.raises(ValidationError):
-        Mt5VenueRef(**{**REF, "magic": 0})
+        Mt5VenueRef(**{**REF, "magic": -1})
+
+
+def test_venue_ref_accepts_a_zero_magic() -> None:
+    """0 is MT5's "no magic set" -- a manually opened or foreign position."""
+
+    ref = Mt5VenueRef(**{**REF, "magic": 0})
+    assert ref.magic == 0
 
 
 def test_every_reject_reason_has_exactly_one_class() -> None:
