@@ -291,3 +291,80 @@ def test_health_reports_disconnected_when_the_gateway_is_unreachable(
     health = adapter.health()
 
     assert health.connected is False
+
+
+# --- order_check speaks a different retcode vocabulary than submission -------
+
+
+class _CheckTerminal(FakeTerminal):
+    def __init__(self, retcode: int) -> None:
+        super().__init__()
+        self._retcode = retcode
+
+    def order_check(self, request: object) -> Mt5CheckResult:
+        return Mt5CheckResult(retcode=self._retcode, comment="c")
+
+
+def _precheck_with(retcode: int) -> object:
+    adapter, gateway = _adapter(_CheckTerminal(retcode))
+    try:
+        return adapter.precheck(_intent())
+    finally:
+        gateway.stop()
+
+
+def test_order_check_reports_an_acceptable_request_as_retcode_zero() -> None:
+    """A passing simulation returns 0 with comment "Done" -- not one of the
+    1000x codes, which belong to the submission path."""
+
+    assert _precheck_with(0).would_accept is True
+
+
+def test_a_submission_success_code_is_not_a_passing_check() -> None:
+    """The discriminating half: if precheck reused the submission success set,
+    10009 would read as acceptance and 0 as an unknown rejection. Both wrong."""
+
+    result = _precheck_with(10009)
+
+    assert result.would_accept is False
+    assert result.reject_reason is not None
+
+
+def test_a_real_rejection_still_maps_to_its_reason() -> None:
+    assert _precheck_with(10019).reject_reason is RejectReason.INSUFFICIENT_FUNDS
+
+
+# --- health must measure what its field names claim -------------------------
+
+
+class _DisconnectedTerminal(FakeTerminal):
+    def terminal_connected(self) -> bool:
+        return False
+
+
+def test_health_reports_a_terminal_that_lost_its_trade_server() -> None:
+    """``last_error()`` succeeds whether or not the terminal can reach the
+    broker, so probing it would report a disconnected venue as connected."""
+
+    adapter, gateway = _adapter(_DisconnectedTerminal())
+    try:
+        report = adapter.health()
+    finally:
+        gateway.stop()
+
+    assert report.connected is False
+
+
+def test_health_ages_the_newest_quote_not_the_actor_heartbeat() -> None:
+    """The fake's ticks carry a fixed 2026-08-25 timestamp. The actor
+    heartbeat advances every 100ms, so an implementation reading the heartbeat
+    reports ~0 seconds however stale the market data actually is."""
+
+    adapter, gateway = _adapter(FakeTerminal())
+    try:
+        adapter.snapshot(["fx.eurusd"])
+        report = adapter.health()
+    finally:
+        gateway.stop()
+
+    assert report.last_quote_age_seconds > 86_400

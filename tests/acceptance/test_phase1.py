@@ -58,6 +58,9 @@ class _StubTerminal:
     def account_trade_mode(self) -> int:
         return self.trade_mode
 
+    def terminal_connected(self) -> bool:
+        return True
+
     def server_utc_offset_seconds(self) -> int:
         return 0
 

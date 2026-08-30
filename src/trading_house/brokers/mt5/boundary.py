@@ -34,16 +34,37 @@ ACCOUNT_TRADE_MODE_CONTEST = 1
 ACCOUNT_TRADE_MODE_REAL = 2
 
 
+MAX_PLAUSIBLE_OFFSET_SECONDS = 14 * 3600
+OFFSET_QUANTUM_SECONDS = 1800
+MAX_TICK_STALENESS_SECONDS = 60
+
+
 def utc_offset_seconds(server_epoch: float, real_utc_epoch: float) -> int:
     """How far the broker's clock runs ahead of UTC, in whole seconds.
 
     MetaTrader 5 reports every timestamp in the broker server's own timezone,
     with no indication of what that timezone is. The only way to recover UTC is
     to compare a server clock reading against a real one taken at the same
-    moment; this is that subtraction, kept here so it can be tested.
+    moment -- but that reading cannot simply be trusted.
+
+    The only view of the server clock MetaTrader 5 offers is the timestamp of
+    the *last* tick, which is current while a market is open and days old once
+    it closes. A tick from Friday's close, probed on a Sunday, yields an offset
+    near -48h, and every timestamp in the system would then be shifted by two
+    days with nothing to reveal it.
+
+    Real broker offsets are whole half-hours within a day of UTC, so a fresh
+    tick lands within seconds of one. A reading that does not is a closed
+    market being mistaken for a timezone, and it is refused.
     """
 
-    return round(server_epoch - real_utc_epoch)
+    raw = server_epoch - real_utc_epoch
+    quantised = round(raw / OFFSET_QUANTUM_SECONDS) * OFFSET_QUANTUM_SECONDS
+    if abs(quantised) > MAX_PLAUSIBLE_OFFSET_SECONDS:
+        raise BrokerUnavailableError
+    if abs(raw - quantised) > MAX_TICK_STALENESS_SECONDS:
+        raise BrokerUnavailableError
+    return int(quantised)
 
 
 def server_time_to_utc(server_epoch: float, offset_seconds: int | None) -> datetime:
@@ -114,6 +135,7 @@ class TerminalPort(Protocol):
     def initialize(self) -> bool: ...
     def shutdown(self) -> None: ...
     def account_trade_mode(self) -> int: ...
+    def terminal_connected(self) -> bool: ...
     def server_utc_offset_seconds(self) -> int: ...
     def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None: ...
     def symbol_tick(self, server_symbol: str) -> Mt5Tick | None: ...

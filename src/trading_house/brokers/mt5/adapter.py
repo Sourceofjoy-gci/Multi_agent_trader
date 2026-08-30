@@ -15,13 +15,14 @@ raw MT5 position without the intent ledger that arrives in Phase 3. See
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from functools import partial
 
 from trading_house.brokers.base import MarketSnapshot, Quote, ReconciliationReport, VenueHealth
 from trading_house.brokers.mt5.boundary import Mt5Tick, TerminalPort
 from trading_house.brokers.mt5.contracts import decimal_of, to_instrument_contract
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
-from trading_house.brokers.mt5.retcodes import SUCCESS_RETCODES, reject_reason_for
+from trading_house.brokers.mt5.retcodes import check_passed, reject_reason_for
 from trading_house.constitution.binding import VenueBinding
 from trading_house.core.clock import Clock
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
@@ -58,6 +59,8 @@ class Mt5BrokerAdapter:
             for instrument_id, bound in binding.instruments.items()
         }
         self._magic_ranges = {book: bound.magic_range for book, bound in binding.books.items()}
+        self._started_at = clock.now()
+        self._last_quote_at: datetime | None = None
 
     def _server_symbol_for(self, instrument_id: InstrumentId) -> str:
         server_symbol = self._server_symbols.get(instrument_id)
@@ -84,6 +87,7 @@ class Mt5BrokerAdapter:
                 # Fabricating a quote for a symbol with no current tick would
                 # put an invented price into the risk engine. Skip it.
                 continue
+            self._note_quote(tick.observed_at)
             quotes.append(
                 Quote(
                     instrument_id=instrument_id,
@@ -107,6 +111,7 @@ class Mt5BrokerAdapter:
         tick = self._gateway.call(Priority.ORDER, lambda t: t.symbol_tick(server_symbol))
         if tick is None:
             raise BrokerUnavailableError()
+        self._note_quote(tick.observed_at)
 
         is_buy = intent.side is Side.BUY
         request: dict[str, object] = {
@@ -121,7 +126,7 @@ class Mt5BrokerAdapter:
         result = self._gateway.call(Priority.ORDER, lambda t: t.order_check(request))
         if result is None:
             raise BrokerUnavailableError()
-        if result.retcode in SUCCESS_RETCODES:
+        if check_passed(result.retcode):
             return PrecheckResult(would_accept=True, reject_reason=None)
         return PrecheckResult(would_accept=False, reject_reason=reject_reason_for(result.retcode))
 
@@ -191,26 +196,45 @@ class Mt5BrokerAdapter:
         )
 
     def health(self) -> VenueHealth:
-        """Report connectivity, clock skew and the freshness of the actor loop.
+        """Report connectivity and how stale our newest quote is.
 
-        ``connected`` is a live probe rather than a cached flag: a lightweight
-        call is round-tripped through the gateway and a timeout is treated as
-        disconnected. ``last_quote_age_seconds`` uses the gateway's actor
-        heartbeat, which only advances while the actor thread is free to run
-        -- a hung terminal call stalls it, which is exactly the unhealthy
-        condition this field exists to surface.
+        ``connected`` asks the terminal whether it has a live link to the
+        trade server, round-tripped through the gateway so that a wedged actor
+        also reads as disconnected. ``last_quote_age_seconds`` measures the
+        newest tick this adapter has actually observed -- not the actor's
+        heartbeat, which advances every 100ms while the actor is merely idle
+        and would report a market-data feed frozen for an hour as zero
+        seconds old.
+
+        When no quote has ever been observed, the age is measured from when
+        this adapter started, which is the truthful statement that our quote
+        knowledge is at least that stale.
         """
 
-        metrics = self._gateway.metrics()
-        connected = True
+        connected = False
         try:
-            self._gateway.call(Priority.MARKET_DATA, lambda t: t.last_error())
+            connected = self._gateway.call(Priority.MARKET_DATA, lambda t: t.terminal_connected())
+            probe = self._server_symbols.get(next(iter(self._server_symbols)))
+            if probe is not None:
+                self._gateway.call(Priority.MARKET_DATA, lambda t: self._observe(t, probe))
         except BrokerUnavailableError:
             connected = False
 
-        age_seconds = max(0, int((self._clock.now() - metrics.last_heartbeat).total_seconds()))
+        newest = self._last_quote_at or self._started_at
+        age_seconds = max(0, int((self._clock.now() - newest).total_seconds()))
         return VenueHealth(
             connected=connected,
             server_utc_offset_seconds=self._gateway.server_utc_offset_seconds,
             last_quote_age_seconds=age_seconds,
         )
+
+    def _observe(self, terminal: TerminalPort, server_symbol: str) -> None:
+        """Read one tick and record its age, without producing a Quote."""
+
+        tick = terminal.symbol_tick(server_symbol)
+        if tick is not None:
+            self._note_quote(tick.observed_at)
+
+    def _note_quote(self, observed_at: datetime) -> None:
+        if self._last_quote_at is None or observed_at > self._last_quote_at:
+            self._last_quote_at = observed_at

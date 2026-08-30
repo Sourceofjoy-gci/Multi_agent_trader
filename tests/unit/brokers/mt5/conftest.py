@@ -47,6 +47,9 @@ class FakeTerminal:
     def account_trade_mode(self) -> int:
         return self.trade_mode
 
+    def terminal_connected(self) -> bool:
+        return True
+
     def server_utc_offset_seconds(self) -> int:
         return 0
 
@@ -61,7 +64,7 @@ class FakeTerminal:
         return ()
 
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None:
-        return Mt5CheckResult(retcode=10009, comment="done")
+        return Mt5CheckResult(retcode=0, comment="Done")
 
     def last_error(self) -> tuple[int, str]:
         return 0, "ok"

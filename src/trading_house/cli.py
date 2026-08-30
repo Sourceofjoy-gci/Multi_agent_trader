@@ -257,7 +257,7 @@ def audit_verify() -> None:
         raise typer.Exit(code=int(ExitCode.AUDIT_INTEGRITY))
 
 
-def _mt5_terminal_factory() -> Callable[[], TerminalPort] | None:
+def _mt5_terminal_factory() -> Callable[[str], TerminalPort] | None:
     """Look up a MetaTrader 5 terminal constructor, or report it unavailable.
 
     ``MetaTrader5`` is a ``sys_platform == 'win32'`` dependency and
@@ -317,7 +317,12 @@ def _book_reconciler(
                 )
             )
 
-        gateway = Mt5Gateway(terminal_factory(), clock=clock, on_event=on_gateway_event)
+        # The server-clock probe reads a tick from one symbol. Take it from
+        # the signed binding rather than assuming a plain "EURUSD" exists --
+        # brokers that suffix their symbols (EURUSD.m) have no such symbol,
+        # and the probe would fail the whole venue step on them.
+        probe_symbol = next(iter(binding.instruments.values())).server_symbol
+        gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock, on_event=on_gateway_event)
         try:
             gateway.start()
         except BrokerUnavailableError:

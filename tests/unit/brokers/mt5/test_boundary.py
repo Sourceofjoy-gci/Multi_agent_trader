@@ -21,6 +21,7 @@ EXPECTED_PORT_METHODS = {
     "initialize",
     "shutdown",
     "account_trade_mode",
+    "terminal_connected",
     "server_utc_offset_seconds",
     "symbol_info",
     "symbol_tick",
@@ -148,3 +149,44 @@ def test_converting_before_the_offset_is_known_raises_rather_than_guessing() -> 
 
 def test_the_same_conversion_succeeds_once_the_offset_is_established() -> None:
     assert server_time_to_utc(1_756_112_400.0, 3600).tzinfo is not None
+
+
+# --- the offset must not be believed when the tick is stale ------------------
+
+
+def test_a_few_seconds_of_tick_lag_still_yields_the_exact_offset() -> None:
+    """Broker offsets are whole half-hours, so quantisation absorbs the
+    sub-minute lag between a tick and the clock reading beside it."""
+
+    real = datetime(2026, 8, 25, 9, 30, tzinfo=UTC).timestamp()
+
+    assert utc_offset_seconds(real + 3 * 3600 - 4, real) == 3 * 3600
+
+
+def test_a_tick_from_a_closed_market_is_refused_not_believed() -> None:
+    """A Friday-close tick probed on a Sunday reads as an offset near -48h.
+    Believing it would shift every timestamp in the system by two days."""
+
+    real = datetime(2026, 8, 30, 12, 0, tzinfo=UTC).timestamp()
+
+    with pytest.raises(BrokerUnavailableError):
+        utc_offset_seconds(real - 2 * 24 * 3600, real)
+
+
+def test_a_moderately_stale_tick_is_refused_rather_than_rounded() -> None:
+    """Twenty minutes of staleness is small enough to survive the plausible
+    range but large enough to quantise to the wrong half-hour."""
+
+    real = datetime(2026, 8, 25, 9, 30, tzinfo=UTC).timestamp()
+
+    with pytest.raises(BrokerUnavailableError):
+        utc_offset_seconds(real + 3 * 3600 - 20 * 60, real)
+
+
+def test_an_offset_that_is_not_a_broker_offset_is_refused() -> None:
+    """No broker runs its server 7 minutes off UTC. That is a stale tick."""
+
+    real = datetime(2026, 8, 25, 9, 30, tzinfo=UTC).timestamp()
+
+    with pytest.raises(BrokerUnavailableError):
+        utc_offset_seconds(real + 7 * 60, real)

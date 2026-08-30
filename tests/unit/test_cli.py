@@ -515,6 +515,9 @@ class _StubTerminal:
     def account_trade_mode(self) -> int:
         return self.trade_mode
 
+    def terminal_connected(self) -> bool:
+        return True
+
     def server_utc_offset_seconds(self) -> int:
         return 0
 
@@ -567,7 +570,7 @@ def test_a_terminal_that_will_not_initialise_skips_reconciliation(
     from trading_house.constitution.binding import parse_venue_binding
 
     monkeypatch.setattr(
-        cli, "_mt5_terminal_factory", lambda: lambda: _StubTerminal(initialises=False)
+        cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal(initialises=False)
     )
     monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
 
@@ -585,7 +588,7 @@ def test_a_live_account_is_never_degraded_away(
     from trading_house.core.errors import NonDemoAccountError
 
     terminal = _StubTerminal(trade_mode=2)  # ACCOUNT_TRADE_MODE_REAL
-    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda: terminal)
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: terminal)
     monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
 
     with pytest.raises(NonDemoAccountError):
@@ -604,7 +607,9 @@ def test_a_refused_live_account_still_leaves_an_audit_trail(
     from trading_house.core.errors import NonDemoAccountError
 
     ledger = _RecordingLedger()
-    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda: _StubTerminal(trade_mode=2))
+    monkeypatch.setattr(
+        cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal(trade_mode=2)
+    )
     monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
 
     with pytest.raises(NonDemoAccountError):
@@ -620,7 +625,7 @@ def test_a_demo_account_reconciles_every_declared_book(
     from trading_house.constitution.binding import parse_venue_binding
 
     ledger = _RecordingLedger()
-    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda: _StubTerminal())
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
     monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
 
     reports = _reconciler(tmp_path, ledger)()
@@ -641,7 +646,7 @@ def test_an_unverifiable_venue_binding_fails_the_gate_rather_than_degrading(
     tampering signal, not an absent venue. Degrading it to 'step not
     performed' would let an edited symbol map pass unnoticed."""
 
-    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda: _StubTerminal())
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
 
     with pytest.raises(SignatureVerificationError):
         _reconciler(tmp_path, _RecordingLedger())()

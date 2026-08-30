@@ -44,6 +44,20 @@ RETCODE_REJECT_REASON: dict[int, RejectReason] = {
 # Phase 3 concern once orders are actually submitted.
 SUCCESS_RETCODES = frozenset({10008, 10009, 10010})
 
+# ``order_check`` does not share that vocabulary. It reports a request that
+# would be accepted as retcode 0 with comment "Done"; the 1000x codes above are
+# submission reply codes and never appear in a check result. Reusing the
+# submission set here would classify every acceptable order as an unrecognised
+# rejection, which fails closed into safe mode rather than trading -- safe, but
+# it would mean precheck never returns True against a real broker.
+ORDER_CHECK_PASSED = 0
+
+
+def check_passed(retcode: int) -> bool:
+    """Whether an ``order_check`` simulation reports the request acceptable."""
+
+    return retcode == ORDER_CHECK_PASSED
+
 
 def reject_reason_for(retcode: int) -> RejectReason:
     """Classify a retcode, failing closed on anything unrecognised."""

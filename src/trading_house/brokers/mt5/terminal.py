@@ -26,7 +26,11 @@ from trading_house.core.errors import BrokerUnavailableError
 class Mt5Terminal:
     """A thin, typed shell over the MetaTrader 5 IPC surface."""
 
-    def __init__(self) -> None:
+    def __init__(self, probe_symbol: str = "EURUSD") -> None:
+        # Which symbol to read the server clock from. Brokers that suffix
+        # their symbols (EURUSD.m, EURUSD_i) have no plain "EURUSD", and a
+        # hardcoded one makes the clock probe fail on them.
+        self._probe_symbol = probe_symbol
         self._offset: int | None = None
 
     def initialize(self) -> bool:
@@ -35,12 +39,23 @@ class Mt5Terminal:
     def shutdown(self) -> None:
         mt5.shutdown()
 
+    def terminal_connected(self) -> bool:
+        """Whether the terminal has a live link to the trade server.
+
+        ``last_error()`` answers a different question -- it reports this
+        library's last in-process error and succeeds whether or not the
+        terminal can reach the broker.
+        """
+
+        info = mt5.terminal_info()
+        return False if info is None else bool(info.connected)
+
     def account_trade_mode(self) -> int:
         account = mt5.account_info()
         return -1 if account is None else int(account.trade_mode)
 
     def server_utc_offset_seconds(self) -> int:
-        tick = mt5.symbol_info_tick("EURUSD")
+        tick = mt5.symbol_info_tick(self._probe_symbol)
         if tick is None:
             raise BrokerUnavailableError
         offset = utc_offset_seconds(float(tick.time), datetime.now(UTC).timestamp())
@@ -74,6 +89,10 @@ class Mt5Terminal:
         )
 
     def symbol_tick(self, server_symbol: str) -> Mt5Tick | None:
+        # MetaTrader 5 serves ticks only for symbols in Market Watch. Without
+        # this, describe_instrument works while snapshot silently drops the
+        # same symbol, indistinguishable from a genuinely tickless one.
+        mt5.symbol_select(server_symbol, True)
         tick = mt5.symbol_info_tick(server_symbol)
         if tick is None:
             return None

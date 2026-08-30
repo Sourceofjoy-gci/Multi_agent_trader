@@ -16,7 +16,7 @@ from dataclasses import dataclass, fields
 
 SPREAD_SAMPLES = 30
 SPREAD_INTERVAL_SECONDS = 0.2
-ACCOUNT_TRADE_MODE_DEMO = 0
+from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)

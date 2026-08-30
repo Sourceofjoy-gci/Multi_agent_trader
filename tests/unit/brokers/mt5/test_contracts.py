@@ -106,7 +106,6 @@ def test_price_increment_uses_tick_size_not_point() -> None:
             SYMBOL_TRADE_EXECUTION_MARKET,
             {FillPolicy.IOC, FillPolicy.RETURN},
         ),
-        (0, SYMBOL_TRADE_EXECUTION_INSTANT, {FillPolicy.RETURN}),
     ],
 )
 def test_supported_fills_needs_both_bitmask_and_execution_mode(
@@ -116,6 +115,15 @@ def test_supported_fills_needs_both_bitmask_and_execution_mode(
     the bitmask alone silently drops a valid policy."""
 
     assert supported_fills(filling_mode, exemode) == frozenset(expected)
+
+
+def test_a_symbol_offering_no_usable_fill_is_refused_not_defaulted() -> None:
+    """RETURN is not permitted under Request or Instant execution. Defaulting
+    to it to satisfy ``supported_fills``'s min_length=1 would put a policy the
+    broker never offered into a domain model."""
+
+    with pytest.raises(ConfigurationError):
+        supported_fills(0, SYMBOL_TRADE_EXECUTION_INSTANT)
 
 
 def test_a_disabled_symbol_is_rejected() -> None:

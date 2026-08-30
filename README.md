@@ -177,7 +177,9 @@ uv run python scripts/broker_audit.py
 
 These need MetaTrader 5 running on Windows, logged into a demo account. They
 skip with a specific reason otherwise, including when the logged-in account is
-not a demo — they never open a session against a live account.
+not a demo. Identifying the account type requires connecting, so a live
+account is briefly connected to and immediately disconnected — nothing is read
+from it beyond `account_info()`, and no test body runs.
 
 ```bash
 uv run pytest tests/live -m mt5 -rs
@@ -278,6 +280,8 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 4 | `database connection failed` | PostgreSQL unreachable, or the session refused UTC | `docker compose up -d`; check the DSN host, port and credentials |
 | 5 | `migration revision mismatch` | Schema is not at the exact expected revision | Run `alembic upgrade head` as the migrator. Never migrate from the runtime process |
 | 6 | `audit integrity verification failed` | The hash chain does not recompute | **Stop.** Do not append. Preserve the database and investigate; a mismatch means the ledger was altered outside the append function |
+| 8 | `broker terminal unavailable` | MetaTrader 5 is not running, will not initialise, or the server-clock probe read a stale tick from a closed market | Start the terminal and log in. During the venue step of `health` this degrades to "not performed" rather than failing the gate |
+| 9 | `refusing to operate a non-demo account` | The terminal reports a real or contest account | **Stop.** Log into a demo account. This never degrades to a skipped step — it is the one venue failure that fails the gate |
 | 7 | `audit append failed` | The append transaction did not complete | Check connectivity and privileges; the ledger is unchanged because appends are transactional |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 

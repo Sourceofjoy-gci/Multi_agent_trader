@@ -66,8 +66,12 @@ def asset_class_for(instrument_id: str) -> AssetClass:
 def supported_fills(filling_mode: int, trade_exemode: int) -> frozenset[FillPolicy]:
     """Derive fill policies from the bitmask AND the execution mode.
 
-    Always returns at least ``{RETURN}`` — never empty — which is what makes
-    ``InstrumentContract.supported_fills``'s ``min_length=1`` safe.
+    A symbol whose broker reports no usable filling mode is refused rather
+    than given a default. ``RETURN`` is not permitted under Request or Instant
+    execution, so defaulting to it to satisfy
+    ``InstrumentContract.supported_fills``'s ``min_length=1`` would put a fill
+    policy the broker never offered into a domain model -- the fabrication
+    this project refuses everywhere else, done to appease a schema.
     """
 
     policies: set[FillPolicy] = set()
@@ -75,8 +79,10 @@ def supported_fills(filling_mode: int, trade_exemode: int) -> frozenset[FillPoli
         policies.add(FillPolicy.FOK)
     if filling_mode & SYMBOL_FILLING_IOC:
         policies.add(FillPolicy.IOC)
-    if trade_exemode in _RETURN_EXECUTION_MODES or not policies:
+    if trade_exemode in _RETURN_EXECUTION_MODES:
         policies.add(FillPolicy.RETURN)
+    if not policies:
+        raise ConfigurationError()
     return frozenset(policies)
 
 

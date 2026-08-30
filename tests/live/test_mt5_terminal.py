@@ -3,12 +3,12 @@
 Marked ``mt5`` and skipped when no suitable terminal is present, so a bare
 ``uv run pytest`` stays green on any machine. Never run in CI.
 
-The availability probe checks the account is a demo before reporting the
-terminal usable. That is stricter than it needs to be for safety -- the
-gateway refuses a non-demo account in ``start()`` regardless -- but it means
-these tests never so much as open a session against a live account, and the
-skip reason says which condition was not met rather than a bare "no
-terminal".
+The availability probe connects once, reads the account type, and
+disconnects. That is the only way to learn whether the account is a demo, so
+a live account IS briefly connected to -- but nothing is read from it beyond
+``account_info()``, no gateway is constructed, and no test body runs. The
+gateway's own guard in ``start()`` is the real protection; this only makes
+the skip reason name the condition that failed.
 """
 
 from __future__ import annotations

@@ -286,3 +286,40 @@ def test_the_audit_hook_is_never_called_while_the_lock_is_held() -> None:
     gateway.stop()
 
     assert lock_was_held == []
+
+
+def test_a_wedged_actor_is_never_shut_down_underneath_and_blocks_restart() -> None:
+    """MetaTrader 5 calls are blocking C calls Python cannot interrupt. If one
+    hangs past the join, calling shutdown() would run on the terminal while
+    that call is still using it, and starting again would put two actor
+    threads on one terminal -- both break the single-thread invariant this
+    class exists to hold."""
+
+    class _WedgedTerminal(FakeTerminal):
+        """Blocks well past the gateway's 5s shutdown join, the way a hung
+        blocking mt5 call does. The base fake's 5s gate would race it."""
+
+        def symbol_info(self, server_symbol: str) -> None:
+            self.gate.wait(30)
+            return None
+
+    terminal = _WedgedTerminal()
+    gateway = Mt5Gateway(terminal, clock=SystemClock(), request_timeout_seconds=1.0)
+    gateway.start()
+    terminal.gate.clear()
+
+    wedged = threading.Thread(
+        target=lambda: gateway.call(Priority.MARKET_DATA, lambda t: t.symbol_info("X")),
+        daemon=True,
+    )
+    wedged.start()
+    threading.Event().wait(0.2)
+
+    gateway.stop()
+
+    assert terminal.shutdown_calls == 0, "shut the terminal down under a live call"
+    with pytest.raises(BrokerUnavailableError):
+        gateway.start()
+
+    terminal.gate.set()
+    wedged.join(10)

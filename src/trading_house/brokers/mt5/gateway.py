@@ -102,11 +102,15 @@ class Mt5Gateway:
         error raised here is the record of the refusal.
         """
 
+        if self._thread is not None and self._thread.is_alive():
+            # A previous stop() timed out with the actor wedged in a blocking
+            # call. Starting again would put two threads on one terminal.
+            raise BrokerUnavailableError()
         if not self._terminal.initialize():
             self._terminal.shutdown()
             raise BrokerUnavailableError()
-        self._emit("gateway.connected", {"venue": "mt5"})
         try:
+            self._emit("gateway.connected", {"venue": "mt5"})
             trade_mode = self._terminal.account_trade_mode()
             if trade_mode != ACCOUNT_TRADE_MODE_DEMO:
                 raise NonDemoAccountError()
@@ -125,6 +129,15 @@ class Mt5Gateway:
         thread = self._thread
         if thread is not None:
             thread.join(_SHUTDOWN_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                # The actor is stuck inside a blocking mt5 call, which Python
+                # cannot interrupt. Keep the handle so a later start() refuses
+                # rather than running a second actor against the same terminal,
+                # and do NOT shut the terminal down underneath the call that is
+                # still using it -- that would break the one-thread invariant
+                # this whole class exists to hold.
+                self._drain()
+                return
         self._thread = None
         self._drain()
         if self._started:
