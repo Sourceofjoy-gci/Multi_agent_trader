@@ -7,6 +7,7 @@ size precisely so it cannot become a home for untested behaviour.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
@@ -17,10 +18,9 @@ from trading_house.brokers.mt5.boundary import (
     Mt5Position,
     Mt5SymbolInfo,
     Mt5Tick,
+    establish_utc_offset,
     server_time_to_utc,
-    utc_offset_seconds,
 )
-from trading_house.core.errors import BrokerUnavailableError
 
 
 class Mt5Terminal:
@@ -55,12 +55,16 @@ class Mt5Terminal:
         return -1 if account is None else int(account.trade_mode)
 
     def server_utc_offset_seconds(self) -> int:
-        tick = mt5.symbol_info_tick(self._probe_symbol)
-        if tick is None:
-            raise BrokerUnavailableError
-        offset = utc_offset_seconds(float(tick.time), datetime.now(UTC).timestamp())
+        offset = establish_utc_offset(
+            self._probe_tick_time, lambda: datetime.now(UTC).timestamp(), time.sleep
+        )
         self._offset = offset
         return offset
+
+    def _probe_tick_time(self) -> float | None:
+        mt5.symbol_select(self._probe_symbol, True)
+        tick = mt5.symbol_info_tick(self._probe_symbol)
+        return None if tick is None else float(tick.time)
 
     def _to_utc(self, server_epoch: float) -> datetime:
         return server_time_to_utc(float(server_epoch), self._offset)

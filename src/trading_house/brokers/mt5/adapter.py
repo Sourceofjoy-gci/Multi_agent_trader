@@ -214,9 +214,8 @@ class Mt5BrokerAdapter:
         connected = False
         try:
             connected = self._gateway.call(Priority.MARKET_DATA, lambda t: t.terminal_connected())
-            probe = self._server_symbols.get(next(iter(self._server_symbols)))
-            if probe is not None:
-                self._gateway.call(Priority.MARKET_DATA, lambda t: self._observe(t, probe))
+            probe = next(iter(self._server_symbols.values()))
+            self._gateway.call(Priority.MARKET_DATA, lambda t: self._observe(t, probe))
         except BrokerUnavailableError:
             connected = False
 

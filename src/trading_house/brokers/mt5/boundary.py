@@ -8,7 +8,7 @@ same reason.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
@@ -65,6 +65,43 @@ def utc_offset_seconds(server_epoch: float, real_utc_epoch: float) -> int:
     if abs(raw - quantised) > MAX_TICK_STALENESS_SECONDS:
         raise BrokerUnavailableError
     return int(quantised)
+
+
+def establish_utc_offset(
+    sample_server_epoch: Callable[[], float | None],
+    real_utc_epoch: Callable[[], float],
+    sleep: Callable[[float], None],
+    *,
+    max_attempts: int = 10,
+    interval_seconds: float = 0.5,
+) -> int:
+    """Establish the broker clock offset from a demonstrably live feed.
+
+    Quantising a single reading is not enough on its own. A lag near any
+    multiple of the half-hour quantum survives both the range and residual
+    checks and yields a wrong but entirely plausible offset -- a Saturday
+    probe of a Friday-evening tick can read a UTC+3 broker as UTC-7, and
+    nothing downstream could tell.
+
+    The only thing that actually separates a timezone from a closed market is
+    whether the clock moves. A stale tick's timestamp is frozen; a live one
+    advances. So sample until it does, and refuse if it never does: the
+    offset cannot be known while the market is shut, and refusing is the only
+    honest answer.
+    """
+
+    first = sample_server_epoch()
+    if first is None:
+        raise BrokerUnavailableError
+    for _ in range(max_attempts):
+        sleep(interval_seconds)
+        latest = sample_server_epoch()
+        if latest is None:
+            raise BrokerUnavailableError
+        if latest > first:
+            # The feed is live, so this reading is at most an interval old.
+            return utc_offset_seconds(latest, real_utc_epoch())
+    raise BrokerUnavailableError
 
 
 def server_time_to_utc(server_epoch: float, offset_seconds: int | None) -> datetime:

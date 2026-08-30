@@ -95,16 +95,19 @@ def test_server_time_offset_is_computed_and_timestamps_land_in_utc() -> None:
     of zero proves nothing on its own -- what matters is that the converted
     timestamp is close to real UTC now."""
 
-    from datetime import UTC, datetime
-
     with Mt5Gateway(_terminal(), clock=SystemClock()) as gateway:
         offset = gateway.server_utc_offset_seconds
         tick = gateway.call(Priority.MARKET_DATA, lambda t: t.symbol_tick(PROBE_SYMBOL))
 
     assert isinstance(offset, int)
     assert tick is not None
-    drift = abs((datetime.now(UTC) - tick.observed_at).total_seconds())
-    assert drift < 3600, f"converted tick time is {drift}s from UTC now; offset was {offset}"
+    # Not a drift check: observed_at is derived from the same offset, so the
+    # two sides of that comparison cancel and it can never fail. Assert what
+    # is independently true of a broker instead -- server clocks sit on whole
+    # half-hours within a day of UTC.
+    assert abs(offset) <= 14 * 3600, f"implausible server offset {offset}s"
+    assert offset % 1800 == 0, f"server offset {offset}s is not a half-hour"
+    assert tick.observed_at.tzinfo is not None
 
 
 def test_reconciliation_reports_without_claiming_attribution() -> None:

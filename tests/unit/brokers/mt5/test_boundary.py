@@ -12,6 +12,7 @@ from trading_house.brokers.mt5.boundary import (
     Mt5SymbolInfo,  # noqa: F401 -- imported to prove it is part of the boundary's surface
     Mt5Tick,
     TerminalPort,
+    establish_utc_offset,
     server_time_to_utc,
     utc_offset_seconds,
 )
@@ -190,3 +191,43 @@ def test_an_offset_that_is_not_a_broker_offset_is_refused() -> None:
 
     with pytest.raises(BrokerUnavailableError):
         utc_offset_seconds(real + 7 * 60, real)
+
+
+# --- only a moving clock distinguishes a timezone from a closed market ------
+
+
+def test_a_live_feed_establishes_the_offset() -> None:
+    real = datetime(2026, 8, 25, 9, 30, tzinfo=UTC).timestamp()
+    server = real + 3 * 3600
+    samples = iter([server, server + 1.0])
+
+    offset = establish_utc_offset(lambda: next(samples), lambda: real, lambda _s: None)
+
+    assert offset == 3 * 3600
+
+
+def test_a_frozen_clock_is_refused_however_plausible_its_offset_looks() -> None:
+    """The case quantisation alone cannot catch. A Saturday probe of a tick
+    exactly one quantum stale reads a UTC+3 broker as UTC+2:30 -- inside the
+    plausible range, zero residual, and completely wrong. Only the fact that
+    the clock is not moving reveals it."""
+
+    real = datetime(2026, 8, 29, 7, 0, tzinfo=UTC).timestamp()
+    frozen = real + 3 * 3600 - 1800
+
+    with pytest.raises(BrokerUnavailableError):
+        establish_utc_offset(lambda: frozen, lambda: real, lambda _s: None)
+
+
+def test_a_probe_symbol_with_no_tick_at_all_is_refused() -> None:
+    with pytest.raises(BrokerUnavailableError):
+        establish_utc_offset(lambda: None, lambda: 0.0, lambda _s: None)
+
+
+def test_the_probe_gives_up_instead_of_waiting_forever() -> None:
+    sleeps: list[float] = []
+
+    with pytest.raises(BrokerUnavailableError):
+        establish_utc_offset(lambda: 1.0, lambda: 0.0, sleeps.append, max_attempts=3)
+
+    assert len(sleeps) == 3

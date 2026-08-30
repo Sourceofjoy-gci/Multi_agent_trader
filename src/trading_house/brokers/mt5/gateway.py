@@ -164,7 +164,11 @@ class Mt5Gateway:
     def call(self, priority: Priority, operation: Callable[[TerminalPort], T]) -> T:
         """Run one operation on the actor thread and return its result."""
 
-        if self._thread is None or not self._thread.is_alive():
+        # A wedged stop() deliberately leaves the thread alive, so liveness
+        # alone is not enough: that actor exits on _stopping without dequeuing
+        # anything, and a request enqueued now would wait out the full timeout
+        # for an answer nobody will produce.
+        if self._thread is None or not self._thread.is_alive() or self._stopping.is_set():
             raise BrokerUnavailableError()
         request = _Request(operation=operation)
         with self._lock:

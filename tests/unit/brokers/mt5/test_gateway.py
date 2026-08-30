@@ -323,3 +323,20 @@ def test_a_wedged_actor_is_never_shut_down_underneath_and_blocks_restart() -> No
 
     terminal.gate.set()
     wedged.join(10)
+
+
+def test_a_failing_audit_hook_does_not_leak_the_terminal_session() -> None:
+    """gateway.connected is emitted inside start()'s try precisely so that a
+    ledger that refuses the append still leaves the terminal shut, rather
+    than an initialised session nobody owns."""
+
+    def boom(name: str, payload: Mapping[str, object]) -> None:
+        raise RuntimeError("ledger down")
+
+    terminal = FakeTerminal()
+    gateway = Mt5Gateway(terminal, clock=SystemClock(), on_event=boom)
+
+    with pytest.raises(RuntimeError, match="ledger down"):
+        gateway.start()
+
+    assert terminal.shutdown_calls == 1
