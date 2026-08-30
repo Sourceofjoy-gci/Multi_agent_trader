@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -25,6 +25,10 @@ from pydantic import JsonValue, ValidationError
 
 from trading_house import __version__
 from trading_house.audit.repository import PostgresAuditLedger
+from trading_house.brokers.base import ReconciliationReport
+from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
+from trading_house.brokers.mt5.boundary import TerminalPort
+from trading_house.brokers.mt5.gateway import Mt5Gateway
 from trading_house.constitution.binding import load_venue_binding
 from trading_house.constitution.loader import load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
@@ -43,9 +47,10 @@ from trading_house.core.errors import (
     TimestampError,
     TradingHouseError,
 )
+from trading_house.core.values import BookId
 from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
-from trading_house.ops.health import HealthService
+from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.settings import RuntimeSettings
 
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
@@ -252,9 +257,92 @@ def audit_verify() -> None:
         raise typer.Exit(code=int(ExitCode.AUDIT_INTEGRITY))
 
 
+def _mt5_terminal_factory() -> Callable[[], TerminalPort] | None:
+    """Look up a MetaTrader 5 terminal constructor, or report it unavailable.
+
+    ``MetaTrader5`` is a ``sys_platform == 'win32'`` dependency and
+    ``terminal.py`` -- the one module allowed to import it -- cannot even be
+    imported on Linux, where the coverage-gated CI job runs. The import stays
+    inside this function, called only when the health gate actually reaches
+    the venue-reconciliation step, so every other platform and every other
+    command stays unaffected.
+    """
+
+    try:
+        from trading_house.brokers.mt5.terminal import Mt5Terminal
+    except ImportError:
+        return None
+    return Mt5Terminal
+
+
+def _empty_reconciliation() -> Mapping[BookId, ReconciliationReport]:
+    return {}
+
+
+def _book_reconciler(
+    venue_binding: Path,
+    venue_binding_signature: Path,
+    venue_binding_public_key: Path,
+    ledger: PostgresAuditLedger,
+) -> BookReconciler:
+    """Build the health gate's venue-reconciliation step.
+
+    Reconciliation reports; it does not fail readiness (see
+    ``ops.health.HealthService.run``), and that includes the step's own
+    absence: an unavailable MetaTrader5 module, an absent venue binding, or a
+    terminal that will not initialise all degrade to "the venue step was not
+    performed" -- ``books_reconciled`` stays empty and ``open_positions``
+    stays zero -- rather than raising. A live account is the one exception:
+    ``NonDemoAccountError`` is never caught here, because there is no state
+    in which we are connected to a live account and merely not trading yet.
+    """
+
+    if not venue_binding.exists():
+        return _empty_reconciliation
+
+    def reconcile_books() -> Mapping[BookId, ReconciliationReport]:
+        terminal_factory = _mt5_terminal_factory()
+        if terminal_factory is None:
+            return {}
+
+        binding = load_venue_binding(
+            venue_binding, venue_binding_signature, venue_binding_public_key
+        )
+        clock = SystemClock()
+
+        def on_gateway_event(event_type: str, payload: Mapping[str, JsonValue]) -> None:
+            ledger.append(
+                build_audit_event(
+                    event_type, clock.now(), dict(payload), source_component="brokers.mt5"
+                )
+            )
+
+        gateway = Mt5Gateway(terminal_factory(), clock=clock, on_event=on_gateway_event)
+        try:
+            gateway.start()
+        except BrokerUnavailableError:
+            return {}
+        try:
+            adapter = Mt5BrokerAdapter(gateway, binding, clock=clock)
+            reports = {book: adapter.reconcile(book) for book in binding.books}
+            gateway.mark_reconciled()
+            return reports
+        finally:
+            gateway.stop()
+
+    return reconcile_books
+
+
 @app.command("health")
 def health(
     alembic_config: Annotated[Path, typer.Option("--alembic-config")] = DEFAULT_ALEMBIC_CONFIG,
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
 ) -> None:
     """Run the full readiness gate and report ready or a typed failure."""
 
@@ -268,6 +356,7 @@ def health(
         def revision(connection: Any) -> None:
             assert_at_head(connection, config)
 
+        ledger = PostgresAuditLedger(connect)
         report = HealthService(
             load_constitution=lambda: load_constitution(
                 settings.constitution_path,
@@ -276,7 +365,10 @@ def health(
             ),
             open_connection=connect,
             assert_revision=revision,
-            ledger=PostgresAuditLedger(connect),
+            ledger=ledger,
+            reconcile_books=_book_reconciler(
+                venue_binding, venue_binding_signature, venue_binding_public_key, ledger
+            ),
             clock=SystemClock(),
             application_version=__version__,
         ).run()
@@ -287,6 +379,8 @@ def health(
             "constitution_sha256": report.constitution_sha256,
             "public_key_fingerprint": report.public_key_fingerprint,
             "audit_entries_verified": report.audit_entries_verified,
+            "books_reconciled": cast(list[JsonValue], sorted(report.books_reconciled)),
+            "open_positions": report.open_positions,
         }
 
     _run(operation)

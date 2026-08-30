@@ -105,6 +105,7 @@ def test_phase0_foundation_accepts_end_to_end(database: DatabaseHarness) -> None
         open_connection=_connect,
         assert_revision=lambda conn: assert_at_head(conn, database.alembic_config),
         ledger=ledger,
+        reconcile_books=lambda: {},
         clock=SystemClock(),
         application_version=__version__,
     ).run()

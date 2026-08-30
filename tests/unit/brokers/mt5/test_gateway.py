@@ -1,5 +1,6 @@
 import threading
 import time
+from collections.abc import Mapping
 from datetime import UTC
 
 import pytest
@@ -197,3 +198,91 @@ def test_stopping_without_starting_does_not_shut_the_terminal_down() -> None:
     gateway.stop()
 
     assert terminal.shutdown_calls == 0
+
+
+def test_gateway_lifecycle_is_audited() -> None:
+    events: list[tuple[str, Mapping[str, object]]] = []
+    terminal = FakeTerminal()
+    gateway = Mt5Gateway(
+        terminal,
+        clock=SystemClock(),
+        on_event=lambda name, payload: events.append((name, payload)),
+    )
+    gateway.start()
+    gateway.mark_reconciled()
+    gateway.stop()
+
+    assert [name for name, _ in events] == [
+        "gateway.connected",
+        "gateway.demo_verified",
+        "gateway.reconciled",
+        "gateway.disconnected",
+    ]
+    for _, payload in events:
+        assert "account" not in str(payload).lower()
+
+
+def test_stop_without_start_emits_no_disconnection_event() -> None:
+    """A connection that never existed must not be recorded as disconnected."""
+
+    events: list[str] = []
+    gateway = Mt5Gateway(
+        FakeTerminal(), clock=SystemClock(), on_event=lambda name, _: events.append(name)
+    )
+
+    gateway.stop()
+
+    assert events == []
+
+
+def test_a_second_stop_emits_no_further_disconnection_event() -> None:
+    events: list[str] = []
+    gateway = Mt5Gateway(
+        FakeTerminal(), clock=SystemClock(), on_event=lambda name, _: events.append(name)
+    )
+    gateway.start()
+
+    gateway.stop()
+    gateway.stop()
+
+    assert events.count("gateway.disconnected") == 1
+
+
+def test_a_failed_demo_check_emits_no_disconnection_event() -> None:
+    """The gateway never reached ``_started``, so ``stop()`` semantics do not
+    apply; the typed error itself carries the refusal."""
+
+    events: list[str] = []
+    terminal = FakeTerminal(trade_mode=ACCOUNT_TRADE_MODE_REAL)
+    gateway = Mt5Gateway(
+        terminal, clock=SystemClock(), on_event=lambda name, _: events.append(name)
+    )
+
+    with pytest.raises(NonDemoAccountError):
+        gateway.start()
+
+    assert "gateway.disconnected" not in events
+
+
+def test_the_audit_hook_is_never_called_while_the_lock_is_held() -> None:
+    """A slow hook (e.g. a database write) must not block metrics() or the
+    actor thread's own bookkeeping. Re-acquiring a held, non-reentrant lock
+    from the same thread would deadlock the test outright, so this probes
+    with a non-blocking acquire instead of risking a hang."""
+
+    lock_was_held: list[str] = []
+
+    def on_event(name: str, payload: Mapping[str, object]) -> None:
+        del payload
+        acquired = gateway._lock.acquire(blocking=False)
+        if acquired:
+            gateway._lock.release()
+        else:
+            lock_was_held.append(name)
+
+    gateway = Mt5Gateway(FakeTerminal(), clock=SystemClock(), on_event=on_event)
+    gateway.start()
+    gateway.mark_reconciled()
+    gateway.stop()
+
+    assert lock_was_held == []

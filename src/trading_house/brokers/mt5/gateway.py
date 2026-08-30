@@ -26,6 +26,8 @@ from itertools import count
 from types import TracebackType
 from typing import Any, Self, TypeVar, cast
 
+from pydantic import JsonValue
+
 from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO, TerminalPort
 from trading_house.core.clock import Clock
 from trading_house.core.errors import BrokerUnavailableError, NonDemoAccountError
@@ -72,10 +74,12 @@ class Mt5Gateway:
         *,
         clock: Clock,
         request_timeout_seconds: float = 10.0,
+        on_event: Callable[[str, Mapping[str, JsonValue]], None] | None = None,
     ) -> None:
         self._terminal = terminal
         self._clock = clock
         self._timeout = request_timeout_seconds
+        self._on_event = on_event
         self._queue: queue.PriorityQueue[tuple[int, int, _Request]] = queue.PriorityQueue()
         self._sequence = count()
         self._thread: threading.Thread | None = None
@@ -90,14 +94,23 @@ class Mt5Gateway:
         self._started = False
 
     def start(self) -> None:
-        """Connect, refuse a non-demo account, then begin serving."""
+        """Connect, refuse a non-demo account, then begin serving.
+
+        No event fires for a refused (non-demo) or failed connection: there
+        is no ``gateway.disconnected`` for a connection that never reached
+        ``_started``, and no event carries an account number. The typed
+        error raised here is the record of the refusal.
+        """
 
         if not self._terminal.initialize():
             self._terminal.shutdown()
             raise BrokerUnavailableError()
+        self._emit("gateway.connected", {"venue": "mt5"})
         try:
-            if self._terminal.account_trade_mode() != ACCOUNT_TRADE_MODE_DEMO:
+            trade_mode = self._terminal.account_trade_mode()
+            if trade_mode != ACCOUNT_TRADE_MODE_DEMO:
                 raise NonDemoAccountError()
+            self._emit("gateway.demo_verified", {"venue": "mt5", "trade_mode": trade_mode})
             self._server_utc_offset_seconds = self._terminal.server_utc_offset_seconds()
         except BaseException:
             self._terminal.shutdown()
@@ -117,6 +130,10 @@ class Mt5Gateway:
         if self._started:
             self._started = False
             self._terminal.shutdown()
+            with self._lock:
+                served = self._served
+                failed = self._failed
+            self._emit("gateway.disconnected", {"venue": "mt5", "served": served, "failed": failed})
 
     def __enter__(self) -> Self:
         self.start()
@@ -167,10 +184,23 @@ class Mt5Gateway:
 
         with self._lock:
             self._stale = False
+        self._emit("gateway.reconciled", {"venue": "mt5"})
 
     @property
     def server_utc_offset_seconds(self) -> int:
         return self._server_utc_offset_seconds
+
+    def _emit(self, event_type: str, payload: Mapping[str, JsonValue]) -> None:
+        """Notify the audit hook, if any, with the actor's lock already released.
+
+        The hook may append to PostgreSQL over the network; holding the
+        actor's mutex across that round-trip would block ``metrics()`` and
+        the actor thread's own per-request bookkeeping for its duration, so
+        no caller of this method may hold ``self._lock``.
+        """
+
+        if self._on_event is not None:
+            self._on_event(event_type, payload)
 
     def _serve(self) -> None:
         while not self._stopping.is_set():
