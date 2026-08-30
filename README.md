@@ -1,9 +1,11 @@
-# Trading House — Phase 0 / 0.5 Safety Foundation
+# Trading House — Phase 1 Read-Only MT5 Gateway
 
-> **This repository still cannot trade.** There is no broker connection, no
-> strategy, no sizing, no order path, and no LLM agent. That absence is
-> deliberate and is enforced by tests. **Phase 1 may begin only after the
-> acceptance suite below is green.**
+> **This repository still cannot trade.** It now talks to MetaTrader 5, but
+> only to read. There is no order path, no strategy, no sizing, and no LLM
+> agent. The gateway refuses to start against anything but a demo account,
+> and `submit`, `amend_protection` and `close` raise `NotImplementedError`
+> until Phase 3 brings the intent ledger that makes a lost response
+> recoverable. That absence is deliberate and is enforced by tests.
 
 Phase 0 establishes five guarantees:
 
@@ -114,6 +116,73 @@ Book identity is venue-neutral. The signed venue binding
 MT5 magic-number range, and each canonical instrument (`fx.eurusd`,
 `metal.xauusd`) to a server symbol — see `constitution binding` below.
 
+## Phase 1 — MT5 gateway
+
+Phase 1 connects to one MetaTrader 5 terminal and reads from it. It sends no
+orders.
+
+### Demo accounts only
+
+`Mt5Gateway.start()` reads `account_info().trade_mode` and raises
+`refusing to operate a non-demo account` (exit code 9) unless the terminal
+reports a demo account. The check runs before the actor thread is created and
+shuts the terminal down on its way out, so there is no state in which the
+system is connected to a live account and merely not trading yet.
+
+A contest account is refused too. Only `ACCOUNT_TRADE_MODE_DEMO` passes.
+
+### What it can and cannot do
+
+| Method | Phase 1 |
+|---|---|
+| `describe_instrument` | Reads `symbol_info` and translates it into price units |
+| `snapshot` | Reads ticks; skips any instrument the terminal has no tick for rather than fabricating a quote |
+| `precheck` | Calls `order_check`, which simulates without touching the market |
+| `reconcile` | Reports venue positions as **unmatched**; see below |
+| `health` | Reports connection state, server clock offset and quote age |
+| `submit`, `amend_protection`, `close` | Raise `NotImplementedError` until Phase 3 |
+
+`reconcile` returns an empty `positions` tuple in this phase. `PositionState`
+requires `strategy_id`, `lifecycle`, `r_multiple_open`, `mae_r`, `mfe_r` and
+`initial_risk_distance`, none of which are derivable from a raw MT5 position
+— they need the intent ledger. Everything found is reported through
+`unmatched_venue_refs`, which is exactly what that field means when there is
+nothing to match against. Phase 3 migrates them into `positions`.
+
+A position whose magic falls in no declared range — a manually opened trade,
+which MT5 tags with magic `0` — is reported under every book, so that it is
+never invisible. Health counts distinct `position_ticket` values, not summed
+report lengths, so one manual trade is one open position.
+
+### Where MetaTrader 5 lives
+
+Exactly one module imports it: `src/trading_house/brokers/mt5/terminal.py`.
+Everything else — the DTOs, the gateway, the contract translation, the retcode
+mapping, the adapter — is pure Python that imports and tests on Linux, where
+the coverage-gated CI job runs. `terminal.py` is omitted from coverage and
+capped at 80 statements by `tests/acceptance/test_architecture.py`, so it
+cannot quietly become a home for untested logic.
+
+### Auditing a broker
+
+The audit script connects read-only, refuses a non-demo account, and prints
+what the broker actually reports for each bound symbol. It is how you find out
+that a broker's real numbers disagree with an assumption before code does.
+
+```bash
+uv run python scripts/broker_audit.py
+```
+
+### Running the live tests
+
+These need MetaTrader 5 running on Windows, logged into a demo account. They
+skip with a specific reason otherwise, including when the logged-in account is
+not a demo — they never open a session against a live account.
+
+```bash
+uv run pytest tests/live -m mt5 -rs
+```
+
 ## Operator commands
 
 ```bash
@@ -187,6 +256,17 @@ uv run trading-house constitution sign --constitution config/venue_binding.mt5.y
 uv run trading-house health
 ```
 
+Reconciliation is the gate's fifth step, running after the audit chain is
+verified and before the startup events are appended. It reports; it never
+fails readiness — Phase 1 owns no positions and has no ledger to compare
+against, so a manual demo trade is information, not a fault. The JSON gains
+`books_reconciled` and `open_positions`.
+
+If MetaTrader 5 is unavailable, the binding is absent, or the terminal will
+not start, the venue step is simply not performed: `books_reconciled` is empty
+and `open_positions` is zero. A **live account is not** treated that way — it
+fails the gate with exit code 9.
+
 ## Recovering from a startup failure
 
 Each failure has a stable exit code and a fixed, redacted message.
@@ -233,7 +313,8 @@ and the gate is enforced on Linux.
 | `tests/unit` | Contracts, clocks, errors, signing, canonical hashing, CLI |
 | `tests/property` | Hypothesis invariants for UTC, signatures, canonical JSON, chains |
 | `tests/integration` | Real PostgreSQL: migrations, privileges, appends, tamper detection |
-| `tests/acceptance` | Architecture guards and the Phase 0 / 0.5 end-to-end gates |
+| `tests/acceptance` | Architecture guards and the Phase 0 / 0.5 / 1 end-to-end gates |
+| `tests/live` | Marked `mt5`; needs a real demo terminal, skipped everywhere else |
 
 ### The Phase 0 acceptance gate
 
@@ -253,13 +334,19 @@ and `core/schemas.py` never reference a broker-specific encoding (magic
 numbers, retcodes, fill modes). `core/venue.py` is deliberately exempt — it is
 the one place `Mt5VenueRef` is allowed to carry those facts.
 
-## What this foundation deliberately excludes
+## What this repository deliberately excludes
 
-MetaTrader 5 or any broker; strategies, sizing, risk evaluation or execution;
-market data and backtesting; LangGraph or any LLM SDK; web APIs and dashboards;
-automatic migration at startup; and live, paper, shadow or simulated trading.
+Order submission of any kind; strategies, sizing and risk evaluation; market
+data ingest and backtesting; LangGraph or any LLM SDK; web APIs and
+dashboards; automatic migration at startup; and live, paper, shadow or
+simulated trading. MetaTrader 5 is present but read-only, and reachable from
+one module.
 
 The absence is testable. `tests/acceptance/test_architecture.py` parses every
-source module and fails on an import of `MetaTrader5`, `langgraph`, `openai`,
-`anthropic` or `ccxt`, on private-key primitives outside
+source module and fails on an import of `langgraph`, `openai`, `anthropic` or
+`ccxt`, on an import of `MetaTrader5` from anywhere but
+`brokers/mt5/terminal.py`, on private-key primitives outside
 `constitution/signing.py`, and on any Alembic upgrade path in runtime code.
+`tests/acceptance/test_phase1.py` fails if the string `order_send` appears
+anywhere in `src/`, if any mutating adapter method stops refusing, or if the
+gateway ever serves a non-demo account.
