@@ -2601,6 +2601,21 @@ Expected results:
 | Multi-account or multi-terminal operation | Later; needs one terminal per account in portable mode |
 | `GatewayMetrics` wired to alerting | Phase 3, when P0 traffic and safe mode exist |
 
+## Known Gaps Carried Out Of Phase 1
+
+Found by the whole-branch review and deliberately not fixed here. None affect
+the read-only guarantee or the demo guard.
+
+| Gap | Where | Why it was parked |
+|---|---|---|
+| `order_check` request omits `type_filling`, so MT5 defaults to FOK. Against an IOC-only broker, `precheck` returns a spurious `UNSUPPORTED_FILL` | `brokers/mt5/adapter.py`, the request dict | `supported_fills` already knows the right answer, but wiring it needs the symbol contract at precheck time. Phase 3 must set it, since submission depends on it |
+| `reconcile` re-reads `positions()` once per book, so four books make four round trips and four snapshots that can disagree | `brokers/mt5/adapter.py` | Health already de-duplicates by `position_ticket`. Read once and partition when the position count matters |
+| MT5's `0.0` "unset" sentinel is normalised to `None` for `tp` but not for `sl` | `brokers/mt5/terminal.py` | Unused in a read-only phase. It matters as soon as Phase 3 reads a stop back |
+| A wedge-then-recover cycle leaves `_started` true with no `gateway.disconnected`, so the audit chain can show two connects against one disconnect | `brokers/mt5/gateway.py` | Only reachable when a blocking MT5 call hangs past the shutdown join, which already needs operator attention |
+| `symbol_select` persistently adds a symbol to Market Watch, so "changes nothing" is very slightly overstated | `terminal.py`, `scripts/broker_audit.py` | Required for ticks to be served at all. Not a trade, not a config change, but not literally nothing |
+| A nominally open but very illiquid probe symbol could tick less than once in the 5-second probe window and be refused as stale | `brokers/mt5/boundary.py` | MT5 exposes no server-time API, so tick cadence is the only signal separating "quiet" from "closed". Refusing is the safe direction |
+| The live offset assertions are satisfied by any non-raising return, so they assert little beyond "did not raise" | `tests/live/test_mt5_terminal.py` | The unit tests around `establish_utc_offset` carry the real load. A genuinely independent live check needs a known-good server timezone to compare against |
+
 ## Handoff To Phase 3
 
 Phase 3 completes `BrokerAdapter`. It must:
