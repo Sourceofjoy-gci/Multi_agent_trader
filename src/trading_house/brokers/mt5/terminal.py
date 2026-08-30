@@ -1,4 +1,3 @@
-# src/trading_house/brokers/mt5/terminal.py
 """The only module in this codebase that imports MetaTrader5.
 
 Everything here is IPC plus type conversion. Logic belongs in the pure modules,

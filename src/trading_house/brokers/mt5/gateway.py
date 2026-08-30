@@ -1,4 +1,3 @@
-# src/trading_house/brokers/mt5/gateway.py
 """A single-threaded actor owning every MetaTrader 5 call.
 
 The MetaTrader 5 Python API is not thread-safe and its calls block, so exactly
@@ -88,11 +87,13 @@ class Mt5Gateway:
         self._heartbeat = clock.now()
         self._server_utc_offset_seconds = 0
         self._stale = True
+        self._started = False
 
     def start(self) -> None:
         """Connect, refuse a non-demo account, then begin serving."""
 
         if not self._terminal.initialize():
+            self._terminal.shutdown()
             raise BrokerUnavailableError()
         try:
             if self._terminal.account_trade_mode() != ACCOUNT_TRADE_MODE_DEMO:
@@ -104,6 +105,7 @@ class Mt5Gateway:
         self._stopping.clear()
         self._thread = threading.Thread(target=self._serve, name="mt5-gateway", daemon=True)
         self._thread.start()
+        self._started = True
 
     def stop(self) -> None:
         self._stopping.set()
@@ -111,7 +113,10 @@ class Mt5Gateway:
         if thread is not None:
             thread.join(_SHUTDOWN_TIMEOUT_SECONDS)
         self._thread = None
-        self._terminal.shutdown()
+        self._drain()
+        if self._started:
+            self._started = False
+            self._terminal.shutdown()
 
     def __enter__(self) -> Self:
         self.start()
@@ -189,3 +194,23 @@ class Mt5Gateway:
                         self._failed += 1
                         self._stale = True
                 request.done.set()
+
+    def _drain(self) -> None:
+        """Fail every request the actor never reached.
+
+        Without this a caller waits out the full request timeout for an
+        answer that is already known to be unavailable, and its queue-depth
+        entry never comes back.
+        """
+
+        while True:
+            try:
+                priority_value, _, request = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            request.error = BrokerUnavailableError()
+            with self._lock:
+                self._depth[Priority(priority_value)] -= 1
+                self._failed += 1
+                self._stale = True
+            request.done.set()

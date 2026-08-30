@@ -1,4 +1,5 @@
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
@@ -76,10 +77,13 @@ def test_a_non_demo_account_is_refused_before_any_request_is_served() -> None:
 
 
 def test_a_terminal_that_will_not_initialise_raises_typed() -> None:
-    gateway = _gateway(FakeTerminal(initialises=False))
+    terminal = FakeTerminal(initialises=False)
+    gateway = _gateway(terminal)
 
     with pytest.raises(BrokerUnavailableError):
         gateway.start()
+
+    assert terminal.shutdown_calls == 1
 
 
 def test_calls_are_served_on_a_demo_account() -> None:
@@ -176,3 +180,68 @@ def test_a_failed_call_marks_state_stale_again() -> None:
         with pytest.raises(RuntimeError):
             gateway.call(Priority.MARKET_DATA, boom)
         assert gateway.metrics().stale is True
+
+
+def test_stopping_fails_queued_requests_instead_of_making_them_wait() -> None:
+    """A request the actor never reached must fail at once, not time out."""
+
+    terminal = FakeTerminal()
+    gateway = _gateway(terminal)
+    gateway.start()
+    terminal.gate.clear()
+
+    blocker = threading.Thread(
+        target=lambda: gateway.call(Priority.MARKET_DATA, lambda t: t.symbol_info("X")),
+        daemon=True,
+    )
+    blocker.start()
+    threading.Event().wait(0.2)
+
+    outcome: list[BaseException] = []
+    elapsed: list[float] = []
+
+    def victim() -> None:
+        started = time.monotonic()
+        try:
+            gateway.call(Priority.MARKET_DATA, lambda t: t.symbol_tick("EURUSD"))
+        except BaseException as error:
+            outcome.append(error)
+        elapsed.append(time.monotonic() - started)
+
+    waiter = threading.Thread(target=victim, daemon=True)
+    waiter.start()
+    threading.Event().wait(0.2)
+
+    stopper = threading.Thread(target=gateway.stop, daemon=True)
+    stopper.start()
+    threading.Event().wait(0.2)
+    terminal.gate.set()
+
+    waiter.join(10)
+    stopper.join(10)
+    blocker.join(10)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], BrokerUnavailableError)
+    assert elapsed[0] < 3.0, "the caller waited out the timeout instead of being drained"
+    assert gateway.metrics().queue_depth[Priority.MARKET_DATA] == 0
+
+
+def test_stopping_twice_shuts_the_terminal_down_once() -> None:
+    terminal = FakeTerminal()
+    gateway = _gateway(terminal)
+    gateway.start()
+
+    gateway.stop()
+    gateway.stop()
+
+    assert terminal.shutdown_calls == 1
+
+
+def test_stopping_without_starting_does_not_shut_the_terminal_down() -> None:
+    terminal = FakeTerminal()
+    gateway = _gateway(terminal)
+
+    gateway.stop()
+
+    assert terminal.shutdown_calls == 0
