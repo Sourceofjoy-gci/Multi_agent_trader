@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from trading_house.brokers.mt5.boundary import (
     SYMBOL_FILLING_FOK,
@@ -10,7 +12,10 @@ from trading_house.brokers.mt5.boundary import (
     Mt5SymbolInfo,  # noqa: F401 -- imported to prove it is part of the boundary's surface
     Mt5Tick,
     TerminalPort,
+    server_time_to_utc,
+    utc_offset_seconds,
 )
+from trading_house.core.errors import BrokerUnavailableError
 
 EXPECTED_PORT_METHODS = {
     "initialize",
@@ -93,3 +98,53 @@ def test_package_imports_on_any_platform() -> None:
     import trading_house.brokers.mt5 as package
 
     assert package is not None
+
+
+# --- server-clock arithmetic -------------------------------------------------
+#
+# MetaTrader 5 reports every timestamp in the broker server's timezone and never
+# says which one it is. These two functions are the whole of the correction, so
+# a sign error here would silently shift every timestamp the system records.
+
+
+@pytest.mark.parametrize(
+    ("offset_hours", "label"),
+    [(0, "broker on UTC"), (3, "broker ahead of UTC"), (-5, "broker behind UTC")],
+)
+def test_offset_recovers_the_real_utc_instant(offset_hours: int, label: str) -> None:
+    real_utc = datetime(2026, 8, 25, 9, 30, tzinfo=UTC)
+    real_epoch = real_utc.timestamp()
+    server_epoch = real_epoch + offset_hours * 3600
+
+    offset = utc_offset_seconds(server_epoch, real_epoch)
+
+    assert offset == offset_hours * 3600, label
+    assert server_time_to_utc(server_epoch, offset) == real_utc, label
+
+
+def test_converted_timestamps_are_timezone_aware() -> None:
+    """I-10: a naive datetime must never escape the broker boundary."""
+
+    converted = server_time_to_utc(1_756_112_400.0, 10800)
+
+    assert converted.tzinfo is not None
+    assert converted.utcoffset() == timedelta(0)
+
+
+def test_a_broker_ahead_of_utc_reads_as_an_earlier_utc_instant() -> None:
+    """Pins the sign: a server clock reading 12:00 at UTC 09:00 is UTC 09:00."""
+
+    server_noon = datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp()
+
+    assert server_time_to_utc(server_noon, 3 * 3600) == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+
+
+def test_converting_before_the_offset_is_known_raises_rather_than_guessing() -> None:
+    """An unset offset must fail loud, not pass broker time off as UTC."""
+
+    with pytest.raises(BrokerUnavailableError):
+        server_time_to_utc(1_756_112_400.0, None)
+
+
+def test_the_same_conversion_succeeds_once_the_offset_is_established() -> None:
+    assert server_time_to_utc(1_756_112_400.0, 3600).tzinfo is not None

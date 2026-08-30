@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
+
+from trading_house.core.errors import BrokerUnavailableError
 
 SYMBOL_TRADE_MODE_DISABLED = 0
 SYMBOL_TRADE_MODE_LONGONLY = 1
@@ -30,6 +32,32 @@ SYMBOL_TRADE_EXECUTION_EXCHANGE = 3
 ACCOUNT_TRADE_MODE_DEMO = 0
 ACCOUNT_TRADE_MODE_CONTEST = 1
 ACCOUNT_TRADE_MODE_REAL = 2
+
+
+def utc_offset_seconds(server_epoch: float, real_utc_epoch: float) -> int:
+    """How far the broker's clock runs ahead of UTC, in whole seconds.
+
+    MetaTrader 5 reports every timestamp in the broker server's own timezone,
+    with no indication of what that timezone is. The only way to recover UTC is
+    to compare a server clock reading against a real one taken at the same
+    moment; this is that subtraction, kept here so it can be tested.
+    """
+
+    return round(server_epoch - real_utc_epoch)
+
+
+def server_time_to_utc(server_epoch: float, offset_seconds: int | None) -> datetime:
+    """Convert a broker-server epoch to a timezone-aware UTC instant (I-10).
+
+    ``offset_seconds`` is ``None`` until the server clock has been probed. That
+    case raises rather than assuming zero: a terminal that has not established
+    the offset would otherwise pass broker-local time off as UTC, silently, and
+    every timestamp it recorded would be wrong by the broker's timezone.
+    """
+
+    if offset_seconds is None:
+        raise BrokerUnavailableError
+    return datetime.fromtimestamp(server_epoch, UTC) - timedelta(seconds=offset_seconds)
 
 
 @dataclass(frozen=True, slots=True)

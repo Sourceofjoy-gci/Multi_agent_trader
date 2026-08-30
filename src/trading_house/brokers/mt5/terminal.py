@@ -9,7 +9,7 @@ size precisely so it cannot become a home for untested behaviour.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import MetaTrader5 as mt5
 
@@ -18,14 +18,17 @@ from trading_house.brokers.mt5.boundary import (
     Mt5Position,
     Mt5SymbolInfo,
     Mt5Tick,
+    server_time_to_utc,
+    utc_offset_seconds,
 )
+from trading_house.core.errors import BrokerUnavailableError
 
 
 class Mt5Terminal:
     """A thin, typed shell over the MetaTrader 5 IPC surface."""
 
     def __init__(self) -> None:
-        self._offset = timedelta(0)
+        self._offset: int | None = None
 
     def initialize(self) -> bool:
         return bool(mt5.initialize())
@@ -40,13 +43,13 @@ class Mt5Terminal:
     def server_utc_offset_seconds(self) -> int:
         tick = mt5.symbol_info_tick("EURUSD")
         if tick is None:
-            return 0
-        offset = round(float(tick.time) - datetime.now(UTC).timestamp())
-        self._offset = timedelta(seconds=offset)
+            raise BrokerUnavailableError
+        offset = utc_offset_seconds(float(tick.time), datetime.now(UTC).timestamp())
+        self._offset = offset
         return offset
 
     def _to_utc(self, server_epoch: float) -> datetime:
-        return datetime.fromtimestamp(float(server_epoch), UTC) - self._offset
+        return server_time_to_utc(float(server_epoch), self._offset)
 
     def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None:
         mt5.symbol_select(server_symbol, True)
