@@ -58,18 +58,39 @@ def test_audit_verify_accepts_an_empty_ledger() -> None:
 
 
 @pytest.mark.usefixtures("isolated_audit_ledger")
-def test_health_reports_ready_and_extends_the_verified_chain() -> None:
-    health = runner.invoke(cli.app, ["health", "--alembic-config", ALEMBIC_CONFIG])
+def test_health_reports_ready_and_extends_the_verified_chain(tmp_path: Path) -> None:
+    """The venue binding is pointed at nothing on purpose.
+
+    How many entries a health run appends depends on whether a MetaTrader 5
+    terminal happens to be running on the machine: with one, the gateway
+    lifecycle adds four more. Directing the venue step at an absent binding
+    makes the count a property of the code rather than of the developer's
+    desktop.
+    """
+
+    health = runner.invoke(
+        cli.app,
+        [
+            "health",
+            "--alembic-config",
+            ALEMBIC_CONFIG,
+            "--venue-binding",
+            str(tmp_path / "absent.yaml"),
+        ],
+    )
 
     assert health.exit_code == cli.ExitCode.OK
     report = json.loads(health.stdout)
     assert report["ready"] is True
     assert report["constitution_version"] == 1
     assert report["audit_entries_verified"] == 0
+    assert report["books_reconciled"] == []
 
     verified = runner.invoke(cli.app, ["audit", "verify"])
     assert verified.exit_code == cli.ExitCode.OK
-    assert json.loads(verified.stdout)["checked_entries"] == 2
+    payload = json.loads(verified.stdout)
+    assert payload["valid"] is True
+    assert payload["checked_entries"] == 2
 
 
 @pytest.mark.usefixtures("isolated_audit_ledger")

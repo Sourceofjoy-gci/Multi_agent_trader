@@ -9,5 +9,5 @@ books:
   equity_swing: { magic_range: [130000, 139999] }
   sleeve:       { magic_range: [140000, 149999] }
 instruments:
-  fx.eurusd:    { server_symbol: "EURUSD.raw" }
+  fx.eurusd:    { server_symbol: "EURUSD" }
   metal.xauusd: { server_symbol: "XAUUSD" }

@@ -3,7 +3,10 @@
 Read-only. Connects to a DEMO terminal, reads symbol and account metadata,
 and writes a Markdown report. Sends no orders and changes nothing.
 
-Usage:  uv run python scripts/broker_audit.py EURUSD XAUUSD > docs/broker-audit.md
+Audits the symbols the signed venue binding actually names, unless symbols
+are given explicitly.
+
+Usage:  uv run python scripts/broker_audit.py > docs/broker-audit.md
 """
 
 from __future__ import annotations
@@ -13,10 +16,14 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
+from pathlib import Path
+
+from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO
+from trading_house.constitution.binding import load_venue_binding
 
 SPREAD_SAMPLES = 30
 SPREAD_INTERVAL_SECONDS = 0.2
-from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO  # noqa: E402
+CONFIG = Path("config")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +58,7 @@ def format_audit_report(rows: Sequence[AuditRow]) -> str:
             lines.append(f"- `{field.name}`: {getattr(row, field.name)}")
         notes: list[str] = []
         if row.trade_stops_level == 0:
-            notes.append("zero stops_level — min_stop_distance floors to one price increment")
+            notes.append("zero stops_level: min_stop_distance floors to one price increment")
         if row.trade_mode != 4:
             notes.append(f"trade_mode is {row.trade_mode}, not FULL — restricted trading")
         if row.filling_mode == 0:
@@ -119,5 +126,22 @@ def main(symbols: Sequence[str]) -> int:
     return 0
 
 
+def bound_symbols() -> list[str]:
+    """The server symbols this system will actually use, from the binding.
+
+    Auditing a hardcoded guess instead is exactly how a signed binding naming
+    a symbol the broker does not have survives an audit that looks healthy:
+    the report is full of numbers, and none of them are for the symbol the
+    gateway will ask for.
+    """
+
+    binding = load_venue_binding(
+        CONFIG / "venue_binding.mt5.yaml",
+        CONFIG / "venue_binding.mt5.yaml.sig",
+        CONFIG / "risk_constitution.public.pem",
+    )
+    return [bound.server_symbol for bound in binding.instruments.values()]
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:] or ["EURUSD", "XAUUSD"]))
+    raise SystemExit(main(sys.argv[1:] or bound_symbols()))

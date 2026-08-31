@@ -297,12 +297,31 @@ def _book_reconciler(
     in which we are connected to a live account and merely not trading yet.
     """
 
+    def _record_skip(reason: str) -> None:
+        """Put the reason the venue step was skipped into the hash chain.
+
+        Without this the gate reports ready with an empty ``books_reconciled``
+        and nothing distinguishes "no positions" from "never reached the
+        broker" -- which is exactly how a binding naming a symbol the broker
+        does not have goes unnoticed run after run.
+        """
+
+        ledger.append(
+            build_audit_event(
+                "venue.skipped",
+                SystemClock().now(),
+                {"venue": "mt5", "reason": reason},
+                source_component="brokers.mt5",
+            )
+        )
+
     if not venue_binding.exists():
         return _empty_reconciliation
 
     def reconcile_books() -> Mapping[BookId, ReconciliationReport]:
         terminal_factory = _mt5_terminal_factory()
         if terminal_factory is None:
+            _record_skip("metatrader5 unavailable on this platform")
             return {}
 
         binding = load_venue_binding(
@@ -326,6 +345,7 @@ def _book_reconciler(
         try:
             gateway.start()
         except BrokerUnavailableError:
+            _record_skip("terminal unavailable, or its clock could not be read")
             return {}
         try:
             adapter = Mt5BrokerAdapter(gateway, binding, clock=clock)
