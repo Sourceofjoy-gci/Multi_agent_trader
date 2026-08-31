@@ -465,3 +465,188 @@ def test_failed_sign_leaves_no_temporary_files(tmp_path: Path) -> None:
     )
 
     assert list(output_dir.iterdir()) == []
+
+
+def test_broker_errors_have_stable_exit_codes() -> None:
+    from trading_house.core.errors import BrokerUnavailableError, NonDemoAccountError
+
+    assert cli.EXIT_CODES[BrokerUnavailableError] == cli.ExitCode.BROKER
+    assert cli.EXIT_CODES[NonDemoAccountError] == cli.ExitCode.ACCOUNT_MODE
+
+
+# --- the health gate's venue-reconciliation step ----------------------------
+#
+# Reconciliation reports; it does not fail readiness, and that tolerance
+# extends to the step being unavailable entirely. The one thing it must never
+# tolerate is a live account.
+
+_BINDING_YAML = b"""
+venue: mt5
+books:
+  fx_scalp: {magic_range: [110000, 119999]}
+  fx_swing: {magic_range: [120000, 129999]}
+instruments:
+  fx.eurusd: {server_symbol: "EURUSD"}
+"""
+
+
+class _RecordingLedger:
+    def __init__(self) -> None:
+        self.appended: list[Any] = []
+
+    def append(self, event: Any) -> None:
+        self.appended.append(event)
+
+
+class _StubTerminal:
+    """A TerminalPort needing neither MetaTrader 5 nor Windows."""
+
+    def __init__(self, *, trade_mode: int = 0, initialises: bool = True) -> None:
+        self.trade_mode = trade_mode
+        self.initialises = initialises
+        self.shutdown_calls = 0
+
+    def initialize(self) -> bool:
+        return self.initialises
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    def account_trade_mode(self) -> int:
+        return self.trade_mode
+
+    def terminal_connected(self) -> bool:
+        return True
+
+    def server_utc_offset_seconds(self) -> int:
+        return 0
+
+    def symbol_info(self, server_symbol: str) -> Any:
+        return None
+
+    def symbol_tick(self, server_symbol: str) -> Any:
+        return None
+
+    def positions(self) -> tuple[Any, ...]:
+        return ()
+
+    def order_check(self, request: Any) -> Any:
+        return None
+
+    def last_error(self) -> tuple[int, str]:
+        return 0, "ok"
+
+
+def _reconciler(tmp_path: Path, ledger: Any) -> Any:
+    binding = tmp_path / "venue_binding.mt5.yaml"
+    binding.write_bytes(_BINDING_YAML)
+    return cli._book_reconciler(binding, tmp_path / "sig", tmp_path / "key", ledger)
+
+
+def test_a_missing_venue_binding_skips_reconciliation_rather_than_failing(
+    tmp_path: Path,
+) -> None:
+    reconcile = cli._book_reconciler(
+        tmp_path / "absent.yaml", tmp_path / "sig", tmp_path / "key", _RecordingLedger()
+    )
+
+    assert reconcile() == {}
+
+
+def test_an_unavailable_metatrader5_skips_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coverage-gated CI job runs on Linux, where MetaTrader5 cannot even
+    be imported. Health must still report on its other four steps."""
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: None)
+
+    assert _reconciler(tmp_path, _RecordingLedger())() == {}
+
+
+def test_a_terminal_that_will_not_initialise_skips_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+
+    monkeypatch.setattr(
+        cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal(initialises=False)
+    )
+    monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
+
+    assert _reconciler(tmp_path, _RecordingLedger())() == {}
+
+
+def test_a_live_account_is_never_degraded_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The demo guard is the whole safety story of this phase. Every other
+    venue failure degrades to 'step not performed'; this one must not, or a
+    live account becomes indistinguishable from an absent terminal."""
+
+    from trading_house.constitution.binding import parse_venue_binding
+    from trading_house.core.errors import NonDemoAccountError
+
+    terminal = _StubTerminal(trade_mode=2)  # ACCOUNT_TRADE_MODE_REAL
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: terminal)
+    monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
+
+    with pytest.raises(NonDemoAccountError):
+        _reconciler(tmp_path, _RecordingLedger())()
+
+    assert terminal.shutdown_calls == 1
+
+
+def test_a_refused_live_account_still_leaves_an_audit_trail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connection attempt happened. It belongs in the hash chain even
+    though the gateway refused to serve a single request over it."""
+
+    from trading_house.constitution.binding import parse_venue_binding
+    from trading_house.core.errors import NonDemoAccountError
+
+    ledger = _RecordingLedger()
+    monkeypatch.setattr(
+        cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal(trade_mode=2)
+    )
+    monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
+
+    with pytest.raises(NonDemoAccountError):
+        _reconciler(tmp_path, ledger)()
+
+    assert [event.event_type for event in ledger.appended] == ["gateway.connected"]
+    assert all("account" not in str(event.payload).lower() for event in ledger.appended)
+
+
+def test_a_demo_account_reconciles_every_declared_book(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+
+    ledger = _RecordingLedger()
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
+    monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
+
+    reports = _reconciler(tmp_path, ledger)()
+
+    assert set(reports) == {"fx_scalp", "fx_swing"}
+    assert [event.event_type for event in ledger.appended] == [
+        "gateway.connected",
+        "gateway.demo_verified",
+        "gateway.reconciled",
+        "gateway.disconnected",
+    ]
+
+
+def test_an_unverifiable_venue_binding_fails_the_gate_rather_than_degrading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binding that is present but whose signature does not verify is a
+    tampering signal, not an absent venue. Degrading it to 'step not
+    performed' would let an edited symbol map pass unnoticed."""
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
+
+    with pytest.raises(SignatureVerificationError):
+        _reconciler(tmp_path, _RecordingLedger())()

@@ -2018,7 +2018,8 @@ git commit -m "feat: serialise terminal calls through a prioritised actor"
 
 **Interfaces:**
 - Produces: `Mt5BrokerAdapter(gateway, binding)` implementing `BrokerAdapter`.
-- Consumes: `Mt5Gateway`, `Priority` (Task 8); `to_instrument_contract`, `asset_class_for` (Task 6); `reject_reason_for` (Task 4); `derive_magic` (Task 5); `VenueBinding` from `constitution.binding`; `BrokerAdapter`, `MarketSnapshot`, `Quote`, `ReconciliationReport`, `VenueHealth` from `brokers.base`.
+- Consumes: `Mt5Gateway`, `Priority` (Task 8); `to_instrument_contract`, `asset_class_for` (Task 6);
+- Note: `derive_magic` (Task 5) is deliberately NOT used here. No read-only method needs it; Phase 3 consumes it when submitting. Do not import it. `reject_reason_for` (Task 4); `VenueBinding` from `constitution.binding`; `BrokerAdapter`, `MarketSnapshot`, `Quote`, `ReconciliationReport`, `VenueHealth` from `brokers.base`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2087,7 +2088,7 @@ instruments:
 def _adapter(terminal: object) -> tuple[Mt5BrokerAdapter, Mt5Gateway]:
     gateway = Mt5Gateway(terminal, clock=SystemClock(), request_timeout_seconds=5.0)  # type: ignore[arg-type]
     gateway.start()
-    return Mt5BrokerAdapter(gateway, BINDING), gateway
+    return Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock()), gateway
 
 
 def test_describe_instrument_maps_a_terminal_symbol(symbol_terminal: object) -> None:
@@ -2417,8 +2418,6 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.mt5
-
 
 def _terminal_available() -> bool:
     if sys.platform != "win32":
@@ -2490,26 +2489,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MT5_PACKAGE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5"
-
-
-def test_only_the_terminal_module_imports_metatrader5() -> None:
-    offenders = []
-    for path in sorted((PROJECT_ROOT / "src").rglob("*.py")):
-        if path.name == "terminal.py" and path.parent == MT5_PACKAGE:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(
-                a.name.split(".")[0] == "MetaTrader5" for a in node.names
-            ):
-                offenders.append(path.name)
-            elif (
-                isinstance(node, ast.ImportFrom)
-                and node.module
-                and node.module.split(".")[0] == "MetaTrader5"
-            ):
-                offenders.append(path.name)
-    assert offenders == []
 
 
 def test_the_phase_sends_no_orders() -> None:
@@ -2621,6 +2600,21 @@ Expected results:
 | Real trading-session calendars | With the equity work; Phase 1 derives a default |
 | Multi-account or multi-terminal operation | Later; needs one terminal per account in portable mode |
 | `GatewayMetrics` wired to alerting | Phase 3, when P0 traffic and safe mode exist |
+
+## Known Gaps Carried Out Of Phase 1
+
+Found by the whole-branch review and deliberately not fixed here. None affect
+the read-only guarantee or the demo guard.
+
+| Gap | Where | Why it was parked |
+|---|---|---|
+| `order_check` request omits `type_filling`, so MT5 defaults to FOK. Against an IOC-only broker, `precheck` returns a spurious `UNSUPPORTED_FILL` | `brokers/mt5/adapter.py`, the request dict | `supported_fills` already knows the right answer, but wiring it needs the symbol contract at precheck time. Phase 3 must set it, since submission depends on it |
+| `reconcile` re-reads `positions()` once per book, so four books make four round trips and four snapshots that can disagree | `brokers/mt5/adapter.py` | Health already de-duplicates by `position_ticket`. Read once and partition when the position count matters |
+| MT5's `0.0` "unset" sentinel is normalised to `None` for `tp` but not for `sl` | `brokers/mt5/terminal.py` | Unused in a read-only phase. It matters as soon as Phase 3 reads a stop back |
+| A wedge-then-recover cycle leaves `_started` true with no `gateway.disconnected`, so the audit chain can show two connects against one disconnect | `brokers/mt5/gateway.py` | Only reachable when a blocking MT5 call hangs past the shutdown join, which already needs operator attention |
+| `symbol_select` persistently adds a symbol to Market Watch, so "changes nothing" is very slightly overstated | `terminal.py`, `scripts/broker_audit.py` | Required for ticks to be served at all. Not a trade, not a config change, but not literally nothing |
+| A nominally open but very illiquid probe symbol could tick less than once in the 5-second probe window and be refused as stale | `brokers/mt5/boundary.py` | MT5 exposes no server-time API, so tick cadence is the only signal separating "quiet" from "closed". Refusing is the safe direction |
+| The live offset assertions are satisfied by any non-raising return, so they assert little beyond "did not raise" | `tests/live/test_mt5_terminal.py` | The unit tests around `establish_utc_offset` carry the real load. A genuinely independent live check needs a known-good server timezone to compare against |
 
 ## Handoff To Phase 3
 

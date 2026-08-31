@@ -45,7 +45,10 @@ class InstrumentContract(CanonicalModel):
     freeze_distance: PositiveDecimal
     session_calendar_id: NonEmptyStr
     financing: FinancingModel
-    shortable: bool
+    # Encodes MT5's trade modes exactly: both false means close-only (no new
+    # positions in either direction, only closing existing ones).
+    can_open_long: bool
+    can_open_short: bool
     supported_fills: frozenset[FillPolicy] = Field(min_length=1)
 
     @model_validator(mode="after")

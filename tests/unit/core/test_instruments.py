@@ -20,7 +20,8 @@ VALID: dict[str, object] = {
     "freeze_distance": Decimal("0.0001"),
     "session_calendar_id": "fx.24x5",
     "financing": FinancingModel.SWAP,
-    "shortable": True,
+    "can_open_long": True,
+    "can_open_short": True,
     "supported_fills": frozenset({FillPolicy.IOC, FillPolicy.FOK}),
 }
 
@@ -34,7 +35,7 @@ def test_valid_contract_builds() -> None:
 def test_contract_is_frozen() -> None:
     contract = InstrumentContract(**VALID)
     with pytest.raises(ValidationError):
-        contract.shortable = False
+        contract.can_open_short = False
 
 
 def test_quantity_bounds_must_be_ordered() -> None:
@@ -59,11 +60,11 @@ def test_equity_cfd_may_be_long_only() -> None:
             "instrument_id": "equity_cfd.aapl",
             "asset_class": AssetClass.EQUITY_CFD,
             "financing": FinancingModel.DIVIDEND_ADJUSTMENT,
-            "shortable": False,
+            "can_open_short": False,
             "session_calendar_id": "xnas.regular",
         }
     )
-    assert contract.shortable is False
+    assert contract.can_open_short is False
 
 
 def test_distances_are_rejected_when_not_positive() -> None:

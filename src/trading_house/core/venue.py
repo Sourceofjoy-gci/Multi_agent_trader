@@ -7,7 +7,7 @@ reference, where forensics can reach them and the risk engine cannot.
 from enum import Enum
 from typing import Literal, Self
 
-from pydantic import PositiveInt, model_validator
+from pydantic import NonNegativeInt, PositiveInt, model_validator
 
 from trading_house.core.values import (
     CanonicalModel,
@@ -41,6 +41,7 @@ class RejectReason(str, Enum):  # noqa: UP042
     INSUFFICIENT_FUNDS = "insufficient_funds"
     TRADE_DISABLED = "trade_disabled"
     ACCOUNT_DISABLED = "account_disabled"
+    UNKNOWN = "unknown"
 
 
 REJECT_CLASS: dict[RejectReason, RejectClass] = {
@@ -55,6 +56,7 @@ REJECT_CLASS: dict[RejectReason, RejectClass] = {
     RejectReason.INSUFFICIENT_FUNDS: RejectClass.AUTHORITY,
     RejectReason.TRADE_DISABLED: RejectClass.AUTHORITY,
     RejectReason.ACCOUNT_DISABLED: RejectClass.AUTHORITY,
+    RejectReason.UNKNOWN: RejectClass.AUTHORITY,
 }
 
 
@@ -62,7 +64,10 @@ class Mt5VenueRef(CanonicalModel):
     """Everything MT5-shaped about one submitted intent, in one place."""
 
     venue: Literal[Venue.MT5]
-    magic: PositiveInt
+    # 0 is MT5's "no magic set" -- a manually opened or foreign position.
+    # ``derive_magic`` only ever produces in-range positive values for our own
+    # refs, so 0 can only ever mean "not ours", never "ours, unassigned".
+    magic: NonNegativeInt
     server_symbol: NonEmptyStr
     order_ticket: PositiveInt | None = None
     position_ticket: PositiveInt | None = None

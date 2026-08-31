@@ -3,10 +3,12 @@ import pytest
 from trading_house.core.errors import (
     AuditAppendError,
     AuditIntegrityError,
+    BrokerUnavailableError,
     ConfigurationError,
     DatabaseUnavailableError,
     ExitCode,
     MigrationMismatchError,
+    NonDemoAccountError,
     SchemaValidationError,
     SignatureVerificationError,
     TimestampError,
@@ -65,3 +67,14 @@ def test_errors_reject_secret_bearing_positional_details(
         error_type(raw_detail)
 
     assert raw_detail not in str(error_type())
+
+
+def test_broker_errors_carry_fixed_public_messages() -> None:
+    assert str(BrokerUnavailableError()) == "broker terminal unavailable"
+    assert str(NonDemoAccountError()) == "refusing to operate a non-demo account"
+
+
+def test_broker_exit_codes_are_distinct_and_new() -> None:
+    assert ExitCode.BROKER == 8
+    assert ExitCode.ACCOUNT_MODE == 9
+    assert len({member.value for member in ExitCode}) == len(list(ExitCode))

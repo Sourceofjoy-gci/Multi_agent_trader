@@ -20,7 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src" / "trading_house"
 SIGNING_MODULE = SOURCE_ROOT / "constitution" / "signing.py"
 
-FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"MetaTrader5", "langgraph", "openai", "anthropic", "ccxt"})
+FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"langgraph", "openai", "anthropic", "ccxt"})
+MT5_IMPORT_ALLOWED = frozenset({SOURCE_ROOT / "brokers" / "mt5" / "terminal.py"})
+TERMINAL_STATEMENT_CAP = 80
 PRIVATE_KEY_SYMBOLS = frozenset({"load_pem_private_key", "Ed25519PrivateKey"})
 MIGRATION_CALL_NAMES = frozenset({"upgrade", "downgrade"})
 SIGNING_PRIMITIVES = frozenset({"sign_bytes", "sign_file", "load_private_key", "generate_key_pair"})
@@ -115,6 +117,41 @@ def test_no_module_imports_a_broker_or_agent_framework() -> None:
     }
 
     assert offenders == {}
+
+
+def test_metatrader5_is_importable_from_exactly_one_module() -> None:
+    """The venue-neutral core exists so a second broker is cheap. One file
+    may speak MT5; anything wider re-creates the coupling this phase removed."""
+
+    offenders = [
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path, tree in _parsed()
+        if path not in MT5_IMPORT_ALLOWED and "MetaTrader5" in _imported_top_level(tree)
+    ]
+
+    assert offenders == []
+
+
+def test_the_terminal_module_is_where_metatrader5_actually_lives() -> None:
+    """Guard the guard: if terminal.py stops importing it, the exemption is stale."""
+
+    terminal = SOURCE_ROOT / "brokers" / "mt5" / "terminal.py"
+    assert terminal.exists()
+    tree = ast.parse(terminal.read_text(encoding="utf-8"))
+    assert "MetaTrader5" in _imported_top_level(tree)
+
+
+def test_the_terminal_module_stays_thin() -> None:
+    """terminal.py is omitted from coverage, so a size cap is what stops it
+    becoming the place untested logic accumulates."""
+
+    terminal = SOURCE_ROOT / "brokers" / "mt5" / "terminal.py"
+    tree = ast.parse(terminal.read_text(encoding="utf-8"))
+    statements = sum(1 for node in ast.walk(tree) if isinstance(node, ast.stmt))
+
+    assert statements <= TERMINAL_STATEMENT_CAP, (
+        f"terminal.py has {statements} statements; move logic into the pure modules"
+    )
 
 
 def test_only_the_signing_module_touches_private_key_primitives() -> None:

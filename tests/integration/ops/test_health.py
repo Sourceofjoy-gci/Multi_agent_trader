@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,7 @@ import pytest
 from pydantic import SecretStr
 
 from trading_house.audit.repository import PostgresAuditLedger
+from trading_house.brokers.base import ReconciliationReport
 from trading_house.constitution.loader import load_constitution
 from trading_house.core.clock import SystemClock
 from trading_house.core.errors import (
@@ -19,6 +21,8 @@ from trading_house.core.errors import (
     DatabaseUnavailableError,
     SignatureVerificationError,
 )
+from trading_house.core.values import BookId
+from trading_house.core.venue import Mt5VenueRef, Venue
 from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
 from trading_house.ops.health import HealthService
@@ -46,12 +50,38 @@ def _settings(dsn: str, *, signature_name: str = "risk_constitution.yaml.sig") -
     )
 
 
-def _service(database: DatabaseHarness, settings: RuntimeSettings) -> HealthService:
+def _reconciliation(book: BookId, tickets: tuple[int, ...]) -> ReconciliationReport:
+    """A venue report shaped the way Phase 1 actually produces them.
+
+    ``positions`` is always empty until Phase 3's intent ledger exists, so
+    everything the venue holds arrives as an unmatched ref.
+    """
+
+    return ReconciliationReport(
+        book=book,
+        positions=(),
+        unmatched_venue_refs=tuple(
+            Mt5VenueRef(venue=Venue.MT5, magic=0, server_symbol="EURUSD", position_ticket=ticket)
+            for ticket in tickets
+        ),
+        reconciled_at=datetime.now(UTC),
+    )
+
+
+def _service(
+    database: DatabaseHarness,
+    settings: RuntimeSettings,
+    *,
+    reconcile_books: Any = None,
+) -> HealthService:
     def _connect() -> Any:
         return open_runtime_connection(settings.database_dsn)
 
     def _revision(connection: Any) -> None:
         assert_at_head(connection, database.alembic_config)
+
+    def _no_venue() -> Mapping[BookId, ReconciliationReport]:
+        return {}
 
     return HealthService(
         load_constitution=lambda: load_constitution(
@@ -62,6 +92,7 @@ def _service(database: DatabaseHarness, settings: RuntimeSettings) -> HealthServ
         open_connection=_connect,
         assert_revision=_revision,
         ledger=PostgresAuditLedger(_connect),
+        reconcile_books=reconcile_books or _no_venue,
         clock=SystemClock(),
         application_version="0.1.0",
     )
@@ -178,3 +209,40 @@ def test_detected_tampering_prevents_ready_and_appends_nothing(
     records = _ledger(database).records()
     assert len(records) == 2, "a failed gate must not append startup events"
     assert _ledger(database).verify().valid is False
+
+
+def test_venue_reconciliation_reaches_the_report_without_disturbing_the_chain(
+    database: DatabaseHarness,
+) -> None:
+    """A manually opened position belongs to no book, so every book's report
+    carries it. Counting report lengths would report one trade as two."""
+
+    shared_orphan = 88_001
+
+    def reconcile() -> Mapping[BookId, ReconciliationReport]:
+        return {
+            "fx_scalp": _reconciliation("fx_scalp", (shared_orphan, 110_042)),
+            "fx_swing": _reconciliation("fx_swing", (shared_orphan,)),
+        }
+
+    report = _service(database, _settings(database.runtime_dsn), reconcile_books=reconcile).run()
+
+    assert report.ready is True
+    assert report.books_reconciled == ("fx_scalp", "fx_swing")
+    assert report.open_positions == 2
+
+    integrity = _ledger(database).verify()
+    assert integrity.valid is True
+
+
+def test_a_venue_holding_positions_never_blocks_readiness(database: DatabaseHarness) -> None:
+    """Phase 1 owns no positions and has no ledger to compare against, so a
+    demo account with open trades must not make health permanently red."""
+
+    def reconcile() -> Mapping[BookId, ReconciliationReport]:
+        return {"fx_scalp": _reconciliation("fx_scalp", (1, 2, 3))}
+
+    report = _service(database, _settings(database.runtime_dsn), reconcile_books=reconcile).run()
+
+    assert report.ready is True
+    assert report.open_positions == 3
