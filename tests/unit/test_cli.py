@@ -650,3 +650,36 @@ def test_an_unverifiable_venue_binding_fails_the_gate_rather_than_degrading(
 
     with pytest.raises(SignatureVerificationError):
         _reconciler(tmp_path, _RecordingLedger())()
+
+
+def test_an_unreachable_venue_leaves_a_reason_in_the_hash_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty books_reconciled otherwise reads identically whether the
+    account held no positions or the broker was never reached. That is how a
+    binding naming a symbol the broker does not have goes unnoticed."""
+
+    from trading_house.constitution.binding import parse_venue_binding
+
+    ledger = _RecordingLedger()
+    monkeypatch.setattr(
+        cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal(initialises=False)
+    )
+    monkeypatch.setattr(cli, "load_venue_binding", lambda *a: parse_venue_binding(_BINDING_YAML))
+
+    assert _reconciler(tmp_path, ledger)() == {}
+
+    assert [event.event_type for event in ledger.appended] == ["venue.skipped"]
+    assert "reason" in ledger.appended[0].payload
+    assert all("account" not in str(event.payload).lower() for event in ledger.appended)
+
+
+def test_an_absent_metatrader5_is_recorded_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = _RecordingLedger()
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: None)
+
+    assert _reconciler(tmp_path, ledger)() == {}
+
+    assert [event.event_type for event in ledger.appended] == ["venue.skipped"]
