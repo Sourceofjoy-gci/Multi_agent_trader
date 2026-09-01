@@ -75,8 +75,8 @@ def is_aligned(timeframe: Timeframe, event_time: datetime, *, server_offset_seco
     the server epoch, which is where the boundary actually is.
     """
 
-    server_epoch = event_time.timestamp() + server_offset_seconds
-    return int(server_epoch) % _SECONDS[timeframe] == 0
+    server_epoch = int(event_time.timestamp()) + server_offset_seconds
+    return server_epoch % _SECONDS[timeframe] == 0
 
 
 class Bar(CanonicalModel):
@@ -128,6 +128,16 @@ class Coverage(CanonicalModel):
     clean_bars: NonNegativeInt
     defective_bars: NonNegativeInt
 
+    @field_validator("earliest_event_time", "latest_event_time", "latest_availability_time")
+    @classmethod
+    def normalize_optional_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
 
 class IngestRun(CanonicalModel):
     """One backfill or update attempt, and what it actually achieved.
@@ -157,6 +167,16 @@ class IngestRun(CanonicalModel):
     @field_validator("requested_from", "requested_to", "started_at", "finished_at")
     @classmethod
     def normalize_run_timestamps(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
+    @field_validator("earliest_event_time")
+    @classmethod
+    def normalize_optional_event_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
         try:
             return ensure_utc(value)
         except TimestampError as error:

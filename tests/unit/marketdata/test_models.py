@@ -96,3 +96,86 @@ def test_a_defective_bar_may_carry_the_impossible_value_it_was_sent() -> None:
 def test_bars_are_frozen() -> None:
     with pytest.raises(ValidationError):
         _bar().open = Decimal("2")  # type: ignore[misc]
+
+
+def test_all_canonical_models_reject_naive_datetimes() -> None:
+    """Sweep test: every CanonicalModel subclass must validate all datetime
+    fields (required and optional) to UTC awareness.
+
+    Detects if a new model or field is added without validators.
+    """
+    from typing import get_args
+    from uuid import UUID
+
+    from trading_house.marketdata.models import CanonicalModel, Coverage, IngestOutcome, IngestRun
+
+    naive_dt = datetime(2026, 8, 25, 9, 0)
+    aware_dt = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+
+    model_builders: dict[type[CanonicalModel], dict[str, object]] = {
+        Bar: {
+            "instrument_id": "fx.eurusd",
+            "timeframe": Timeframe.M1,
+            "event_time": aware_dt,
+            "availability_time": aware_dt,
+            "open": Decimal("1.10000"),
+            "high": Decimal("1.10050"),
+            "low": Decimal("1.09950"),
+            "close": Decimal("1.10020"),
+            "tick_volume": 42,
+            "spread": 9,
+            "real_volume": 0,
+            "quality": BarQuality.OK,
+        },
+        Coverage: {
+            "instrument_id": "fx.eurusd",
+            "timeframe": Timeframe.M1,
+            "earliest_event_time": aware_dt,
+            "latest_event_time": aware_dt,
+            "latest_availability_time": aware_dt,
+            "clean_bars": 10,
+            "defective_bars": 0,
+        },
+        IngestRun: {
+            "run_id": UUID("12345678-1234-5678-1234-567812345678"),
+            "instrument_id": "fx.eurusd",
+            "timeframe": Timeframe.M1,
+            "requested_from": aware_dt,
+            "requested_to": aware_dt,
+            "started_at": aware_dt,
+            "finished_at": aware_dt,
+            "earliest_event_time": aware_dt,
+            "bars_returned": 10,
+            "bars_stored": 10,
+            "bars_rejected": 0,
+            "bars_conflicting": 0,
+            "expected_bars": 10,
+            "coverage_ratio": Decimal("1.0"),
+            "outcome": IngestOutcome.COMPLETE,
+            "detail": None,
+        },
+    }
+
+    # Get all datetime fields for each model
+    datetime_fields: dict[type[CanonicalModel], list[str]] = {}
+    for model_cls in model_builders:
+        fields = []
+        for field_name, field_info in model_cls.model_fields.items():
+            annotation = field_info.annotation
+            # Check if annotation is datetime or datetime | None
+            if annotation is datetime:
+                fields.append(field_name)
+            else:
+                # Handle Union/| syntax (datetime | None, etc.)
+                args = get_args(annotation)
+                if datetime in args:
+                    fields.append(field_name)
+        datetime_fields[model_cls] = fields
+
+    # Test that each model rejects naive datetimes for all datetime fields
+    for model_cls, fields in datetime_fields.items():
+        for field_name in fields:
+            kwargs = dict(model_builders[model_cls])
+            kwargs[field_name] = naive_dt
+            with pytest.raises(ValidationError):
+                model_cls(**kwargs)  # type: ignore[arg-type]
