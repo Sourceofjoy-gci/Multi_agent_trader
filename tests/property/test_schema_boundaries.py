@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, get_args
 from uuid import uuid4
@@ -31,6 +31,14 @@ from trading_house.core.schemas import (
 )
 from trading_house.core.values import IntentState, PositiveQuantity, Quantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, Venue
+from trading_house.marketdata.models import (
+    Bar,
+    BarQuality,
+    Coverage,
+    IngestOutcome,
+    IngestRun,
+    Timeframe,
+)
 from trading_house.memory.models import AgentBelief, MemoryStore, ObservedFact, WriterKind
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
@@ -185,6 +193,47 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "agent_run_id": "r-1",
         "claim": "EURUSD trends after London open",
         "availability_time": AWARE,
+    },
+    Bar: {
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.M1,
+        "event_time": AWARE,
+        "availability_time": AWARE + timedelta(minutes=1),
+        "open": Decimal("1.10000"),
+        "high": Decimal("1.10050"),
+        "low": Decimal("1.09950"),
+        "close": Decimal("1.10020"),
+        "tick_volume": 42,
+        "spread": 9,
+        "real_volume": 0,
+        "quality": BarQuality.OK,
+    },
+    Coverage: {
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.M1,
+        "earliest_event_time": AWARE,
+        "latest_event_time": AWARE,
+        "latest_availability_time": AWARE + timedelta(minutes=1),
+        "clean_bars": 10,
+        "defective_bars": 0,
+    },
+    IngestRun: {
+        "run_id": uuid4(),
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.M1,
+        "requested_from": AWARE,
+        "requested_to": AWARE,
+        "started_at": AWARE,
+        "finished_at": AWARE,
+        "earliest_event_time": AWARE,
+        "bars_returned": 10,
+        "bars_stored": 10,
+        "bars_rejected": 0,
+        "bars_conflicting": 0,
+        "expected_bars": 10,
+        "coverage_ratio": Decimal("1.0"),
+        "outcome": IngestOutcome.COMPLETE,
+        "detail": None,
     },
 }
 
