@@ -38,6 +38,7 @@ from trading_house.core.errors import (
     AuditIntegrityError,
     BrokerUnavailableError,
     ConfigurationError,
+    CoverageError,
     DatabaseUnavailableError,
     ExitCode,
     MigrationMismatchError,
@@ -71,6 +72,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     AuditIntegrityError: ExitCode.AUDIT_INTEGRITY,
     BrokerUnavailableError: ExitCode.BROKER,
     NonDemoAccountError: ExitCode.ACCOUNT_MODE,
+    CoverageError: ExitCode.COVERAGE,
 }
 
 

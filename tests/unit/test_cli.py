@@ -21,6 +21,7 @@ from trading_house.core.errors import (
     AuditAppendError,
     AuditIntegrityError,
     ConfigurationError,
+    CoverageError,
     DatabaseUnavailableError,
     MigrationMismatchError,
     SchemaValidationError,
@@ -305,6 +306,7 @@ def test_exit_codes_are_distinct_per_failure_domain() -> None:
     assert cli.EXIT_CODES[AuditIntegrityError] == cli.ExitCode.AUDIT_INTEGRITY
     assert cli.EXIT_CODES[AuditAppendError] == cli.ExitCode.AUDIT_APPEND
     assert cli.EXIT_CODES[SchemaValidationError] == cli.ExitCode.CONFIGURATION
+    assert cli.EXIT_CODES[CoverageError] == cli.ExitCode.COVERAGE
 
 
 def _keypair(tmp_path: Path) -> tuple[Path, Path]:

@@ -30,7 +30,7 @@ from uuid import UUID
 import psycopg
 from psycopg import sql
 
-from trading_house.core.errors import DatabaseUnavailableError
+from trading_house.core.errors import CoverageError, DatabaseUnavailableError
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, IngestRun, Timeframe
 
 BarKey = tuple[str, str, datetime]
@@ -86,6 +86,17 @@ _BARS_SQL = """
     ORDER BY event_time
 """
 
+_BARS_SQL_CLEAN_ONLY = """
+    SELECT instrument_id, timeframe, event_time, availability_time,
+           open, high, low, close, tick_volume, spread, real_volume, quality
+    FROM marketdata.bars
+    WHERE instrument_id = %s AND timeframe = %s
+      AND event_time >= %s AND event_time < %s
+      AND availability_time <= %s
+      AND quality = 'OK'
+    ORDER BY event_time
+"""
+
 
 class ConnectionFactory(Protocol):
     """Open one distinct runtime connection for a store operation."""
@@ -121,6 +132,7 @@ class BarStore(Protocol):
         start: datetime,
         end: datetime,
         as_of: datetime,
+        include_defective: bool = False,
     ) -> tuple[Bar, ...]: ...
 
     def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage: ...
@@ -367,13 +379,33 @@ class PostgresBarStore:
         start: datetime,
         end: datetime,
         as_of: datetime,
+        include_defective: bool = False,
     ) -> tuple[Bar, ...]:
-        """Bars opening in ``[start, end)`` that were knowable by ``as_of``."""
+        """Bars opening in ``[start, end)`` that were knowable by ``as_of``.
 
+        Defective bars are excluded unless ``include_defective`` is set (D-2:
+        they are kept for the forensic record, not served by default).
+
+        ``start`` is checked against ``coverage()`` before anything else. A
+        key that has never been backfilled has no earliest bound to violate,
+        so it reads as empty rather than raising -- the same "nothing yet"
+        state ``coverage()`` itself treats as ordinary. But once a key holds
+        anything, asking further back than its earliest stored bar would
+        silently return a short, truncated-looking result with a healthy
+        exit code -- indistinguishable from a clean read over a shorter
+        history that was never missing anything. Raising instead makes that
+        difference impossible to miss.
+        """
+
+        coverage = self.coverage(instrument_id, timeframe)
+        if coverage.earliest_event_time is not None and start < coverage.earliest_event_time:
+            raise CoverageError()
+
+        statement = _BARS_SQL if include_defective else _BARS_SQL_CLEAN_ONLY
         connection = self._connect()
         try:
             with connection, connection.cursor() as cursor:
-                cursor.execute(_BARS_SQL, (instrument_id, timeframe.value, start, end, as_of))
+                cursor.execute(statement, (instrument_id, timeframe.value, start, end, as_of))
                 rows = cursor.fetchall()
         finally:
             connection.close()
