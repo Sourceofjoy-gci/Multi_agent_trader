@@ -99,15 +99,18 @@ def test_bars_are_frozen() -> None:
 
 
 def test_all_canonical_models_reject_naive_datetimes() -> None:
-    """Sweep test: every CanonicalModel subclass must validate all datetime
-    fields (required and optional) to UTC awareness.
+    """Sweep test: every CanonicalModel subclass defined in marketdata.models
+    must validate all datetime fields (required and optional) to UTC awareness.
 
-    Detects if a new model or field is added without validators.
+    Detects if a new model or field is added without validators. Fails if the
+    test's builders dict does not cover every model in the module.
     """
     from typing import get_args
     from uuid import UUID
 
-    from trading_house.marketdata.models import CanonicalModel, Coverage, IngestOutcome, IngestRun
+    import trading_house.marketdata.models as models_module
+    from trading_house.core.values import CanonicalModel
+    from trading_house.marketdata.models import Coverage, IngestOutcome, IngestRun
 
     naive_dt = datetime(2026, 8, 25, 9, 0)
     aware_dt = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
@@ -155,6 +158,21 @@ def test_all_canonical_models_reject_naive_datetimes() -> None:
             "detail": None,
         },
     }
+
+    # Assert that builders cover every CanonicalModel subclass defined in this module
+    defined = {
+        obj
+        for obj in vars(models_module).values()
+        if isinstance(obj, type)
+        and issubclass(obj, CanonicalModel)
+        and obj is not CanonicalModel
+        and obj.__module__ == models_module.__name__
+    }
+    missing = defined - set(model_builders)
+    assert not missing, (
+        f"{sorted(m.__name__ for m in missing)} defined in marketdata.models with no "
+        "builder here, so the naive-datetime sweep would silently skip them"
+    )
 
     # Get all datetime fields for each model
     datetime_fields: dict[type[CanonicalModel], list[str]] = {}
