@@ -14,10 +14,11 @@ from trading_house.brokers.mt5.boundary import (
     Mt5Tick,
     TerminalPort,
     establish_utc_offset,
+    mt5_timeframe_code,
     server_time_to_utc,
     utc_offset_seconds,
 )
-from trading_house.core.errors import BrokerUnavailableError
+from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 
 EXPECTED_PORT_METHODS = {
     "initialize",
@@ -71,6 +72,24 @@ def test_a_bar_dto_is_frozen_and_carries_no_metatrader_types() -> None:
     assert bar.event_time.tzinfo is not None
     with pytest.raises(FrozenInstanceError):
         bar.open = 2.0  # type: ignore[misc]
+
+
+def test_every_supported_bar_length_maps_to_a_metatrader_constant() -> None:
+    """The constants are not minute counts above H1 -- H1 is 16385, not 60 --
+    so a table that silently lost an entry would send the wrong timeframe."""
+
+    assert mt5_timeframe_code(1) == 1
+    assert mt5_timeframe_code(60) == 16385
+    assert mt5_timeframe_code(240) == 16388
+    assert mt5_timeframe_code(1440) == 16408
+
+
+def test_an_unmapped_bar_length_is_a_configuration_error_not_a_key_error() -> None:
+    """M30 and H2 are real MetaTrader 5 timeframes this system does not
+    ingest. Asking for one is a caller bug and should say so."""
+
+    with pytest.raises(ConfigurationError):
+        mt5_timeframe_code(30)
 
 
 def test_mt5_constants_match_the_documented_values() -> None:

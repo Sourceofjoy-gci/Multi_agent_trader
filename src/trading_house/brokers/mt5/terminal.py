@@ -14,13 +14,13 @@ from datetime import UTC, datetime
 import MetaTrader5 as mt5
 
 from trading_house.brokers.mt5.boundary import (
-    MT5_TIMEFRAME_CODES,
     Mt5Bar,
     Mt5CheckResult,
     Mt5Position,
     Mt5SymbolInfo,
     Mt5Tick,
     establish_utc_offset,
+    mt5_timeframe_code,
     server_time_to_utc,
 )
 
@@ -112,7 +112,7 @@ class Mt5Terminal:
         # Same reason as symbol_tick: MT5 serves history only for symbols in
         # Market Watch.
         mt5.symbol_select(server_symbol, True)
-        timeframe_code = MT5_TIMEFRAME_CODES[timeframe_minutes]
+        timeframe_code = mt5_timeframe_code(timeframe_minutes)
         rates = mt5.copy_rates_range(server_symbol, timeframe_code, start, end)
         if rates is None:
             return None

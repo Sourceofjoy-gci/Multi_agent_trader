@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
-from trading_house.core.errors import BrokerUnavailableError
+from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 
 SYMBOL_TRADE_MODE_DISABLED = 0
 SYMBOL_TRADE_MODE_LONGONLY = 1
@@ -172,6 +172,22 @@ MT5_TIMEFRAME_CODES: dict[int, int] = {
     240: 16388,  # H4 = TIMEFRAME_H4
     1440: 16408,  # D1 = TIMEFRAME_D1
 }
+
+
+def mt5_timeframe_code(timeframe_minutes: int) -> int:
+    """Translate a bar length in minutes into MetaTrader 5's constant.
+
+    The constants are the minute count only below H1; above that they are
+    bit-flagged (H1 is 16385, not 60), which is why this table exists rather
+    than the value passing straight through. An unmapped length is a caller
+    bug, not a broker condition, so it fails as a configuration error rather
+    than as a bare KeyError crossing the gateway's actor thread.
+    """
+
+    code = MT5_TIMEFRAME_CODES.get(timeframe_minutes)
+    if code is None:
+        raise ConfigurationError
+    return code
 
 
 @dataclass(frozen=True, slots=True)
