@@ -8,6 +8,7 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_EXECUTION_MARKET,
     SYMBOL_TRADE_MODE_DISABLED,
     SYMBOL_TRADE_MODE_FULL,
+    Mt5Bar,
     Mt5Position,
     Mt5SymbolInfo,  # noqa: F401 -- imported to prove it is part of the boundary's surface
     Mt5Tick,
@@ -29,6 +30,7 @@ EXPECTED_PORT_METHODS = {
     "positions",
     "order_check",
     "last_error",
+    "copy_rates_range",
 }
 
 
@@ -50,6 +52,25 @@ def test_dtos_are_frozen() -> None:
     except AttributeError:
         return
     raise AssertionError("Mt5Tick must be frozen")
+
+
+def test_a_bar_dto_is_frozen_and_carries_no_metatrader_types() -> None:
+    from dataclasses import FrozenInstanceError
+
+    bar = Mt5Bar(
+        event_time=datetime(2026, 8, 25, 9, 0, tzinfo=UTC),
+        open=1.1,
+        high=1.2,
+        low=1.0,
+        close=1.15,
+        tick_volume=42,
+        spread=9,
+        real_volume=0,
+    )
+
+    assert bar.event_time.tzinfo is not None
+    with pytest.raises(FrozenInstanceError):
+        bar.open = 2.0  # type: ignore[misc]
 
 
 def test_mt5_constants_match_the_documented_values() -> None:

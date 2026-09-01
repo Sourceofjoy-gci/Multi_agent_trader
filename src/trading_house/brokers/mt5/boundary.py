@@ -147,6 +147,34 @@ class Mt5Tick:
 
 
 @dataclass(frozen=True, slots=True)
+class Mt5Bar:
+    """One closed bar, with its timestamp already converted to UTC."""
+
+    event_time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    tick_volume: int
+    spread: int
+    real_volume: int
+
+
+# MetaTrader 5's timeframe constants are the minute count only below H1; at and
+# above H1 they are bit-flagged, so the minute value cannot be passed straight
+# through. This table is the whole of the translation, kept in the boundary so
+# terminal.py need not carry the mapping's own logic.
+MT5_TIMEFRAME_CODES: dict[int, int] = {
+    1: 1,  # M1
+    5: 5,  # M5
+    15: 15,  # M15
+    60: 16385,  # H1  = TIMEFRAME_H1
+    240: 16388,  # H4 = TIMEFRAME_H4
+    1440: 16408,  # D1 = TIMEFRAME_D1
+}
+
+
+@dataclass(frozen=True, slots=True)
 class Mt5Position:
     ticket: int
     magic: int
@@ -176,6 +204,9 @@ class TerminalPort(Protocol):
     def server_utc_offset_seconds(self) -> int: ...
     def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None: ...
     def symbol_tick(self, server_symbol: str) -> Mt5Tick | None: ...
+    def copy_rates_range(
+        self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
+    ) -> Sequence[Mt5Bar] | None: ...
     def positions(self) -> Sequence[Mt5Position]: ...
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None: ...
     def last_error(self) -> tuple[int, str]: ...

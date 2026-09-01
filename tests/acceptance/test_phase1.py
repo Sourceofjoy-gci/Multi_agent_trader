@@ -70,6 +70,11 @@ class _StubTerminal:
     def symbol_tick(self, server_symbol: str) -> Any:
         return None
 
+    def copy_rates_range(
+        self, server_symbol: str, timeframe_minutes: int, start: object, end: object
+    ) -> tuple[Any, ...]:
+        return ()
+
     def positions(self) -> tuple[Any, ...]:
         return ()
 
