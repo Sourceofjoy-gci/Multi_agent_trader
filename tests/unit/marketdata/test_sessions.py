@@ -68,3 +68,14 @@ def test_a_range_far_larger_than_any_page_is_refused_rather_than_walked() -> Non
 
     with pytest.raises(ValueError, match="range too large"):
         expected_bars(Timeframe.M1, start, datetime(2026, 1, 1, tzinfo=UTC))
+
+
+def test_the_week_boundary_itself_is_tested_not_just_either_side() -> None:
+    """21:00 is the boundary. Testing 20:00 and 22:00 leaves a whole hour in
+    which `<` could become `<=` and every test would still pass -- while every
+    coverage ratio in the system shifted."""
+
+    assert not is_liquid(datetime(2026, 8, 28, 21, 0, tzinfo=UTC))  # Friday close
+    assert is_liquid(datetime(2026, 8, 28, 20, 59, tzinfo=UTC))  # last liquid minute
+    assert is_liquid(datetime(2026, 8, 30, 21, 0, tzinfo=UTC))  # Sunday reopen
+    assert not is_liquid(datetime(2026, 8, 30, 20, 59, tzinfo=UTC))  # still closed

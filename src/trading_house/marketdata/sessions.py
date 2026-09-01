@@ -12,7 +12,7 @@ would need a real exchange calendar rather than this.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from trading_house.marketdata.models import Timeframe, duration
 
@@ -20,7 +20,6 @@ WEEK_CLOSE_WEEKDAY = 4  # Friday
 WEEK_OPEN_WEEKDAY = 6  # Sunday
 WEEK_BOUNDARY_UTC_HOUR = 21
 
-_PROBE_STEP = timedelta(minutes=1)
 _MAX_STEPS = 200_000
 
 

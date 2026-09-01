@@ -74,3 +74,21 @@ def test_price_defects_are_reported_before_alignment() -> None:
     verdict = _assess(low=Decimal("0"), event_time=datetime(2026, 8, 25, 9, 0, 37, tzinfo=UTC))
 
     assert verdict is BarQuality.NON_POSITIVE_PRICE
+
+
+def test_ohlc_incoherence_is_reported_before_negative_spread() -> None:
+    """Pins gate 2 above gate 3. Nothing before this proved it: the existing
+    ordering test only shows gate 1 outranks gate 4."""
+
+    verdict = _assess(high=Decimal("1.09000"), spread=-1)
+
+    assert verdict is BarQuality.OHLC_INCOHERENT
+
+
+def test_negative_spread_is_reported_before_misalignment() -> None:
+    """Pins gate 3 above gate 4, the other adjacent pair the existing
+    ordering test leaves unchecked."""
+
+    verdict = _assess(spread=-1, event_time=datetime(2026, 8, 25, 9, 0, 37, tzinfo=UTC))
+
+    assert verdict is BarQuality.NEGATIVE_SPREAD
