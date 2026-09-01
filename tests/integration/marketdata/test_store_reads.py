@@ -109,21 +109,51 @@ def test_coverage_of_an_empty_key_is_not_an_error(bar_store: BarStore) -> None:
     assert coverage.clean_bars == 0
 
 
-def test_reading_an_entirely_uncovered_key_returns_empty_not_an_error(
+def test_reading_an_entirely_uncovered_key_raises_coverage_error(
     bar_store: BarStore,
 ) -> None:
-    """A key that has never been backfilled has no earliest bound to violate.
-    Raising here would conflate 'nothing has been ingested yet' with 'you
-    asked for history older than what is held' -- two different situations --
-    and would force every fresh key's very first read to special-case an
-    exception it has no coverage to compare against."""
+    """A key that has never been backfilled has zero coverage, so every
+    request against it exceeds what is held. Returning an empty result
+    instead would be indistinguishable from 'the market was closed for the
+    entire requested window' -- exactly the silent-truncation failure this
+    guarantee exists to prevent, just relocated to the boundary where
+    nothing has been backfilled yet. A caller that only wants to probe a
+    fresh key should call ``coverage()``, not ``bars()``."""
 
-    visible = bar_store.bars(
-        "metal.xauusd",
-        Timeframe.H1,
-        start=NINE - timedelta(days=365),
-        end=NINE + timedelta(hours=1),
-        as_of=NINE + timedelta(hours=1),
+    with pytest.raises(CoverageError):
+        bar_store.bars(
+            "metal.xauusd",
+            Timeframe.H1,
+            start=NINE - timedelta(days=365),
+            end=NINE + timedelta(hours=1),
+            as_of=NINE + timedelta(hours=1),
+        )
+
+
+def test_include_defective_still_respects_point_in_time(bar_store: BarStore) -> None:
+    """Asking to see defective bars too must not also waive the
+    point-in-time guarantee -- a caller inspecting bad data must not thereby
+    be able to see the future. One clean and one defective bar have closed
+    by ``as_of``; one clean and one defective bar have not."""
+
+    as_of = NINE + timedelta(minutes=2)
+    seed(
+        bar_store,
+        [
+            _bar(0),
+            _bar(1, quality=BarQuality.OHLC_INCOHERENT),
+            _bar(2),
+            _bar(3, quality=BarQuality.OHLC_INCOHERENT),
+        ],
     )
 
-    assert visible == ()
+    visible = bar_store.bars(
+        "fx.eurusd",
+        Timeframe.M1,
+        start=NINE,
+        end=NINE + timedelta(hours=1),
+        as_of=as_of,
+        include_defective=True,
+    )
+
+    assert [b.event_time for b in visible] == [NINE, NINE + timedelta(minutes=1)]

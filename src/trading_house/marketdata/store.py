@@ -386,19 +386,27 @@ class PostgresBarStore:
         Defective bars are excluded unless ``include_defective`` is set (D-2:
         they are kept for the forensic record, not served by default).
 
-        ``start`` is checked against ``coverage()`` before anything else. A
-        key that has never been backfilled has no earliest bound to violate,
-        so it reads as empty rather than raising -- the same "nothing yet"
-        state ``coverage()`` itself treats as ordinary. But once a key holds
-        anything, asking further back than its earliest stored bar would
-        silently return a short, truncated-looking result with a healthy
-        exit code -- indistinguishable from a clean read over a shorter
-        history that was never missing anything. Raising instead makes that
-        difference impossible to miss.
+        ``start`` is checked against ``coverage()`` before anything else,
+        including the case where the key holds nothing at all: a key that
+        has never been backfilled has zero coverage, so every request
+        against it exceeds what is held, exactly like a request that
+        reaches too far back into a key that does hold something. Returning
+        an empty result instead would be indistinguishable from "the market
+        was closed for the entire requested window" -- the same silent
+        truncation this guarantee exists to prevent, just relocated to the
+        boundary where nothing has been backfilled yet. A caller that only
+        wants to probe whether a fresh key holds anything should call
+        ``coverage()`` first, not ``bars()``.
+
+        This runs as two separate queries rather than one transaction, so a
+        concurrent backfill landing between them could add coverage this
+        call never sees. That race is deliberate and safe-direction: it can
+        only cause a spurious ``CoverageError``, never a silent truncation,
+        so it is left alone rather than folded into one transaction.
         """
 
         coverage = self.coverage(instrument_id, timeframe)
-        if coverage.earliest_event_time is not None and start < coverage.earliest_event_time:
+        if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
             raise CoverageError()
 
         statement = _BARS_SQL if include_defective else _BARS_SQL_CLEAN_ONLY
