@@ -49,11 +49,6 @@ Pause = Callable[[float], None]
 between retries rather than a hot loop hammering the broker."""
 
 _RETRY_PAUSE_SECONDS = 1.0
-_EXHAUSTION_THRESHOLD = 1
-"""An empty or single-bar page is treated as exhaustion (Ruling 2): MT5
-downloading history lazily and a call that genuinely failed collapse into
-the same observable result, so both get the same conservative treatment."""
-
 _COMPLETE_RATIO = Decimal("0.5")
 
 _NO_WRITE = WriteResult(stored=0, duplicate=0, conflicting=0)
@@ -81,15 +76,34 @@ class _PageFetch:
     exhausted: bool
 
 
+def _looks_exhausted(returned: int, expected: int) -> bool:
+    """Whether a page's answer looks like the broker has nothing more to give.
+
+    This cannot be an absolute bar count: the two directions of travel want
+    opposite readings of the same ``len(bars) <= 1``. Walking backward into
+    deep history, a page asking for 20,000 bars and getting 1 is the
+    broker's depth wall (Ruling 2 -- the single-bar artifact). Walking
+    forward in ``update()``, a page asking for 1 bar -- the ordinary shape
+    of a poll run more often than once per bar interval -- and getting 1
+    back is a fully caught-up feed, not a wall. Judging exhaustion relative
+    to what the page itself expected is what tells these apart: zero bars
+    is always suspicious, but one bar is only suspicious when more were
+    expected.
+    """
+
+    return returned == 0 or (returned <= 1 and expected > 1)
+
+
 def _fetch_page(
     provider: HistoryProvider,
     instrument_id: str,
     timeframe: Timeframe,
     start: datetime,
     end: datetime,
+    expected: int,
     pause: Pause,
 ) -> _PageFetch:
-    """Fetch one page, retrying once on an empty or single-bar answer.
+    """Fetch one page, retrying once on an answer that looks exhausted.
 
     The retry re-asks the identical window rather than adding to the first
     answer: a second attempt either reveals the history the first attempt's
@@ -99,12 +113,12 @@ def _fetch_page(
     """
 
     bars = provider.history(instrument_id, timeframe, start, end)
-    if len(bars) > _EXHAUSTION_THRESHOLD:
+    if not _looks_exhausted(len(bars), expected):
         return _PageFetch(bars=bars, exhausted=False)
 
     pause(_RETRY_PAUSE_SECONDS)
     retried = provider.history(instrument_id, timeframe, start, end)
-    if len(retried) > _EXHAUSTION_THRESHOLD:
+    if not _looks_exhausted(len(retried), expected):
         return _PageFetch(bars=retried, exhausted=False)
     return _PageFetch(bars=retried, exhausted=True)
 
@@ -149,6 +163,7 @@ def _to_bar(
 @dataclass(frozen=True, slots=True)
 class _WalkResult:
     bars: tuple[Bar, ...]
+    had_pages: bool
     reached_target: bool
     expected: int
     failed: bool
@@ -177,10 +192,12 @@ def _walk(
     bars: list[Bar] = []
     expected_total = 0
     reached_target = True
+    had_pages = bool(pages)
     try:
         for start, end in pages:
-            fetch = _fetch_page(provider, instrument_id, timeframe, start, end, pause)
-            expected_total += expected_bars(timeframe, start, end)
+            expected = expected_bars(timeframe, start, end)
+            fetch = _fetch_page(provider, instrument_id, timeframe, start, end, expected, pause)
+            expected_total += expected
             bars.extend(
                 _to_bar(raw, instrument_id, timeframe, server_offset_seconds) for raw in fetch.bars
             )
@@ -190,6 +207,7 @@ def _walk(
     except Exception as error:  # the run must be recorded even when the fetch itself errors
         return _WalkResult(
             bars=tuple(bars),
+            had_pages=had_pages,
             reached_target=False,
             expected=expected_total,
             failed=True,
@@ -197,6 +215,7 @@ def _walk(
         )
     return _WalkResult(
         bars=tuple(bars),
+        had_pages=had_pages,
         reached_target=reached_target,
         expected=expected_total,
         failed=False,
@@ -205,10 +224,20 @@ def _walk(
 
 
 def _derive_outcome(
-    *, failed: bool, bars_returned: int, reached_target: bool, coverage_ratio: Decimal
+    *,
+    failed: bool,
+    had_pages: bool,
+    bars_returned: int,
+    reached_target: bool,
+    coverage_ratio: Decimal,
 ) -> IngestOutcome:
     if failed:
         return IngestOutcome.FAILED
+    if not had_pages:
+        # Nothing was planned because the store was already current -- not
+        # because a plan was executed and came back with nothing. Those are
+        # different facts, and EMPTY is reserved for the second one.
+        return IngestOutcome.COMPLETE if reached_target else IngestOutcome.TRUNCATED
     if bars_returned == 0:
         return IngestOutcome.EMPTY
     if not reached_target:
@@ -254,6 +283,7 @@ def _finish(
     )
     outcome = _derive_outcome(
         failed=walk.failed,
+        had_pages=walk.had_pages,
         bars_returned=bars_returned,
         reached_target=walk.reached_target,
         coverage_ratio=coverage_ratio,

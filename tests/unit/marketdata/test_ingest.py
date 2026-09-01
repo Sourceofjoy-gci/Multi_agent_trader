@@ -248,3 +248,44 @@ def test_the_forming_bar_is_never_requested() -> None:
 
     _, end = provider.requests[0]
     assert end <= datetime(2026, 8, 25, 9, 30, tzinfo=UTC)
+
+
+def test_a_caught_up_update_reports_complete_not_truncated() -> None:
+    """update()'s resting state. A page expecting one bar and receiving one
+    has full coverage; calling that exhaustion makes the outcome field least
+    trustworthy on the path that runs most often."""
+
+    store = FakeStore(latest_event_time=NINE + timedelta(minutes=59))
+    provider = FakeProvider([[_mt5_bar(0)]])
+
+    run = update(provider, store, FIXED_CLOCK, pause=_no_pause, **UPDATE_ARGS)
+
+    assert run.outcome is IngestOutcome.COMPLETE
+
+
+def test_a_caught_up_update_does_not_pause() -> None:
+    """The retry exists for a suspicious page. A page that returned exactly
+    what it expected is not suspicious, and sleeping on it burns a real
+    second per poll."""
+
+    calls: list[float] = []
+
+    store = FakeStore(latest_event_time=NINE + timedelta(minutes=59))
+    provider = FakeProvider([[_mt5_bar(0)]])
+
+    update(provider, store, FIXED_CLOCK, pause=calls.append, **UPDATE_ARGS)
+
+    assert calls == []
+
+
+def test_nothing_to_fetch_is_complete_not_empty() -> None:
+    """No pages planned means the store is already current. EMPTY is for a
+    plan that was executed and yielded nothing."""
+
+    store = FakeStore(latest_event_time=FIXED_CLOCK.now())
+    provider = FakeProvider([])
+
+    run = update(provider, store, FIXED_CLOCK, pause=_no_pause, **UPDATE_ARGS)
+
+    assert run.outcome is IngestOutcome.COMPLETE
+    assert len(provider.requests) == 0
