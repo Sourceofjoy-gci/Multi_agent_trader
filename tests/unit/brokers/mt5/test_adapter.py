@@ -15,6 +15,7 @@ from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, RejectReason, Venue
+from trading_house.marketdata.models import Timeframe
 
 BINDING = parse_venue_binding(
     b"""
@@ -368,3 +369,44 @@ def test_health_ages_the_newest_quote_not_the_actor_heartbeat() -> None:
         gateway.stop()
 
     assert report.last_quote_age_seconds > 86_400
+
+
+def test_history_rejects_an_unbound_instrument(symbol_terminal: FakeTerminal) -> None:
+    """The signed venue binding is authoritative for symbol identity here too."""
+
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        with pytest.raises(ConfigurationError):
+            adapter.history(
+                "fx.gbpusd",
+                Timeframe.M1,
+                datetime(2026, 8, 24, tzinfo=UTC),
+                datetime(2026, 8, 25, tzinfo=UTC),
+            )
+    finally:
+        gateway.stop()
+
+
+def test_history_returns_an_empty_tuple_when_the_terminal_call_fails() -> None:
+    """``None`` means the call failed; ``()`` means the history is genuinely
+    absent. A caller needs those distinguished, so a failed call must not be
+    handed back as ``None`` itself -- it collapses to the empty tuple here."""
+
+    class _FailedHistoryTerminal(FakeTerminal):
+        def copy_rates_range(
+            self, server_symbol: str, timeframe_minutes: int, start: object, end: object
+        ) -> None:
+            return None
+
+    adapter, gateway = _adapter(_FailedHistoryTerminal())
+    try:
+        bars = adapter.history(
+            "fx.eurusd",
+            Timeframe.M1,
+            datetime(2026, 8, 24, tzinfo=UTC),
+            datetime(2026, 8, 25, tzinfo=UTC),
+        )
+    finally:
+        gateway.stop()
+
+    assert bars == ()
