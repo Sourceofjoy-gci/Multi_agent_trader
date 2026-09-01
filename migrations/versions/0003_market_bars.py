@@ -38,7 +38,10 @@ def upgrade() -> None:
                 bars_returned >= 0 AND bars_stored >= 0
                 AND bars_rejected >= 0 AND bars_conflicting >= 0
             ),
-            CONSTRAINT runs_range_ordered CHECK (requested_to >= requested_from)
+            CONSTRAINT runs_range_ordered CHECK (requested_to >= requested_from),
+            CONSTRAINT runs_outcome_known CHECK (outcome IN (
+                'COMPLETE', 'TRUNCATED', 'SPARSE', 'EMPTY', 'FAILED'
+            ))
         )
         """
     )
@@ -67,16 +70,28 @@ def upgrade() -> None:
             ),
             CONSTRAINT bars_volumes_non_negative CHECK (
                 tick_volume >= 0 AND real_volume >= 0
-            )
+            ),
+            CONSTRAINT bars_quality_known CHECK (quality IN (
+                'OK', 'OHLC_INCOHERENT', 'NON_POSITIVE_PRICE',
+                'NEGATIVE_SPREAD', 'MISALIGNED_TIMESTAMP'
+            ))
         )
         """
     )
+    # Within one (instrument_id, timeframe) partition, availability_time is
+    # event_time plus that timeframe's fixed duration (see
+    # trading_house.marketdata.models.availability_of) -- a constant offset,
+    # not an independent value. The two orderings coincide, so this index's
+    # leaf order already matches event-time order and a reader sorting by
+    # event_time within a partition needs no separate sort step.
     op.execute(
         """
         CREATE INDEX bars_point_in_time
             ON marketdata.bars (instrument_id, timeframe, availability_time)
         """
     )
+
+    op.execute("REVOKE ALL ON TABLE marketdata.bars, marketdata.ingest_runs FROM PUBLIC")
 
     op.execute("GRANT USAGE ON SCHEMA marketdata TO trading_house_runtime")
     op.execute(
