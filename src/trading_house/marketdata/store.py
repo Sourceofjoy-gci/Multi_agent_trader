@@ -173,6 +173,47 @@ def _key(bar: Bar) -> BarKey:
     return (bar.instrument_id, bar.timeframe.value, bar.event_time)
 
 
+def _ohlc(bar: Bar) -> tuple[Any, Any, Any, Any]:
+    return (bar.open, bar.high, bar.low, bar.close)
+
+
+def _group_by_key(bars: Sequence[Bar]) -> dict[BarKey, list[Bar]]:
+    """Group bars by their primary key, preserving first-seen order.
+
+    Exists so a batch containing the same key twice is resolved before it
+    ever reaches the database: only the first bar in each group is a
+    candidate for insertion, and every later bar sharing that key is
+    compared against it exactly the way ``_read_back`` compares a re-fetch
+    against what is already stored.
+    """
+
+    groups: dict[BarKey, list[Bar]] = {}
+    for bar in bars:
+        groups.setdefault(_key(bar), []).append(bar)
+    return groups
+
+
+def _intra_batch_counts(groups: dict[BarKey, list[Bar]]) -> tuple[int, int]:
+    """Resolve repeated keys within one batch into duplicate/conflicting.
+
+    A later bar sharing a key with an earlier one in the same call can never
+    physically insert alongside it -- only one row can ever hold that key --
+    so it must be judged against the group's first bar right here, or it is
+    silently dropped from every counter instead of landing in exactly one.
+    """
+
+    duplicate = 0
+    conflicting = 0
+    for group in groups.values():
+        first_ohlc = _ohlc(group[0])
+        for bar in group[1:]:
+            if _ohlc(bar) == first_ohlc:
+                duplicate += 1
+            else:
+                conflicting += 1
+    return duplicate, conflicting
+
+
 def _insert_bars_statement(row_count: int) -> sql.Composed:
     """Build a multi-row INSERT with exactly ``row_count`` value groups.
 
@@ -240,6 +281,12 @@ class PostgresBarStore:
     def append_bars(self, bars: Sequence[Bar], run_id: UUID) -> WriteResult:
         """Insert ``bars``, absorbing duplicates and counting conflicts.
 
+        A batch may itself contain the same key twice (two pages fetched in
+        the same call happening to overlap); ``_group_by_key`` resolves that
+        *before* anything is inserted, so only one candidate row per key
+        ever reaches the database and the rest are judged against it the
+        same way a cross-call re-fetch is judged against what is on disk.
+
         A foreign-key violation (an unknown ``run_id``) propagates as the
         native ``psycopg.errors.ForeignKeyViolation`` rather than being
         translated to ``DatabaseUnavailableError``: it is not a connectivity
@@ -251,30 +298,42 @@ class PostgresBarStore:
         if not bars:
             return WriteResult(stored=0, duplicate=0, conflicting=0)
 
+        groups = _group_by_key(bars)
+        candidates = [group[0] for group in groups.values()]
+        duplicate, conflicting = _intra_batch_counts(groups)
+
         connection = self._connect()
         try:
             with connection, connection.cursor() as cursor:
                 params: list[Any] = []
-                for bar in bars:
+                for bar in candidates:
                     params.extend(_bar_params(bar, run_id))
-                cursor.execute(_insert_bars_statement(len(bars)), params)
+                cursor.execute(_insert_bars_statement(len(candidates)), params)
                 inserted: set[BarKey] = {(row[0], row[1], row[2]) for row in cursor.fetchall()}
 
-                missing = [bar for bar in bars if _key(bar) not in inserted]
+                missing = [bar for bar in candidates if _key(bar) not in inserted]
                 stored_ohlc = self._read_back(cursor, missing)
 
-                duplicate = 0
-                conflicting = 0
                 for bar in missing:
                     held = stored_ohlc.get(_key(bar))
-                    if held == (bar.open, bar.high, bar.low, bar.close):
+                    if held == _ohlc(bar):
                         duplicate += 1
                     else:
                         conflicting += 1
         finally:
             connection.close()
 
-        return WriteResult(stored=len(inserted), duplicate=duplicate, conflicting=conflicting)
+        result = WriteResult(stored=len(inserted), duplicate=duplicate, conflicting=conflicting)
+        # Every bar handed in must land in exactly one counter: intra-batch
+        # resolution above accounts for a key repeated within this call, and
+        # the read-back above accounts for a key already present from an
+        # earlier call. If the total still doesn't equal len(bars), this
+        # function itself has a bug -- returning counts that silently don't
+        # add up would be exactly the kind of silent data problem this
+        # module exists to prevent, so fail loudly instead.
+        if result.stored + result.duplicate + result.conflicting != len(bars):
+            _raise_database_unavailable()
+        return result
 
     @staticmethod
     def _read_back(
