@@ -100,6 +100,22 @@ def upgrade() -> None:
             TO trading_house_runtime
         """
     )
+    # marketdata.bars is the immutable evidence and stays append-only. A run
+    # row, though, records an operation that is still in progress while it is
+    # being written: bars_stored and bars_conflicting are unknowable until
+    # append_bars has actually landed, and outcome depends on them reaching
+    # their final values. Completing that record once the write lands is
+    # finishing it, not rewriting history -- so this grant is scoped to
+    # exactly the columns a run cannot know at record_run time, leaving what
+    # was asked for and what the broker returned (requested_from,
+    # requested_to, bars_returned, bars_rejected, expected_bars,
+    # coverage_ratio, earliest_event_time) immutable.
+    op.execute(
+        """
+        GRANT UPDATE (bars_stored, bars_conflicting, finished_at, outcome)
+            ON marketdata.ingest_runs TO trading_house_runtime
+        """
+    )
 
 
 def downgrade() -> None:

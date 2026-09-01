@@ -18,7 +18,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -62,11 +62,18 @@ def _bar(minute: int, quality: BarQuality = BarQuality.OK) -> Bar:
     )
 
 
-def seed(store: PostgresBarStore, bars: Sequence[Bar]) -> WriteResult:
-    """Record a minimal valid run, append ``bars`` against it, and return the result."""
+def seed(
+    store: PostgresBarStore, bars: Sequence[Bar], *, run_id: UUID | None = None
+) -> WriteResult:
+    """Record a minimal valid run, append ``bars`` against it, finalize the
+    run with what the write actually did, and return the write result.
+
+    ``run_id`` can be supplied so a caller that needs to read the run row
+    back afterward knows which one to look for.
+    """
 
     run = IngestRun(
-        run_id=uuid4(),
+        run_id=run_id or uuid4(),
         instrument_id=_INSTRUMENT_ID,
         timeframe=Timeframe.M1,
         requested_from=NINE,
@@ -84,7 +91,15 @@ def seed(store: PostgresBarStore, bars: Sequence[Bar]) -> WriteResult:
         detail=None,
     )
     store.record_run(run)
-    return store.append_bars(bars, run_id=run.run_id)
+    result = store.append_bars(bars, run_id=run.run_id)
+    store.finalize_run(
+        run.run_id,
+        bars_stored=result.stored,
+        bars_conflicting=result.conflicting,
+        outcome=run.outcome,
+        finished_at=run.finished_at,
+    )
+    return result
 
 
 @pytest.fixture

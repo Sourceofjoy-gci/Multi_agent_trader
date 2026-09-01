@@ -30,6 +30,18 @@ def test_marketdata_schema_and_tables_exist(database: DatabaseHarness) -> None:
 def test_runtime_has_only_select_and_insert_on_bars_and_ingest_runs(
     database: DatabaseHarness,
 ) -> None:
+    """``marketdata.bars`` is the immutable evidence and stays append-only.
+
+    ``ingest_runs`` carries no *whole-table* UPDATE: migration 0003 grants
+    UPDATE on exactly four columns (``bars_stored``, ``bars_conflicting``,
+    ``outcome``, ``finished_at``) so ``finalize_run`` can complete a run once
+    its write lands, and ``has_table_privilege`` reports ``False`` for a
+    column-only grant -- it only reports ``True`` for a whole-table grant.
+    ``test_the_runtime_role_still_cannot_revise_what_was_asked_for`` below
+    proves the scope holds where it matters: the runtime role still cannot
+    touch a column, such as ``bars_returned``, that was never granted.
+    """
+
     with (
         open_runtime_connection(SecretStr(database.runtime_dsn)) as connection,
         connection.cursor() as cursor,
@@ -97,6 +109,22 @@ def test_the_runtime_role_cannot_update_or_delete_a_bar(
             pytest.raises(psycopg.errors.InsufficientPrivilege),
         ):
             cursor.execute(statement)
+        connection.rollback()
+
+
+def test_the_runtime_role_still_cannot_revise_what_was_asked_for(
+    database: DatabaseHarness,
+) -> None:
+    """The finalize grant is column-scoped on purpose. What the broker
+    returned is evidence; only the counts unknowable until the write may be
+    completed."""
+
+    with open_runtime_connection(SecretStr(database.runtime_dsn)) as connection:
+        with (
+            connection.cursor() as cursor,
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
+        ):
+            cursor.execute("UPDATE marketdata.ingest_runs SET bars_returned = 999")
         connection.rollback()
 
 

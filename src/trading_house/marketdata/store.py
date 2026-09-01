@@ -31,7 +31,14 @@ import psycopg
 from psycopg import sql
 
 from trading_house.core.errors import CoverageError, DatabaseUnavailableError
-from trading_house.marketdata.models import Bar, BarQuality, Coverage, IngestRun, Timeframe
+from trading_house.marketdata.models import (
+    Bar,
+    BarQuality,
+    Coverage,
+    IngestOutcome,
+    IngestRun,
+    Timeframe,
+)
 
 BarKey = tuple[str, str, datetime]
 """(instrument_id, timeframe value, event_time) -- the table's primary key."""
@@ -59,6 +66,12 @@ _INSERT_RUN_SQL = """
         bars_stored, bars_rejected, bars_conflicting, expected_bars,
         coverage_ratio, outcome, detail
     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+_FINALIZE_RUN_SQL = """
+    UPDATE marketdata.ingest_runs
+    SET bars_stored = %s, bars_conflicting = %s, outcome = %s, finished_at = %s
+    WHERE run_id = %s
 """
 
 _MISSING_KEYS_SQL = """
@@ -123,6 +136,16 @@ class BarStore(Protocol):
     def record_run(self, run: IngestRun) -> None: ...
 
     def append_bars(self, bars: Sequence[Bar], run_id: UUID) -> WriteResult: ...
+
+    def finalize_run(
+        self,
+        run_id: UUID,
+        *,
+        bars_stored: int,
+        bars_conflicting: int,
+        outcome: IngestOutcome,
+        finished_at: datetime,
+    ) -> None: ...
 
     def bars(
         self,
@@ -287,6 +310,37 @@ class PostgresBarStore:
         try:
             with connection, connection.cursor() as cursor:
                 cursor.execute(_INSERT_RUN_SQL, _run_params(run))
+        finally:
+            connection.close()
+
+    def finalize_run(
+        self,
+        run_id: UUID,
+        *,
+        bars_stored: int,
+        bars_conflicting: int,
+        outcome: IngestOutcome,
+        finished_at: datetime,
+    ) -> None:
+        """Complete a run row with what only the write itself could reveal.
+
+        ``bars_stored`` and ``bars_conflicting`` are unknowable at
+        ``record_run`` time -- they depend on ``append_bars`` having already
+        run against this exact table, including whatever an earlier run
+        already put there. Completing them once the write lands is finishing
+        the record, not rewriting history, which is why the runtime role's
+        grant (migration 0003) is scoped to exactly these columns plus
+        ``outcome`` and ``finished_at``: what was asked for and what the
+        broker returned stay immutable forever.
+        """
+
+        connection = self._connect()
+        try:
+            with connection, connection.cursor() as cursor:
+                cursor.execute(
+                    _FINALIZE_RUN_SQL,
+                    (bars_stored, bars_conflicting, outcome.value, finished_at, run_id),
+                )
         finally:
             connection.close()
 

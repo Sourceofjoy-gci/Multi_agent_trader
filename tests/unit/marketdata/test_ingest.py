@@ -78,6 +78,11 @@ def _full_liquid_page() -> list[Mt5Bar]:
     return [_mt5_bar(i) for i in range(60)]
 
 
+def _no_pause(_seconds: float) -> None:
+    """Injected in place of the real ``time.sleep`` default so a test that
+    triggers a retry never actually waits."""
+
+
 class FakeProvider:
     """Returns canned pages, newest request first, and records what was asked."""
 
@@ -104,6 +109,7 @@ class FakeStore:
         self._earliest_event_time = earliest_event_time
         self._latest_event_time = latest_event_time
         self.appended: list[Bar] = []
+        self.finalized: list[tuple[UUID, int, int, IngestOutcome]] = []
 
     def record_run(self, run: object) -> None:
         pass
@@ -111,6 +117,17 @@ class FakeStore:
     def append_bars(self, bars: Sequence[Bar], run_id: UUID) -> WriteResult:
         self.appended.extend(bars)
         return WriteResult(stored=len(bars), duplicate=0, conflicting=0)
+
+    def finalize_run(
+        self,
+        run_id: UUID,
+        *,
+        bars_stored: int,
+        bars_conflicting: int,
+        outcome: IngestOutcome,
+        finished_at: datetime,
+    ) -> None:
+        self.finalized.append((run_id, bars_stored, bars_conflicting, outcome))
 
     def bars(self, *args: object, **kwargs: object) -> tuple[Bar, ...]:
         return ()
@@ -134,7 +151,7 @@ def test_an_empty_page_is_retried_once_before_being_believed() -> None:
 
     provider = FakeProvider([[], [_mt5_bar(0)]])
 
-    run = backfill(provider, FakeStore(), FIXED_CLOCK, **BACKFILL_ARGS)
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **BACKFILL_ARGS)
 
     assert len(provider.requests) >= 2
     assert run.bars_returned == 1
@@ -147,7 +164,7 @@ def test_the_single_bar_artifact_counts_as_exhaustion_not_as_data() -> None:
 
     provider = FakeProvider([[_mt5_bar(0)], [_mt5_bar(0)]])
 
-    run = backfill(provider, FakeStore(), FIXED_CLOCK, **BACKFILL_ARGS)
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **BACKFILL_ARGS)
 
     assert run.outcome in {IngestOutcome.TRUNCATED, IngestOutcome.EMPTY}
 
@@ -159,7 +176,7 @@ def test_hitting_the_depth_wall_is_truncated_not_complete() -> None:
 
     provider = FakeProvider([[_mt5_bar(i) for i in range(50)], [], []])
 
-    run = backfill(provider, FakeStore(), FIXED_CLOCK, **BACKFILL_ARGS)
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **BACKFILL_ARGS)
 
     assert run.outcome is IngestOutcome.TRUNCATED
     assert run.earliest_event_time is not None
@@ -168,7 +185,7 @@ def test_hitting_the_depth_wall_is_truncated_not_complete() -> None:
 def test_reaching_the_requested_start_with_full_coverage_is_complete() -> None:
     provider = FakeProvider([_full_liquid_page()])
 
-    run = backfill(provider, FakeStore(), FIXED_CLOCK, **ONE_HOUR_BACKFILL)
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **ONE_HOUR_BACKFILL)
 
     assert run.outcome is IngestOutcome.COMPLETE
     assert run.coverage_ratio >= Decimal("0.5")
@@ -179,7 +196,7 @@ def test_reaching_the_start_with_thin_data_is_sparse_not_complete() -> None:
 
     provider = FakeProvider([_full_liquid_page()[:5]])
 
-    run = backfill(provider, FakeStore(), FIXED_CLOCK, **ONE_HOUR_BACKFILL)
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **ONE_HOUR_BACKFILL)
 
     assert run.outcome is IngestOutcome.SPARSE
 
@@ -191,7 +208,7 @@ def test_the_run_records_how_far_back_it_actually_reached() -> None:
     bars = [_mt5_bar(i) for i in range(10)]
     provider = FakeProvider([bars, []])
 
-    run = backfill(provider, FakeStore(), FIXED_CLOCK, **BACKFILL_ARGS)
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **BACKFILL_ARGS)
 
     assert run.earliest_event_time == min(b.event_time for b in bars)
 
@@ -202,7 +219,7 @@ def test_defective_bars_are_counted_and_still_stored() -> None:
     store = FakeStore()
     provider = FakeProvider([[_mt5_bar(0), _mt5_bar(1, high=0.5)]])
 
-    run = backfill(provider, store, FIXED_CLOCK, **ONE_HOUR_BACKFILL)
+    run = backfill(provider, store, FIXED_CLOCK, pause=_no_pause, **ONE_HOUR_BACKFILL)
 
     assert run.bars_rejected == 1
     assert len(store.appended) == 2
@@ -214,7 +231,7 @@ def test_update_starts_from_the_newest_stored_bar() -> None:
     store = FakeStore(latest_event_time=NINE)
     provider = FakeProvider([[]])
 
-    update(provider, store, FIXED_CLOCK, **UPDATE_ARGS)
+    update(provider, store, FIXED_CLOCK, pause=_no_pause, **UPDATE_ARGS)
 
     assert provider.requests[0][0] >= NINE
 
@@ -227,7 +244,7 @@ def test_the_forming_bar_is_never_requested() -> None:
     provider = FakeProvider([[]])
     now = datetime(2026, 8, 25, 9, 30, 45, tzinfo=UTC)
 
-    update(provider, FakeStore(), FixedClock(now), **UPDATE_ARGS)
+    update(provider, FakeStore(), FixedClock(now), pause=_no_pause, **UPDATE_ARGS)
 
     _, end = provider.requests[0]
     assert end <= datetime(2026, 8, 25, 9, 30, tzinfo=UTC)

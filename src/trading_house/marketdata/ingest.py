@@ -18,6 +18,7 @@ are the only bookmark either function needs.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,10 +41,12 @@ from trading_house.marketdata.paging import plan_backward
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.quality import assess
 from trading_house.marketdata.sessions import expected_bars
-from trading_house.marketdata.store import BarStore
+from trading_house.marketdata.store import BarStore, WriteResult
 
 Pause = Callable[[float], None]
-"""A retry delay, injected so tests never need a real sleep."""
+"""A retry delay, injected so tests never need a real sleep. Defaults to
+``time.sleep`` -- a caller who forgets to override it gets a real pause
+between retries rather than a hot loop hammering the broker."""
 
 _RETRY_PAUSE_SECONDS = 1.0
 _EXHAUSTION_THRESHOLD = 1
@@ -53,9 +56,8 @@ the same observable result, so both get the same conservative treatment."""
 
 _COMPLETE_RATIO = Decimal("0.5")
 
-
-def _no_pause(_seconds: float) -> None:
-    """Default retry pause. A production caller passes ``time.sleep``."""
+_NO_WRITE = WriteResult(stored=0, duplicate=0, conflicting=0)
+"""What a run that fetched nothing handed to the store: nothing."""
 
 
 def _last_completed_boundary(timeframe: Timeframe, instant: datetime) -> datetime:
@@ -227,18 +229,21 @@ def _finish(
     clock: Clock,
     walk: _WalkResult,
 ) -> IngestRun:
-    """Derive the outcome, then persist run and bars in that order.
+    """Derive the outcome, then record, write, and finalize in that order.
 
     ``record_run`` must precede ``append_bars`` -- a bar's ``ingest_run_id``
-    is a foreign key to the run row, and the runtime role holds no UPDATE
-    grant on ``ingest_runs`` (migration 0003), so the run is built complete,
-    from what this call itself fetched and graded, before either write
-    happens. ``bars_stored`` therefore counts what this run handed to the
-    store (D-2 stores a defective bar alongside clean ones, so every fetched
-    bar counts); the finer dedup/conflict split ``append_bars`` discovers
-    against bars a *previous* run already wrote is the store's own
-    bookkeeping (``WriteResult``), not a fact this run could have known
-    before writing.
+    is a foreign key to the run row -- so the initial insert carries
+    provisional ``bars_stored``/``bars_conflicting`` of zero: whether a
+    fetched bar actually lands as a fresh row, a benign duplicate of one a
+    *previous* run already wrote, or a genuine conflict with one, is not
+    knowable until ``append_bars`` has run against this exact table. Once it
+    has, ``finalize_run`` completes the record with the true numbers --
+    completing a still-open record, not rewriting a closed one, which is
+    exactly what the runtime role's column-scoped UPDATE grant (migration
+    0003) permits and nothing more. ``outcome``, by contrast, depends only on
+    what was fetched and graded, never on the write, so it is correct from
+    the first insert; it is passed to ``finalize_run`` again only because
+    that call also carries the run's true ``finished_at``.
     """
 
     bars_returned = len(walk.bars)
@@ -264,7 +269,7 @@ def _finish(
         finished_at=clock.now(),
         earliest_event_time=earliest_event_time,
         bars_returned=bars_returned,
-        bars_stored=bars_returned,
+        bars_stored=0,
         bars_rejected=bars_rejected,
         bars_conflicting=0,
         expected_bars=walk.expected,
@@ -273,9 +278,23 @@ def _finish(
         detail=walk.detail,
     )
     store.record_run(run)
-    if walk.bars:
-        store.append_bars(walk.bars, run.run_id)
-    return run
+
+    write_result = store.append_bars(walk.bars, run.run_id) if walk.bars else _NO_WRITE
+    finished_at = clock.now()
+    store.finalize_run(
+        run.run_id,
+        bars_stored=write_result.stored,
+        bars_conflicting=write_result.conflicting,
+        outcome=outcome,
+        finished_at=finished_at,
+    )
+    return run.model_copy(
+        update={
+            "bars_stored": write_result.stored,
+            "bars_conflicting": write_result.conflicting,
+            "finished_at": finished_at,
+        }
+    )
 
 
 def backfill(
@@ -287,7 +306,7 @@ def backfill(
     timeframe: Timeframe,
     until: datetime,
     server_offset_seconds: int,
-    pause: Pause = _no_pause,
+    pause: Pause = time.sleep,
 ) -> IngestRun:
     """Walk backward toward ``until``, from what is already stored or now.
 
@@ -326,7 +345,7 @@ def update(
     timeframe: Timeframe,
     until: datetime,
     server_offset_seconds: int,
-    pause: Pause = _no_pause,
+    pause: Pause = time.sleep,
 ) -> IngestRun:
     """Walk forward toward now, from the newest stored bar or ``until``.
 

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
 from tests.integration.marketdata.conftest import NINE, _bar, seed
+from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.models import BarQuality, Timeframe
 from trading_house.marketdata.store import BarStore
+
+if TYPE_CHECKING:
+    from ...conftest import DatabaseHarness
 
 pytestmark = pytest.mark.integration
 
@@ -96,3 +102,30 @@ def test_two_disagreeing_bars_in_one_batch_report_a_conflict(
 
     assert result.stored == 1
     assert result.conflicting == 1
+
+
+def test_the_run_ledger_records_what_the_write_actually_did(
+    bar_store: BarStore, database: DatabaseHarness
+) -> None:
+    """bars_stored is the count the store accepted, not the count the broker
+    returned. A re-run over already-stored history stores nothing, and the
+    ledger has to say so."""
+
+    seed(bar_store, [_bar(0)])
+    second_run_id = uuid4()
+    second = seed(bar_store, [_bar(0)], run_id=second_run_id)
+
+    assert second.stored == 0
+    assert second.duplicate == 1
+
+    with (
+        open_runtime_connection(SecretStr(database.runtime_dsn)) as connection,
+        connection.cursor() as cursor,
+    ):
+        cursor.execute(
+            "SELECT bars_stored, bars_conflicting FROM marketdata.ingest_runs WHERE run_id = %s",
+            (second_run_id,),
+        )
+        row = cursor.fetchone()
+
+    assert row == (0, 0)
