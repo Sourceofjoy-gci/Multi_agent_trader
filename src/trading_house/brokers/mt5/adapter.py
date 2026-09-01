@@ -109,10 +109,11 @@ class Mt5BrokerAdapter:
         """
 
         server_symbol = self._server_symbol_for(instrument_id)
-        code = mt5_timeframe_code(int(duration(timeframe).total_seconds() // 60))
+        minutes = int(duration(timeframe).total_seconds() // 60)
+        mt5_timeframe_code(minutes)  # fail fast on an unsupported timeframe
         bars = self._gateway.call(
             Priority.MARKET_DATA,
-            lambda t: t.copy_rates_range(server_symbol, code, start, end),
+            lambda t: t.copy_rates_range(server_symbol, minutes, start, end),
         )
         return () if bars is None else tuple(bars)
 

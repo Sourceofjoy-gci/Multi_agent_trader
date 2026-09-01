@@ -389,8 +389,12 @@ def test_history_rejects_an_unbound_instrument(symbol_terminal: FakeTerminal) ->
 
 def test_history_returns_an_empty_tuple_when_the_terminal_call_fails() -> None:
     """``None`` means the call failed; ``()`` means the history is genuinely
-    absent. A caller needs those distinguished, so a failed call must not be
-    handed back as ``None`` itself -- it collapses to the empty tuple here."""
+    absent. This adapter deliberately collapses both to the empty tuple
+    rather than surfacing the distinction: Task 10's ingest retries once on
+    an empty page before concluding exhaustion, so a failed call and a
+    genuinely empty window are handled identically and conservatively either
+    way. Handing back ``None`` itself would just push that same collapse onto
+    every caller."""
 
     class _FailedHistoryTerminal(FakeTerminal):
         def copy_rates_range(
@@ -410,3 +414,22 @@ def test_history_returns_an_empty_tuple_when_the_terminal_call_fails() -> None:
         gateway.stop()
 
     assert bars == ()
+
+
+def test_the_terminal_receives_minutes_not_an_already_translated_code() -> None:
+    """H1 is 60 minutes and MetaTrader 5 code 16385. The terminal does its own
+    translation, so an adapter that pre-translates sends 16385 into a
+    parameter expecting 60 -- and the second translation rejects it. M1, M5
+    and M15 hide this because their minute counts equal their own codes."""
+
+    start = datetime(2026, 8, 24, tzinfo=UTC)
+    end = datetime(2026, 8, 25, tzinfo=UTC)
+    terminal = FakeTerminal()
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.history("fx.eurusd", Timeframe.H1, start, end)
+        adapter.history("fx.eurusd", Timeframe.D1, start, end)
+    finally:
+        gateway.stop()
+
+    assert [req[1] for req in terminal.rate_requests] == [60, 1440]
