@@ -72,8 +72,8 @@ def establish_utc_offset(
     real_utc_epoch: Callable[[], float],
     sleep: Callable[[float], None],
     *,
-    max_attempts: int = 10,
-    interval_seconds: float = 0.5,
+    max_attempts: int = 20,
+    interval_seconds: float = 1.0,
 ) -> int:
     """Establish the broker clock offset from a demonstrably live feed.
 
@@ -90,6 +90,9 @@ def establish_utc_offset(
     honest answer.
     """
 
+    # The window must exceed the feed's inter-tick gap, not just be "a few
+    # seconds": a quiet demo feed was measured ticking about once per five
+    # seconds on EURUSD mid-session, which a 5s window rejects as stale.
     first = sample_server_epoch()
     if first is None:
         raise BrokerUnavailableError
