@@ -24,18 +24,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MARKETDATA_ROOT = PROJECT_ROOT / "src" / "trading_house" / "marketdata"
 STORE_MODULE = MARKETDATA_ROOT / "store.py"
 
-# The two consumer-facing bar queries in store.py -- the clean-only default
-# and the include_defective variant BarStore.bars() chooses between. Both
-# must carry an availability_time predicate against the caller's as_of.
-#
-# Two other module-level SQL constants in store.py are deliberately NOT
-# bound by this rule, and must never be added to the tuple below:
-#   - _COVERAGE_SQL backs Coverage, which reports what the store *holds*,
-#     not what is *knowable*. That distinction is exactly what
-#     Coverage.latest_availability_time exists to expose separately.
-#   - _MISSING_KEYS_SQL is internal write-path machinery append_bars() uses
-#     to classify a duplicate from a conflict. No consumer API can reach it.
-BAR_RETURNING_QUERY_NAMES = ("_BARS_SQL", "_BARS_SQL_CLEAN_ONLY")
+# Deny-by-default, not allow-by-name: every module-level query in store.py
+# that touches marketdata.bars must either carry an availability_time
+# predicate or be named here with a reason. A new query nobody named either
+# way fails loudly instead of the check silently saying nothing about it --
+# the failure mode an allow-list of "the two queries we knew about" has.
+EXEMPT_FROM_AVAILABILITY_FILTER = {
+    # Reports what the store *holds*, not what is *knowable*. That
+    # distinction is exactly what Coverage.latest_availability_time exists
+    # to expose separately.
+    "_COVERAGE_SQL",
+    # Internal write-path machinery append_bars() uses to classify a
+    # duplicate from a conflict. No consumer API can reach it.
+    "_MISSING_KEYS_SQL",
+}
 
 
 def _module_string_constants(module: Path) -> dict[str, str]:
@@ -56,16 +58,33 @@ def _module_string_constants(module: Path) -> dict[str, str]:
 
 
 def test_no_consumer_read_path_can_skip_the_availability_filter() -> None:
-    """I-17. Both bar-returning queries -- clean-only and include_defective --
-    carry an ``availability_time <=`` predicate. ``coverage()`` and the
-    internal duplicate/conflict lookup are named above as deliberate
-    exemptions, not oversights."""
+    """I-17. Every module-level query in store.py that reads
+    marketdata.bars must either carry an ``availability_time <=`` predicate
+    or be named in ``EXEMPT_FROM_AVAILABILITY_FILTER`` with a reason.
+
+    This enumerates every such query rather than checking two names it was
+    told about: an allow-list only ever inspects what it already knows to
+    look for, so a new query -- ``_BARS_SQL_FAST_PATH`` or anything else --
+    wired to a consumer read that skips the filter would pass it silently.
+    Here, that new query is forced to either filter or be added to the
+    exemption set and justify itself.
+    """
 
     constants = _module_string_constants(STORE_MODULE)
+    bar_queries = {name: sql for name, sql in constants.items() if "marketdata.bars" in sql}
 
-    for name in BAR_RETURNING_QUERY_NAMES:
-        assert name in constants, f"expected a module-level constant named {name} in store.py"
-        assert "availability_time <=" in constants[name], name
+    assert bar_queries, "expected at least one query against marketdata.bars in store.py"
+    assert bar_queries.keys() >= EXEMPT_FROM_AVAILABILITY_FILTER, (
+        "an exemption names a query that no longer exists in store.py -- stale exemption"
+    )
+
+    for name, sql in bar_queries.items():
+        if name in EXEMPT_FROM_AVAILABILITY_FILTER:
+            continue
+        assert "availability_time <=" in sql, (
+            f"{name} reads marketdata.bars but carries no availability_time "
+            f"predicate, and is not in EXEMPT_FROM_AVAILABILITY_FILTER"
+        )
 
 
 def _bar(**overrides: object) -> Bar:
@@ -95,6 +114,30 @@ def test_no_float_reaches_a_stored_price() -> None:
         _bar(open=1.1)
 
 
+def _imports_metatrader5(path: Path) -> bool:
+    """True if ``path`` imports MetaTrader5, by either import form.
+
+    Checking only ``ast.Import`` would let ``from MetaTrader5 import X``
+    slip past unnoticed; both forms are covered here just as
+    ``test_architecture.py``'s own ``_imported_top_level`` covers both.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            alias.name.split(".")[0] == "MetaTrader5" for alias in node.names
+        ):
+            return True
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module
+            and node.module.split(".")[0] == "MetaTrader5"
+        ):
+            return True
+    return False
+
+
 def test_marketdata_never_imports_metatrader5() -> None:
     """Phase-level restatement; test_architecture.py owns the general rule
     and its guard-the-guard companion."""
@@ -102,13 +145,7 @@ def test_marketdata_never_imports_metatrader5() -> None:
     offenders = [
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in sorted(MARKETDATA_ROOT.rglob("*.py"))
-        if "MetaTrader5"
-        in {
-            alias.name.split(".")[0]
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
+        if _imports_metatrader5(path)
     ]
 
     assert offenders == []
