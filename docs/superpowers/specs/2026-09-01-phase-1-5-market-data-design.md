@@ -287,6 +287,17 @@ Enforced by acceptance test, as I-5 and I-11 are.
 | Non-MT5 data sources | Later; `HistoryProvider` is the seam they will use |
 | Outlier and spike adjudication | Research, over the full series (D-7) |
 
+## 11.5 Known gaps carried out of Phase 1.5
+
+Found during execution, deliberately not fixed. Neither affects stored bar
+correctness or the point-in-time guarantee.
+
+| Gap | Where | Why it was parked |
+|---|---|---|
+| A crash between `append_bars` and `finalize_run` leaves a run row reporting `bars_stored=0` though the bars landed | `marketdata/store.py`, `marketdata/ingest.py` | Fixing it needs one transaction spanning three store calls. The bars themselves are correct and complete either way; only the ledger's counters go stale, which is an observability gap rather than a data-integrity one |
+| The clock probe's window is a fixed twenty seconds | `brokers/mt5/boundary.py` | It must exceed the feed's inter-tick gap. Twenty seconds clears the ~5s gap measured on a quiet EURUSD demo feed, but a genuinely illiquid instrument could still be refused as stale. MT5 exposes no server-time API, so tick cadence is the only signal separating "quiet" from "closed" |
+| The plan's own gate command omitted `tests/integration`, on which coverage reads 93.8% rather than 98% | `docs/superpowers/plans/2026-09-01-phase-1-5-market-data.md` | `store.py` is covered by integration tests only — its behaviour is SQL against real PostgreSQL, and a unit test of it would be a test of a mock. The gate command was wrong, not the coverage |
+
 ## 12. Handoff
 
 A consumer of this store gets three guarantees: every bar it returns passed the
