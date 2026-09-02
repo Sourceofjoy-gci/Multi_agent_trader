@@ -19,7 +19,7 @@ from datetime import datetime
 from functools import partial
 
 from trading_house.brokers.base import MarketSnapshot, Quote, ReconciliationReport, VenueHealth
-from trading_house.brokers.mt5.boundary import Mt5Tick, TerminalPort
+from trading_house.brokers.mt5.boundary import Mt5Bar, Mt5Tick, TerminalPort, mt5_timeframe_code
 from trading_house.brokers.mt5.contracts import decimal_of, to_instrument_contract
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.brokers.mt5.retcodes import check_passed, reject_reason_for
@@ -30,6 +30,7 @@ from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import BookId, InstrumentId, PositiveQuantity, Price
 from trading_house.core.venue import ExecutionOutcome, PrecheckResult, Venue, VenueRef
+from trading_house.marketdata.models import Timeframe, duration
 
 _PHASE_3 = "order submission arrives in Phase 3 with the intent ledger"
 
@@ -97,6 +98,24 @@ class Mt5BrokerAdapter:
                 )
             )
         return MarketSnapshot(quotes=tuple(quotes), taken_at=self._clock.now())
+
+    def history(
+        self, instrument_id: InstrumentId, timeframe: Timeframe, start: datetime, end: datetime
+    ) -> Sequence[Mt5Bar]:
+        """Fetch closed bars at the lowest priority band.
+
+        A multi-hour backfill must never delay a protection call, which is the
+        entire reason the gateway's queue is prioritised.
+        """
+
+        server_symbol = self._server_symbol_for(instrument_id)
+        minutes = int(duration(timeframe).total_seconds() // 60)
+        mt5_timeframe_code(minutes)  # fail fast on an unsupported timeframe
+        bars = self._gateway.call(
+            Priority.MARKET_DATA,
+            lambda t: t.copy_rates_range(server_symbol, minutes, start, end),
+        )
+        return () if bars is None else tuple(bars)
 
     def precheck(self, intent: OrderIntent) -> PrecheckResult:
         """Ask the venue whether it would accept ``intent``, without acting.

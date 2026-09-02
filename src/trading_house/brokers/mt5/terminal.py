@@ -14,11 +14,13 @@ from datetime import UTC, datetime
 import MetaTrader5 as mt5
 
 from trading_house.brokers.mt5.boundary import (
+    Mt5Bar,
     Mt5CheckResult,
     Mt5Position,
     Mt5SymbolInfo,
     Mt5Tick,
     establish_utc_offset,
+    mt5_timeframe_code,
     server_time_to_utc,
 )
 
@@ -102,6 +104,30 @@ class Mt5Terminal:
             return None
         return Mt5Tick(
             bid=float(tick.bid), ask=float(tick.ask), observed_at=self._to_utc(tick.time)
+        )
+
+    def copy_rates_range(
+        self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
+    ) -> Sequence[Mt5Bar] | None:
+        # Same reason as symbol_tick: MT5 serves history only for symbols in
+        # Market Watch.
+        mt5.symbol_select(server_symbol, True)
+        timeframe_code = mt5_timeframe_code(timeframe_minutes)
+        rates = mt5.copy_rates_range(server_symbol, timeframe_code, start, end)
+        if rates is None:
+            return None
+        return tuple(
+            Mt5Bar(
+                event_time=self._to_utc(row[0]),
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                tick_volume=int(row[5]),
+                spread=int(row[6]),
+                real_volume=int(row[7]),
+            )
+            for row in rates
         )
 
     def positions(self) -> Sequence[Mt5Position]:

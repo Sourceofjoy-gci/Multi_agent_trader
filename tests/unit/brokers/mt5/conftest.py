@@ -17,6 +17,7 @@ import pytest
 
 from trading_house.brokers.mt5.boundary import (
     ACCOUNT_TRADE_MODE_DEMO,
+    Mt5Bar,
     Mt5CheckResult,
     Mt5Position,
     Mt5SymbolInfo,
@@ -37,6 +38,7 @@ class FakeTerminal:
         self.shutdown_calls = 0
         self.gate = threading.Event()
         self.gate.set()
+        self.rate_requests: list[tuple[str, int, datetime, datetime]] = []
 
     def initialize(self) -> bool:
         return self.initialises
@@ -59,6 +61,12 @@ class FakeTerminal:
 
     def symbol_tick(self, server_symbol: str) -> Mt5Tick | None:
         return Mt5Tick(bid=1.1, ask=1.2, observed_at=_OPENED_AT)
+
+    def copy_rates_range(
+        self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
+    ) -> tuple[Mt5Bar, ...]:
+        self.rate_requests.append((server_symbol, timeframe_minutes, start, end))
+        return ()
 
     def positions(self) -> Sequence[Mt5Position]:
         return ()

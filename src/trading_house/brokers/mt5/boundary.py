@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
-from trading_house.core.errors import BrokerUnavailableError
+from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 
 SYMBOL_TRADE_MODE_DISABLED = 0
 SYMBOL_TRADE_MODE_LONGONLY = 1
@@ -72,8 +72,8 @@ def establish_utc_offset(
     real_utc_epoch: Callable[[], float],
     sleep: Callable[[float], None],
     *,
-    max_attempts: int = 10,
-    interval_seconds: float = 0.5,
+    max_attempts: int = 20,
+    interval_seconds: float = 1.0,
 ) -> int:
     """Establish the broker clock offset from a demonstrably live feed.
 
@@ -90,6 +90,9 @@ def establish_utc_offset(
     honest answer.
     """
 
+    # The window must exceed the feed's inter-tick gap, not just be "a few
+    # seconds": a quiet demo feed was measured ticking about once per five
+    # seconds on EURUSD mid-session, which a 5s window rejects as stale.
     first = sample_server_epoch()
     if first is None:
         raise BrokerUnavailableError
@@ -147,6 +150,50 @@ class Mt5Tick:
 
 
 @dataclass(frozen=True, slots=True)
+class Mt5Bar:
+    """One closed bar, with its timestamp already converted to UTC."""
+
+    event_time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    tick_volume: int
+    spread: int
+    real_volume: int
+
+
+# MetaTrader 5's timeframe constants are the minute count only below H1; at and
+# above H1 they are bit-flagged, so the minute value cannot be passed straight
+# through. This table is the whole of the translation, kept in the boundary so
+# terminal.py need not carry the mapping's own logic.
+MT5_TIMEFRAME_CODES: dict[int, int] = {
+    1: 1,  # M1
+    5: 5,  # M5
+    15: 15,  # M15
+    60: 16385,  # H1  = TIMEFRAME_H1
+    240: 16388,  # H4 = TIMEFRAME_H4
+    1440: 16408,  # D1 = TIMEFRAME_D1
+}
+
+
+def mt5_timeframe_code(timeframe_minutes: int) -> int:
+    """Translate a bar length in minutes into MetaTrader 5's constant.
+
+    The constants are the minute count only below H1; above that they are
+    bit-flagged (H1 is 16385, not 60), which is why this table exists rather
+    than the value passing straight through. An unmapped length is a caller
+    bug, not a broker condition, so it fails as a configuration error rather
+    than as a bare KeyError crossing the gateway's actor thread.
+    """
+
+    code = MT5_TIMEFRAME_CODES.get(timeframe_minutes)
+    if code is None:
+        raise ConfigurationError
+    return code
+
+
+@dataclass(frozen=True, slots=True)
 class Mt5Position:
     ticket: int
     magic: int
@@ -176,6 +223,9 @@ class TerminalPort(Protocol):
     def server_utc_offset_seconds(self) -> int: ...
     def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None: ...
     def symbol_tick(self, server_symbol: str) -> Mt5Tick | None: ...
+    def copy_rates_range(
+        self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
+    ) -> Sequence[Mt5Bar] | None: ...
     def positions(self) -> Sequence[Mt5Position]: ...
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None: ...
     def last_error(self) -> tuple[int, str]: ...

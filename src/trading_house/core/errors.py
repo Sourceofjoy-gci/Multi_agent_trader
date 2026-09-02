@@ -12,6 +12,7 @@ class ExitCode(IntEnum):
     AUDIT_APPEND = 7
     BROKER = 8
     ACCOUNT_MODE = 9
+    COVERAGE = 10
 
 
 class TradingHouseError(Exception):
@@ -81,3 +82,9 @@ class NonDemoAccountError(TradingHouseError):
     """Raised when the connected account is not a demo account."""
 
     public_message = "refusing to operate a non-demo account"
+
+
+class CoverageError(TradingHouseError):
+    """Raised when a market-data read asks for more than the store holds."""
+
+    public_message = "requested market data exceeds stored coverage"

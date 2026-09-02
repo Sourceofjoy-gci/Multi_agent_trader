@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -21,16 +24,19 @@ from trading_house.core.errors import (
     AuditAppendError,
     AuditIntegrityError,
     ConfigurationError,
+    CoverageError,
     DatabaseUnavailableError,
     MigrationMismatchError,
     SchemaValidationError,
     SignatureVerificationError,
     TradingHouseError,
 )
+from trading_house.marketdata.models import IngestOutcome, IngestRun
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 FAKE_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house"
+_NINE = datetime(2026, 8, 26, 9, 0, tzinfo=UTC)
 
 runner = CliRunner()
 
@@ -305,6 +311,7 @@ def test_exit_codes_are_distinct_per_failure_domain() -> None:
     assert cli.EXIT_CODES[AuditIntegrityError] == cli.ExitCode.AUDIT_INTEGRITY
     assert cli.EXIT_CODES[AuditAppendError] == cli.ExitCode.AUDIT_APPEND
     assert cli.EXIT_CODES[SchemaValidationError] == cli.ExitCode.CONFIGURATION
+    assert cli.EXIT_CODES[CoverageError] == cli.ExitCode.COVERAGE
 
 
 def _keypair(tmp_path: Path) -> tuple[Path, Path]:
@@ -527,6 +534,11 @@ class _StubTerminal:
     def symbol_tick(self, server_symbol: str) -> Any:
         return None
 
+    def copy_rates_range(
+        self, server_symbol: str, timeframe_minutes: int, start: object, end: object
+    ) -> tuple[Any, ...]:
+        return ()
+
     def positions(self) -> tuple[Any, ...]:
         return ()
 
@@ -683,3 +695,306 @@ def test_an_absent_metatrader5_is_recorded_too(
     assert _reconciler(tmp_path, ledger)() == {}
 
     assert [event.event_type for event in ledger.appended] == ["venue.skipped"]
+
+
+# --- data backfill / update / coverage --------------------------------------
+#
+# backfill and update need a live provider; unlike the health gate's venue
+# step, an absent terminal here must fail rather than degrade to an empty
+# success. coverage needs only the store and the signed binding's instrument
+# list -- never the broker.
+
+_DATA_BINDING_YAML = b"""
+venue: mt5
+books:
+  fx_scalp: {magic_range: [110000, 119999]}
+instruments:
+  fx.eurusd: {server_symbol: "EURUSD"}
+  fx.gbpusd: {server_symbol: "GBPUSD"}
+"""
+
+
+def _data_binding(tmp_path: Path) -> Path:
+    binding = tmp_path / "venue_binding.mt5.yaml"
+    binding.write_bytes(_DATA_BINDING_YAML)
+    return binding
+
+
+def _data_args(tmp_path: Path, *rest: str) -> list[str]:
+    return [
+        "data",
+        *rest,
+        "--venue-binding",
+        str(_data_binding(tmp_path)),
+        "--venue-binding-signature",
+        str(tmp_path / "sig"),
+        "--venue-binding-public-key",
+        str(tmp_path / "key"),
+    ]
+
+
+def _fake_ingest_run(instrument_id: str, timeframe: Any) -> IngestRun:
+    instant = _NINE
+    return IngestRun(
+        run_id=uuid4(),
+        instrument_id=instrument_id,
+        timeframe=timeframe,
+        requested_from=instant,
+        requested_to=instant,
+        started_at=instant,
+        finished_at=instant,
+        earliest_event_time=None,
+        bars_returned=0,
+        bars_stored=0,
+        bars_rejected=0,
+        bars_conflicting=0,
+        expected_bars=0,
+        coverage_ratio=Decimal("1"),
+        outcome=IngestOutcome.EMPTY,
+        detail=None,
+    )
+
+
+def test_backfill_without_instrument_exits_nonzero() -> None:
+    result = runner.invoke(
+        cli.app,
+        ["data", "backfill", "--timeframe", "H1", "--from", "2015-01-01"],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_backfill_without_timeframe_exits_nonzero() -> None:
+    result = runner.invoke(
+        cli.app,
+        ["data", "backfill", "--instrument", "fx.eurusd", "--from", "2015-01-01"],
+    )
+
+    assert result.exit_code != 0
+
+
+def test_backfill_rejects_an_unsupported_timeframe() -> None:
+    result = runner.invoke(
+        cli.app,
+        [
+            "data",
+            "backfill",
+            "--instrument",
+            "fx.eurusd",
+            "--timeframe",
+            "M2",
+            "--from",
+            "2015-01-01",
+        ],
+    )
+
+    assert result.exit_code != 0
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_update_iterates_the_signed_binding_across_every_timeframe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+    from trading_house.marketdata.models import Timeframe
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
+    monkeypatch.setattr(
+        cli, "load_venue_binding", lambda *a: parse_venue_binding(_DATA_BINDING_YAML)
+    )
+
+    calls: list[tuple[str, Timeframe]] = []
+
+    def _fake_update(*_args: Any, **kwargs: Any) -> Any:
+        calls.append((kwargs["instrument_id"], kwargs["timeframe"]))
+        return _fake_ingest_run(kwargs["instrument_id"], kwargs["timeframe"])
+
+    monkeypatch.setattr(cli, "update", _fake_update)
+
+    result = runner.invoke(cli.app, _data_args(tmp_path, "update"))
+
+    assert result.exit_code == cli.ExitCode.OK
+    assert len(calls) == 2 * len(Timeframe)
+    assert {instrument for instrument, _ in calls} == {"fx.eurusd", "fx.gbpusd"}
+    assert {timeframe for _, timeframe in calls} == set(Timeframe)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backfill_calls_ingest_with_the_requested_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+    from trading_house.marketdata.models import Timeframe
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
+    monkeypatch.setattr(
+        cli, "load_venue_binding", lambda *a: parse_venue_binding(_DATA_BINDING_YAML)
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_backfill(*_args: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return _fake_ingest_run(kwargs["instrument_id"], kwargs["timeframe"])
+
+    monkeypatch.setattr(cli, "backfill", _fake_backfill)
+
+    result = runner.invoke(
+        cli.app,
+        _data_args(
+            tmp_path,
+            "backfill",
+            "--instrument",
+            "fx.eurusd",
+            "--timeframe",
+            "H1",
+            "--from",
+            "2015-01-01",
+        ),
+    )
+
+    assert result.exit_code == cli.ExitCode.OK
+    assert len(calls) == 1
+    assert calls[0]["instrument_id"] == "fx.eurusd"
+    assert calls[0]["timeframe"] == Timeframe.H1
+    assert calls[0]["until"] == datetime(2015, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_coverage_renders_deterministic_json_with_sorted_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+    from trading_house.marketdata.models import Coverage, Timeframe
+
+    monkeypatch.setattr(
+        cli, "load_venue_binding", lambda *a: parse_venue_binding(_DATA_BINDING_YAML)
+    )
+
+    def _fake_coverage(_self: Any, instrument_id: str, timeframe: Timeframe) -> Coverage:
+        return Coverage(
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            earliest_event_time=None,
+            latest_event_time=None,
+            latest_availability_time=None,
+            clean_bars=0,
+            defective_bars=0,
+        )
+
+    monkeypatch.setattr(cli.PostgresBarStore, "coverage", _fake_coverage)
+
+    first = runner.invoke(cli.app, _data_args(tmp_path, "coverage"))
+    second = runner.invoke(cli.app, _data_args(tmp_path, "coverage"))
+
+    assert first.exit_code == cli.ExitCode.OK
+    assert first.stdout == second.stdout
+    payload = json.loads(first.stdout)
+    assert payload["status"] == "ok"
+    assert set(payload["coverage"]) == {"fx.eurusd", "fx.gbpusd"}
+    assert set(payload["coverage"]["fx.eurusd"]) == {tf.value for tf in Timeframe}
+    assert json.dumps(payload, sort_keys=True) == first.stdout.strip()
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_data_commands_never_print_a_dsn_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+    from trading_house.marketdata.models import Coverage
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _s: _StubTerminal())
+    monkeypatch.setattr(
+        cli, "load_venue_binding", lambda *a: parse_venue_binding(_DATA_BINDING_YAML)
+    )
+    monkeypatch.setattr(
+        cli,
+        "backfill",
+        lambda *_a, **k: _fake_ingest_run(k["instrument_id"], k["timeframe"]),
+    )
+    monkeypatch.setattr(
+        cli,
+        "update",
+        lambda *_a, **k: _fake_ingest_run(k["instrument_id"], k["timeframe"]),
+    )
+    monkeypatch.setattr(
+        cli.PostgresBarStore,
+        "coverage",
+        lambda _self, instrument_id, timeframe: Coverage(
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            earliest_event_time=None,
+            latest_event_time=None,
+            latest_availability_time=None,
+            clean_bars=0,
+            defective_bars=0,
+        ),
+    )
+
+    results = [
+        runner.invoke(
+            cli.app,
+            _data_args(
+                tmp_path,
+                "backfill",
+                "--instrument",
+                "fx.eurusd",
+                "--timeframe",
+                "H1",
+                "--from",
+                "2015-01-01",
+            ),
+        ),
+        runner.invoke(cli.app, _data_args(tmp_path, "update")),
+        runner.invoke(cli.app, _data_args(tmp_path, "coverage")),
+    ]
+
+    for result in results:
+        assert result.exit_code == cli.ExitCode.OK
+        combined = result.stdout + result.stderr
+        assert "super-secret-password" not in combined
+        assert FAKE_DSN not in combined
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_data_coverage_failure_never_prints_a_dsn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trading_house.constitution.binding import parse_venue_binding
+
+    monkeypatch.setattr(
+        cli, "load_venue_binding", lambda *a: parse_venue_binding(_DATA_BINDING_YAML)
+    )
+    monkeypatch.setattr(cli, "open_runtime_connection", _raiser(DatabaseUnavailableError()))
+
+    result = runner.invoke(cli.app, _data_args(tmp_path, "coverage"))
+
+    assert result.exit_code == cli.ExitCode.DATABASE
+    combined = result.stdout + result.stderr
+    assert "super-secret-password" not in combined
+    assert FAKE_DSN not in combined
+
+
+def test_an_unreachable_broker_fails_backfill_rather_than_degrading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike the health gate's venue step, backfill exists to fetch bars: an
+    absent terminal must be a typed failure, never a silent empty success."""
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: None)
+
+    result = runner.invoke(
+        cli.app,
+        _data_args(
+            tmp_path,
+            "backfill",
+            "--instrument",
+            "fx.eurusd",
+            "--timeframe",
+            "H1",
+            "--from",
+            "2015-01-01",
+        ),
+    )
+
+    assert result.exit_code == cli.ExitCode.BROKER

@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, cast
 from uuid import uuid4
@@ -29,7 +31,7 @@ from trading_house.brokers.base import ReconciliationReport
 from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
 from trading_house.brokers.mt5.boundary import TerminalPort
 from trading_house.brokers.mt5.gateway import Mt5Gateway
-from trading_house.constitution.binding import load_venue_binding
+from trading_house.constitution.binding import VenueBinding, load_venue_binding
 from trading_house.constitution.loader import load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
 from trading_house.core.clock import SystemClock
@@ -38,6 +40,7 @@ from trading_house.core.errors import (
     AuditIntegrityError,
     BrokerUnavailableError,
     ConfigurationError,
+    CoverageError,
     DatabaseUnavailableError,
     ExitCode,
     MigrationMismatchError,
@@ -50,6 +53,10 @@ from trading_house.core.errors import (
 from trading_house.core.values import BookId
 from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
+from trading_house.marketdata.ingest import backfill, update
+from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
+from trading_house.marketdata.provider import HistoryProvider
+from trading_house.marketdata.store import PostgresBarStore
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.settings import RuntimeSettings
 
@@ -71,6 +78,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     AuditIntegrityError: ExitCode.AUDIT_INTEGRITY,
     BrokerUnavailableError: ExitCode.BROKER,
     NonDemoAccountError: ExitCode.ACCOUNT_MODE,
+    CoverageError: ExitCode.COVERAGE,
 }
 
 
@@ -85,9 +93,11 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="Trading-hous
 constitution_app = typer.Typer(no_args_is_help=True, help="Risk-constitution commands.")
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 audit_app = typer.Typer(no_args_is_help=True, help="Audit-ledger commands.")
+data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
+app.add_typer(data_app, name="data")
 
 
 @app.callback()
@@ -356,6 +366,200 @@ def _book_reconciler(
             gateway.stop()
 
     return reconcile_books
+
+
+_GENESIS = datetime(1970, 1, 1, tzinfo=UTC)
+"""``update``'s fallback start for an instrument/timeframe with no stored
+coverage yet -- the same role ``--from`` plays for an explicit ``backfill``,
+just never left to a default there. A fresh key still needs to know how far
+back the window is meant to reach, and going all the way back lets the
+broker's own depth wall (not a guess made here) decide where it actually
+starts."""
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+@contextmanager
+def _history_provider(
+    venue_binding: Path,
+    venue_binding_signature: Path,
+    venue_binding_public_key: Path,
+) -> Iterator[tuple[HistoryProvider, VenueBinding, int]]:
+    """Build a live ``HistoryProvider`` over one MetaTrader 5 terminal.
+
+    Unlike ``_book_reconciler``, an absent or unreachable terminal is never
+    degraded to an empty result here: backfill and update exist to fetch
+    bars, so a broker that cannot be reached is ``BrokerUnavailableError``,
+    a typed and already-mapped failure, rather than a silent no-op run.
+    """
+
+    terminal_factory = _mt5_terminal_factory()
+    if terminal_factory is None:
+        raise BrokerUnavailableError()
+
+    binding = load_venue_binding(venue_binding, venue_binding_signature, venue_binding_public_key)
+    clock = SystemClock()
+    probe_symbol = next(iter(binding.instruments.values())).server_symbol
+    gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock)
+    gateway.start()
+    try:
+        adapter = Mt5BrokerAdapter(gateway, binding, clock=clock)
+        yield adapter, binding, gateway.server_utc_offset_seconds
+    finally:
+        gateway.stop()
+
+
+def _bar_store() -> PostgresBarStore:
+    settings = _settings()
+    return PostgresBarStore(lambda: open_runtime_connection(settings.database_dsn))
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _ingest_run_payload(run: IngestRun) -> dict[str, JsonValue]:
+    return {
+        "run_id": str(run.run_id),
+        "instrument_id": run.instrument_id,
+        "timeframe": run.timeframe.value,
+        "requested_from": _iso(run.requested_from),
+        "requested_to": _iso(run.requested_to),
+        "started_at": _iso(run.started_at),
+        "finished_at": _iso(run.finished_at),
+        "earliest_event_time": _iso(run.earliest_event_time),
+        "bars_returned": run.bars_returned,
+        "bars_stored": run.bars_stored,
+        "bars_rejected": run.bars_rejected,
+        "bars_conflicting": run.bars_conflicting,
+        "expected_bars": run.expected_bars,
+        "coverage_ratio": str(run.coverage_ratio),
+        "outcome": run.outcome.value,
+        "detail": run.detail,
+    }
+
+
+def _coverage_payload(coverage: Coverage) -> dict[str, JsonValue]:
+    return {
+        "earliest_event_time": _iso(coverage.earliest_event_time),
+        "latest_event_time": _iso(coverage.latest_event_time),
+        "latest_availability_time": _iso(coverage.latest_availability_time),
+        "clean_bars": coverage.clean_bars,
+        "defective_bars": coverage.defective_bars,
+    }
+
+
+@data_app.command("backfill")
+def data_backfill(
+    instrument: Annotated[str, typer.Option("--instrument", help="Instrument id.")],
+    timeframe: Annotated[Timeframe, typer.Option("--timeframe", help="Bar timeframe.")],
+    from_: Annotated[datetime, typer.Option("--from", help="Requested start (UTC).")],
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Backfill one instrument/timeframe pair back to ``--from``.
+
+    ``--instrument`` and ``--timeframe`` carry no default: a backfill is a
+    deliberate, long-running act, and defaulting either invites one nobody
+    meant to start.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        with _history_provider(
+            venue_binding, venue_binding_signature, venue_binding_public_key
+        ) as (provider, _binding, server_offset_seconds):
+            run = backfill(
+                provider,
+                _bar_store(),
+                SystemClock(),
+                instrument_id=instrument,
+                timeframe=timeframe,
+                until=_as_utc(from_),
+                server_offset_seconds=server_offset_seconds,
+            )
+        return _ingest_run_payload(run)
+
+    _run(operation)
+
+
+@data_app.command("update")
+def data_update(
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Update every instrument in the signed binding across all six timeframes.
+
+    History depth varies enough per timeframe that each must be fetched on
+    its own -- there is no single cursor shared across timeframes.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        with _history_provider(
+            venue_binding, venue_binding_signature, venue_binding_public_key
+        ) as (provider, binding, server_offset_seconds):
+            store = _bar_store()
+            clock = SystemClock()
+            runs = [
+                update(
+                    provider,
+                    store,
+                    clock,
+                    instrument_id=instrument_id,
+                    timeframe=timeframe,
+                    until=_GENESIS,
+                    server_offset_seconds=server_offset_seconds,
+                )
+                for instrument_id in sorted(binding.instruments)
+                for timeframe in Timeframe
+            ]
+        return {"runs": cast(list[JsonValue], [_ingest_run_payload(run) for run in runs])}
+
+    _run(operation)
+
+
+@data_app.command("coverage")
+def data_coverage(
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Report what the store holds, per instrument and timeframe.
+
+    Reads the store only -- never the broker -- so this never touches
+    MetaTrader5.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        binding = load_venue_binding(
+            venue_binding, venue_binding_signature, venue_binding_public_key
+        )
+        store = _bar_store()
+        coverage: dict[str, JsonValue] = {}
+        for instrument_id in binding.instruments:
+            per_timeframe: dict[str, JsonValue] = {
+                timeframe.value: _coverage_payload(store.coverage(instrument_id, timeframe))
+                for timeframe in Timeframe
+            }
+            coverage[instrument_id] = per_timeframe
+        return {"coverage": coverage}
+
+    _run(operation)
 
 
 @app.command("health")

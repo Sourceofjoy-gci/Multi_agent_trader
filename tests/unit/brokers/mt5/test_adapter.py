@@ -15,6 +15,7 @@ from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, RejectReason, Venue
+from trading_house.marketdata.models import Timeframe
 
 BINDING = parse_venue_binding(
     b"""
@@ -368,3 +369,67 @@ def test_health_ages_the_newest_quote_not_the_actor_heartbeat() -> None:
         gateway.stop()
 
     assert report.last_quote_age_seconds > 86_400
+
+
+def test_history_rejects_an_unbound_instrument(symbol_terminal: FakeTerminal) -> None:
+    """The signed venue binding is authoritative for symbol identity here too."""
+
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        with pytest.raises(ConfigurationError):
+            adapter.history(
+                "fx.gbpusd",
+                Timeframe.M1,
+                datetime(2026, 8, 24, tzinfo=UTC),
+                datetime(2026, 8, 25, tzinfo=UTC),
+            )
+    finally:
+        gateway.stop()
+
+
+def test_history_returns_an_empty_tuple_when_the_terminal_call_fails() -> None:
+    """``None`` means the call failed; ``()`` means the history is genuinely
+    absent. This adapter deliberately collapses both to the empty tuple
+    rather than surfacing the distinction: Task 10's ingest retries once on
+    an empty page before concluding exhaustion, so a failed call and a
+    genuinely empty window are handled identically and conservatively either
+    way. Handing back ``None`` itself would just push that same collapse onto
+    every caller."""
+
+    class _FailedHistoryTerminal(FakeTerminal):
+        def copy_rates_range(
+            self, server_symbol: str, timeframe_minutes: int, start: object, end: object
+        ) -> None:
+            return None
+
+    adapter, gateway = _adapter(_FailedHistoryTerminal())
+    try:
+        bars = adapter.history(
+            "fx.eurusd",
+            Timeframe.M1,
+            datetime(2026, 8, 24, tzinfo=UTC),
+            datetime(2026, 8, 25, tzinfo=UTC),
+        )
+    finally:
+        gateway.stop()
+
+    assert bars == ()
+
+
+def test_the_terminal_receives_minutes_not_an_already_translated_code() -> None:
+    """H1 is 60 minutes and MetaTrader 5 code 16385. The terminal does its own
+    translation, so an adapter that pre-translates sends 16385 into a
+    parameter expecting 60 -- and the second translation rejects it. M1, M5
+    and M15 hide this because their minute counts equal their own codes."""
+
+    start = datetime(2026, 8, 24, tzinfo=UTC)
+    end = datetime(2026, 8, 25, tzinfo=UTC)
+    terminal = FakeTerminal()
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.history("fx.eurusd", Timeframe.H1, start, end)
+        adapter.history("fx.eurusd", Timeframe.D1, start, end)
+    finally:
+        gateway.stop()
+
+    assert [req[1] for req in terminal.rate_requests] == [60, 1440]
