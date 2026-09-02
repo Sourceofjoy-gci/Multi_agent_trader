@@ -22,6 +22,7 @@ SIGNING_MODULE = SOURCE_ROOT / "constitution" / "signing.py"
 
 FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"langgraph", "openai", "anthropic", "ccxt"})
 MT5_IMPORT_ALLOWED = frozenset({SOURCE_ROOT / "brokers" / "mt5" / "terminal.py"})
+MARKETDATA_ROOT = SOURCE_ROOT / "marketdata"
 TERMINAL_STATEMENT_CAP = 80
 PRIVATE_KEY_SYMBOLS = frozenset({"load_pem_private_key", "Ed25519PrivateKey"})
 MIGRATION_CALL_NAMES = frozenset({"upgrade", "downgrade"})
@@ -138,6 +139,33 @@ def test_the_terminal_module_is_where_metatrader5_actually_lives() -> None:
     terminal = SOURCE_ROOT / "brokers" / "mt5" / "terminal.py"
     assert terminal.exists()
     tree = ast.parse(terminal.read_text(encoding="utf-8"))
+    assert "MetaTrader5" in _imported_top_level(tree)
+
+
+def test_no_marketdata_module_imports_metatrader5() -> None:
+    """I-17's precondition: marketdata/ reaches history only through the
+    venue-neutral ``HistoryProvider`` seam (``provider.py``), never
+    MetaTrader5 directly. Unlike the whole-tree guard above, this one has no
+    exemption at all -- nothing under this package may import it."""
+
+    offenders = [
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path, tree in _parsed()
+        if path.is_relative_to(MARKETDATA_ROOT) and "MetaTrader5" in _imported_top_level(tree)
+    ]
+
+    assert offenders == []
+
+
+def test_the_marketdata_import_guard_can_still_fail() -> None:
+    """Guard the guard: with no exempted module to point at (the check above
+    is a blanket ban, not an allow-list), prove instead that the detector it
+    relies on -- ``_imported_top_level`` -- actually flags a real MetaTrader5
+    import, so a passing check reflects marketdata/ staying clean rather than
+    a detector that stopped looking."""
+
+    tree = ast.parse("import MetaTrader5\n")
+
     assert "MetaTrader5" in _imported_top_level(tree)
 
 

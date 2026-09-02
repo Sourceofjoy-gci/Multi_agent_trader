@@ -185,6 +185,68 @@ from it beyond `account_info()`, and no test body runs.
 uv run pytest tests/live -m mt5 -rs
 ```
 
+## Phase 1.5 — market data
+
+Phase 1.5 adds append-only bar storage: bars are graded for quality on the
+way in, requests are paged around the broker's own request-size ceiling, and
+every read is filtered by an explicit `availability_time` (I-17) — a bar
+stamped 09:00 was not knowable until 09:01, and no consumer read path can see
+it before then. Storage never rewrites a row; a revised broker history is
+counted as a conflict, not silently applied.
+
+### Commands
+
+```bash
+uv run trading-house data backfill --instrument fx.eurusd --timeframe H1 --from 2020-01-01
+uv run trading-house data update
+uv run trading-house data coverage
+```
+
+- **`data backfill`** walks one instrument/timeframe pair backward, from
+  whatever is already stored (or now, on a fresh key) toward `--from`.
+  `--instrument` and `--timeframe` carry no default — a backfill is a
+  deliberate, long-running act, and defaulting either invites one nobody
+  meant to start.
+- **`data update`** walks every instrument in the signed venue binding
+  forward, across all six timeframes, from each key's latest stored bar to
+  the last fully closed boundary. There is no separate cursor table; the
+  bars already on disk are the only bookmark either command needs.
+- **`data coverage`** reports what the store currently holds, per instrument
+  and timeframe. It reads only the database and never touches MetaTrader5.
+
+### What `coverage()` is for
+
+`coverage()` answers "what does the store hold", not "what can be read right
+now" — those are different questions with different answers. Its
+`earliest_event_time` and `latest_event_time` describe the stored range;
+`latest_availability_time` is the newest instant as of which some stored bar
+was actually knowable. `bars()` is the read path that enforces the
+availability guarantee; `coverage()` exists so a caller can ask what a key
+holds — including a key that holds nothing at all — without paying `bars()`'s
+`CoverageError` for asking outside stored coverage.
+
+### Measured history depth
+
+Depth was measured against FBS by backfilling each instrument/timeframe pair
+to the broker's own depth wall. It varies by more than an order of magnitude
+across timeframes because MetaTrader 5 caps a request by result size, not by
+age: a bar is one response row whether it spans a minute or a day, so a
+coarser timeframe reaches proportionally further into history for the same
+row budget.
+
+| Timeframe | EURUSD | XAUUSD |
+|---|---|---|
+| M1 | ~3 months | ~3 months |
+| M5 | ~16 months | ~17 months |
+| M15 | ~4.1 years | ~4.2 years |
+| H1 | ~16.3 years | ~11.6 years |
+| H4 | ~25 years | ~11.6 years |
+| D1 | back to 2000 | back to 2000 |
+
+Plainly: **M1 holds roughly three months.** Anything that reasons over older
+M1 history hits `CoverageError` at the store boundary rather than silently
+running on a truncated window it never chose.
+
 ## Operator commands
 
 ```bash
