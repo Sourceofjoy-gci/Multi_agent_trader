@@ -16,7 +16,7 @@ from uuid import UUID
 from trading_house.brokers.mt5.boundary import Mt5Bar
 from trading_house.core.clock import FixedClock
 from trading_house.core.errors import BrokerUnavailableError
-from trading_house.marketdata.ingest import backfill, update
+from trading_house.marketdata.ingest import _last_completed_boundary, backfill, update
 from trading_house.marketdata.models import Bar, Coverage, IngestOutcome, Timeframe
 from trading_house.marketdata.store import WriteResult
 
@@ -311,6 +311,87 @@ def test_a_failed_run_records_the_kind_of_failure_not_its_message() -> None:
     assert run.detail == "RuntimeError"
     assert "hunter2" not in (run.detail or "")
     assert "106231964" not in (run.detail or "")
+
+
+def test_last_completed_boundary_floors_in_the_brokers_frame_not_utc() -> None:
+    """FBS is UTC+3: its H4 candles open at 21:00/01:00/05:00 UTC and its D1
+    opens at 21:00 UTC, none of which divide their period in raw UTC seconds.
+    Flooring the UTC epoch directly lands the cutoff inside the still-forming
+    candle instead of at its true, closed boundary."""
+
+    instant = datetime(2026, 8, 26, 0, 30, tzinfo=UTC)
+
+    h4 = _last_completed_boundary(Timeframe.H4, instant, server_offset_seconds=10_800)
+    d1 = _last_completed_boundary(Timeframe.D1, instant, server_offset_seconds=10_800)
+
+    assert h4 == datetime(2026, 8, 25, 21, 0, tzinfo=UTC)
+    assert d1 == datetime(2026, 8, 25, 21, 0, tzinfo=UTC)
+
+
+def test_update_walks_newest_first_so_a_fresh_key_still_fetches_recent_pages() -> None:
+    """A fresh key's plan can span far more pages than the broker actually
+    holds history for -- the CLI's genesis fallback plans M1 page one in
+    1970, decades before any real data. Walking that plan oldest-first would
+    exhaust on page one and never even attempt the recent pages that hold
+    real bars."""
+
+    genesis = datetime(1970, 1, 1, tzinfo=UTC)
+    wall = FIXED_CLOCK.now() - timedelta(days=90)
+    bars = [_mt5_bar(i) for i in range(5)]
+
+    class _WallLimitedProvider:
+        def __init__(self) -> None:
+            self.requests: list[tuple[datetime, datetime]] = []
+
+        def history(
+            self, instrument_id: str, timeframe: Timeframe, start: datetime, end: datetime
+        ) -> Sequence[Mt5Bar]:
+            self.requests.append((start, end))
+            return [] if end <= wall else bars
+
+    provider = _WallLimitedProvider()
+
+    run = update(
+        provider,
+        FakeStore(),
+        FIXED_CLOCK,
+        pause=_no_pause,
+        instrument_id=_INSTRUMENT_ID,
+        timeframe=Timeframe.M1,
+        until=genesis,
+        server_offset_seconds=0,
+    )
+
+    assert run.bars_returned > 0
+    assert run.outcome is not IngestOutcome.EMPTY
+
+
+def test_an_inverted_backfill_range_is_a_no_op_not_a_broken_run() -> None:
+    """``--from`` later than what is already stored produces requested_from >
+    requested_to, which no Python validator catches and which the run
+    ledger's ``runs_range_ordered`` CHECK rejects. Treating it as a no-op
+    keeps that inverted range from ever reaching the insert."""
+
+    earliest = datetime(2026, 6, 1, tzinfo=UTC)
+    later_until = earliest + timedelta(days=1)
+    store = FakeStore(earliest_event_time=earliest)
+    provider = FakeProvider([])
+
+    run = backfill(
+        provider,
+        store,
+        FIXED_CLOCK,
+        pause=_no_pause,
+        instrument_id=_INSTRUMENT_ID,
+        timeframe=Timeframe.M1,
+        until=later_until,
+        server_offset_seconds=0,
+    )
+
+    assert run.outcome is IngestOutcome.COMPLETE
+    assert run.bars_returned == 0
+    assert run.requested_from == run.requested_to
+    assert len(provider.requests) == 0
 
 
 def test_a_typed_failure_contributes_its_fixed_public_message() -> None:

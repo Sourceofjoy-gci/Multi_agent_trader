@@ -56,19 +56,19 @@ _NO_WRITE = WriteResult(stored=0, duplicate=0, conflicting=0)
 """What a run that fetched nothing handed to the store: nothing."""
 
 
-def _last_completed_boundary(timeframe: Timeframe, instant: datetime) -> datetime:
-    """The last completed bar boundary at or before ``instant``.
+def _last_completed_boundary(
+    timeframe: Timeframe, instant: datetime, *, server_offset_seconds: int
+) -> datetime:
+    """The newest bar boundary that has actually closed, in the broker's frame.
 
-    A bar opening at that boundary has not closed yet, so truncating the
-    newest bound of any request to this value is what stops a partial bar
-    being stored as a closed one and look-ahead-leaking into every backtest
-    that reads it.
+    Not in UTC. A broker at UTC+3 opens its H4 candles at 21:00/01:00/05:00
+    UTC and its D1 at 21:00 UTC, so flooring the UTC epoch lands inside a live
+    candle and lets a still-forming bar be fetched and permanently stored.
     """
 
-    step_seconds = int(duration(timeframe).total_seconds())
-    epoch_seconds = int(instant.timestamp())
-    floored = (epoch_seconds // step_seconds) * step_seconds
-    return datetime.fromtimestamp(floored, tz=UTC)
+    step = int(duration(timeframe).total_seconds())
+    server_epoch = int(instant.timestamp()) + server_offset_seconds
+    return datetime.fromtimestamp((server_epoch // step) * step - server_offset_seconds, tz=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +256,9 @@ def _derive_outcome(
         # Nothing was planned because the store was already current -- not
         # because a plan was executed and came back with nothing. Those are
         # different facts, and EMPTY is reserved for the second one.
-        return IngestOutcome.COMPLETE if reached_target else IngestOutcome.TRUNCATED
+        # ``reached_target`` can only flip false inside the page loop, which
+        # never runs when there were no pages, so this is always COMPLETE.
+        return IngestOutcome.COMPLETE
     if bars_returned == 0:
         return IngestOutcome.EMPTY
     if not reached_target:
@@ -367,9 +369,17 @@ def backfill(
 
     started_at = clock.now()
     coverage = store.coverage(instrument_id, timeframe)
-    newest = coverage.earliest_event_time or _last_completed_boundary(timeframe, started_at)
+    newest = coverage.earliest_event_time or _last_completed_boundary(
+        timeframe, started_at, server_offset_seconds=server_offset_seconds
+    )
 
-    pages = plan_backward(timeframe, newest=newest, oldest=until) if until < newest else ()
+    # ``until`` is operator-supplied (``--from``) and can land after ``newest``
+    # -- there is nothing to fetch, and letting requested_from > requested_to
+    # through would violate the run ledger's runs_range_ordered CHECK. Treat
+    # it as a no-op: a zero-width, already-satisfied range.
+    has_work = until < newest
+    pages = plan_backward(timeframe, newest=newest, oldest=until) if has_work else ()
+    requested_from = until if has_work else newest
 
     walk = _walk(provider, instrument_id, timeframe, server_offset_seconds, pages, pause)
 
@@ -377,7 +387,7 @@ def backfill(
         store=store,
         instrument_id=instrument_id,
         timeframe=timeframe,
-        requested_from=until,
+        requested_from=requested_from,
         requested_to=newest,
         started_at=started_at,
         clock=clock,
@@ -407,13 +417,15 @@ def update(
     started_at = clock.now()
     coverage = store.coverage(instrument_id, timeframe)
     oldest = coverage.latest_event_time or until
-    target = _last_completed_boundary(timeframe, started_at)
-
-    pages = (
-        tuple(reversed(plan_backward(timeframe, newest=target, oldest=oldest)))
-        if oldest < target
-        else ()
+    target = _last_completed_boundary(
+        timeframe, started_at, server_offset_seconds=server_offset_seconds
     )
+
+    # Newest-first, like backfill: ``_walk`` breaks on the first exhausted
+    # page, and on a fresh key the plan can span decades of pages with a wall
+    # somewhere in the middle. Walking oldest-first would exhaust on page one
+    # and never attempt the recent pages that actually hold data.
+    pages = plan_backward(timeframe, newest=target, oldest=oldest) if oldest < target else ()
 
     walk = _walk(provider, instrument_id, timeframe, server_offset_seconds, pages, pause)
 
