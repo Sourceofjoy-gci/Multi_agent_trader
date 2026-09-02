@@ -15,6 +15,7 @@ from uuid import UUID
 
 from trading_house.brokers.mt5.boundary import Mt5Bar
 from trading_house.core.clock import FixedClock
+from trading_house.core.errors import BrokerUnavailableError
 from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Bar, Coverage, IngestOutcome, Timeframe
 from trading_house.marketdata.store import WriteResult
@@ -289,3 +290,37 @@ def test_nothing_to_fetch_is_complete_not_empty() -> None:
 
     assert run.outcome is IngestOutcome.COMPLETE
     assert len(provider.requests) == 0
+
+
+# --- the run ledger's detail must never quote an exception's own text -------
+
+
+def test_a_failed_run_records_the_kind_of_failure_not_its_message() -> None:
+    """`IngestRun.detail` is stored in the ledger and printed to stdout by the
+    CLI on an otherwise successful response, so it bypasses the redaction the
+    CLI applies to errors it raises itself. A bare `str(error)` there would be
+    an unbounded channel for anything a future exception happens to carry."""
+
+    class _ExplodingProvider:
+        def history(self, instrument_id, timeframe, start, end):  # type: ignore[no-untyped-def]
+            raise RuntimeError("dsn=postgresql://user:hunter2@db/trading account=106231964")
+
+    run = backfill(_ExplodingProvider(), FakeStore(), FIXED_CLOCK, **BACKFILL_ARGS)
+
+    assert run.outcome is IngestOutcome.FAILED
+    assert run.detail == "RuntimeError"
+    assert "hunter2" not in (run.detail or "")
+    assert "106231964" not in (run.detail or "")
+
+
+def test_a_typed_failure_contributes_its_fixed_public_message() -> None:
+    """A TradingHouseError's message is a class constant with no interpolated
+    content, so it is safe to surface and says more than the class name."""
+
+    class _UnavailableProvider:
+        def history(self, instrument_id, timeframe, start, end):  # type: ignore[no-untyped-def]
+            raise BrokerUnavailableError
+
+    run = backfill(_UnavailableProvider(), FakeStore(), FIXED_CLOCK, **BACKFILL_ARGS)
+
+    assert run.detail == "BrokerUnavailableError: broker terminal unavailable"

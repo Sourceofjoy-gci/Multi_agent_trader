@@ -28,6 +28,7 @@ from uuid import uuid4
 from trading_house.brokers.mt5.boundary import Mt5Bar
 from trading_house.brokers.mt5.contracts import decimal_of
 from trading_house.core.clock import Clock
+from trading_house.core.errors import TradingHouseError
 from trading_house.marketdata.models import (
     Bar,
     BarQuality,
@@ -74,6 +75,24 @@ def _last_completed_boundary(timeframe: Timeframe, instant: datetime) -> datetim
 class _PageFetch:
     bars: Sequence[Mt5Bar]
     exhausted: bool
+
+
+def _safe_detail(error: BaseException) -> str:
+    """Describe a failed run without quoting the exception's own text.
+
+    ``IngestRun.detail`` is stored in the run ledger and rendered to stdout by
+    the CLI on an otherwise successful response, so it escapes the redaction
+    the CLI applies to errors it raises itself. A bare ``str(error)`` there is
+    an unbounded channel: any future exception carrying a DSN, a credential or
+    an account number in its message would reach an operator surface through
+    it. A typed error contributes its fixed public message; anything else
+    contributes only its class name, which is the diagnostic that matters --
+    what kind of failure -- without the payload.
+    """
+
+    if isinstance(error, TradingHouseError):
+        return f"{type(error).__name__}: {error.public_message}"
+    return type(error).__name__
 
 
 def _looks_exhausted(returned: int, expected: int) -> bool:
@@ -211,7 +230,7 @@ def _walk(
             reached_target=False,
             expected=expected_total,
             failed=True,
-            detail=str(error),
+            detail=_safe_detail(error),
         )
     return _WalkResult(
         bars=tuple(bars),
