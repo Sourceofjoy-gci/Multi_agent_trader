@@ -13,44 +13,23 @@ the skip reason name the condition that failed.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO, TerminalPort
+from trading_house.brokers.mt5.boundary import TerminalPort
 from trading_house.brokers.mt5.contracts import to_instrument_contract
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.core.clock import SystemClock
+
+from .conftest import skip_reason
 
 PROBE_SYMBOL = "EURUSD"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = PROJECT_ROOT / "config"
 
 
-def _skip_reason() -> str | None:
-    """Why these tests cannot run here, or ``None`` when they can."""
-
-    if sys.platform != "win32":
-        return "MetaTrader 5 runs only on Windows"
-    try:
-        import MetaTrader5 as mt5
-    except ImportError:
-        return "MetaTrader5 is not installed"
-    if not mt5.initialize():
-        return f"no MetaTrader 5 terminal: {mt5.last_error()}"
-    try:
-        account = mt5.account_info()
-        if account is None:
-            return "a terminal is running but no account is logged in"
-        if int(account.trade_mode) != ACCOUNT_TRADE_MODE_DEMO:
-            return "refusing to run live tests against a non-demo account"
-    finally:
-        mt5.shutdown()
-    return None
-
-
-_SKIP = _skip_reason()
+_SKIP = skip_reason()
 
 pytestmark = [
     pytest.mark.mt5,

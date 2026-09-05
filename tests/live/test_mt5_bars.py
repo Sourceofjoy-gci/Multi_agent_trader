@@ -4,15 +4,11 @@ Postgres, both needing a demo terminal.
 Marked ``mt5`` and skipped when no suitable terminal is present, so a bare
 ``uv run pytest`` stays green on any machine. Never run in CI.
 
-The ``_skip_reason()`` probe is reused verbatim from ``test_mt5_terminal.py``
-rather than imported, so this module collects (and is correctly skipped) on
-any platform without depending on another test module's import-time side
-effects.
+The ``skip_reason()`` probe is imported from the shared ``conftest.py``.
 """
 
 from __future__ import annotations
 
-import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,11 +18,13 @@ import psycopg
 import pytest
 from pydantic import SecretStr
 
-from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO, TerminalPort
+from trading_house.brokers.mt5.boundary import TerminalPort
 from trading_house.brokers.mt5.gateway import Mt5Gateway
 from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
 from trading_house.marketdata.models import IngestOutcome, Timeframe, duration
+
+from .conftest import skip_reason
 
 if TYPE_CHECKING:
     from ..conftest import DatabaseHarness
@@ -45,29 +43,7 @@ instruments:
 )
 
 
-def _skip_reason() -> str | None:
-    """Why these tests cannot run here, or ``None`` when they can."""
-
-    if sys.platform != "win32":
-        return "MetaTrader 5 runs only on Windows"
-    try:
-        import MetaTrader5 as mt5
-    except ImportError:
-        return "MetaTrader5 is not installed"
-    if not mt5.initialize():
-        return f"no MetaTrader 5 terminal: {mt5.last_error()}"
-    try:
-        account = mt5.account_info()
-        if account is None:
-            return "a terminal is running but no account is logged in"
-        if int(account.trade_mode) != ACCOUNT_TRADE_MODE_DEMO:
-            return "refusing to run live tests against a non-demo account"
-    finally:
-        mt5.shutdown()
-    return None
-
-
-_SKIP = _skip_reason()
+_SKIP = skip_reason()
 
 pytestmark = [
     pytest.mark.mt5,

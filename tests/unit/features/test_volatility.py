@@ -62,6 +62,14 @@ def test_true_range_uses_the_gap_when_it_exceeds_the_bar() -> None:
     assert true_range(Decimal("21"), Decimal("20"), Decimal("10")) == Decimal("11")
 
 
+def test_true_range_uses_the_downward_gap_too() -> None:
+    """A bar gapping far BELOW the previous close: only the |low - close|
+    term can see that distance. Every other test in this file has an upward
+    gap, where this term either loses or ties."""
+
+    assert true_range(Decimal("8"), Decimal("5"), Decimal("20")) == Decimal("15")
+
+
 def test_wilder_atr_matches_the_hand_worked_example() -> None:
     """Expected value derived from the definition above, not from this code."""
 
@@ -81,6 +89,9 @@ def test_wilder_atr_needs_one_more_bar_than_its_period() -> None:
 def test_wilder_atr_rejects_a_non_positive_period() -> None:
     with pytest.raises(ValueError, match="period"):
         wilder_atr(WORKED, period=0)
+
+    with pytest.raises(ValueError, match="period"):
+        wilder_atr(WORKED, period=-1)
 
 
 def test_a_flat_series_has_zero_range() -> None:
