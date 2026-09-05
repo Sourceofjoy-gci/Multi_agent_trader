@@ -10,17 +10,28 @@ from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe
 BASE = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
 
 
-def _bar(minute: int, *, high: str = "1.2", low: str = "1.0", spread: int = 9) -> Bar:
+def _bar(minute: int, *, spread: int = 9) -> Bar:
+    """High and low swing on a fixed cycle so successive true ranges differ.
+
+    A constant-range series makes Wilder's recursion a fixed point -- seed
+    and every later value collapse to the same number -- so a determinism
+    test built on one cannot distinguish window lengths at all.
+    """
+
     opened = BASE + timedelta(minutes=minute)
+    swing = Decimal(minute % 7) / Decimal(100)
+    high = Decimal("1.2") + swing
+    low = Decimal("1.0") - swing
+    close = (high + low) / 2
     return Bar(
         instrument_id="fx.eurusd",
         timeframe=Timeframe.M1,
         event_time=opened,
         availability_time=opened + timedelta(minutes=1),
-        open=Decimal("1.1"),
-        high=Decimal(high),
-        low=Decimal(low),
-        close=Decimal("1.15"),
+        open=close,
+        high=high,
+        low=low,
+        close=close,
         tick_volume=10,
         spread=spread,
         real_volume=0,
@@ -34,6 +45,21 @@ class FakeStore:
     def __init__(self, count: int) -> None:
         self.all = [_bar(i) for i in range(count)]
         self.requests: list[tuple[datetime, datetime, datetime]] = []
+
+    @classmethod
+    def ending_at(cls, newest_minute: int, *, depth: int) -> "FakeStore":
+        """A store whose bars run ``newest_minute - depth + 1 .. newest_minute``.
+
+        Lets two stores of different depth still share the same most-recent
+        bars, so a determinism check compares apples to apples: the same
+        window, with a different amount of history sitting behind it --
+        rather than two stores whose "last N bars" are simply different
+        bars, which would make the comparison fail for the wrong reason.
+        """
+
+        store = cls(0)
+        store.all = [_bar(i) for i in range(newest_minute - depth + 1, newest_minute + 1)]
+        return store
 
     def bars(
         self,
@@ -85,19 +111,18 @@ LATER = BASE + timedelta(days=30)
 
 
 def test_the_same_instant_gives_the_same_atr_however_much_history_is_stored() -> None:
-    """THE test of this phase (I-18).
-
-    Wilder's ATR is recursive, so an implementation that computed over
-    'whatever the store holds' would return a different number as history
-    accumulated -- a backtest re-run months later would size positions
-    differently with no code change and nothing to point at.
+    """THE test of this phase (I-18). Same recent bars, different depth
+    behind them: an engine computing over 'whatever is stored' returns a
+    different number as history accumulates, so a backtest re-run months
+    later would size positions differently with no code change.
     """
 
-    shallow, _ = _engine(200)
-    deep, _ = _engine(2000)
+    newest = 2000
+    shallow = FakeStore.ending_at(newest, depth=200)
+    deep = FakeStore.ending_at(newest, depth=2000)
     args = {"period": 14, "as_of": LATER}
 
-    assert shallow.atr("fx.eurusd", Timeframe.M1, **args) == deep.atr(
+    assert FeatureEngine(shallow).atr("fx.eurusd", Timeframe.M1, **args) == FeatureEngine(deep).atr(
         "fx.eurusd", Timeframe.M1, **args
     )
 
