@@ -1,0 +1,190 @@
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from trading_house.core.errors import CoverageError, InsufficientHistoryError
+from trading_house.features.engine import WARMUP_MULTIPLE, FeatureEngine
+from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe
+
+BASE = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+
+
+def _bar(minute: int, *, high: str = "1.2", low: str = "1.0", spread: int = 9) -> Bar:
+    opened = BASE + timedelta(minutes=minute)
+    return Bar(
+        instrument_id="fx.eurusd",
+        timeframe=Timeframe.M1,
+        event_time=opened,
+        availability_time=opened + timedelta(minutes=1),
+        open=Decimal("1.1"),
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal("1.15"),
+        tick_volume=10,
+        spread=spread,
+        real_volume=0,
+        quality=BarQuality.OK,
+    )
+
+
+class FakeStore:
+    """A BarReader holding a contiguous run of M1 bars, no database."""
+
+    def __init__(self, count: int) -> None:
+        self.all = [_bar(i) for i in range(count)]
+        self.requests: list[tuple[datetime, datetime, datetime]] = []
+
+    def bars(
+        self,
+        instrument_id: str,
+        timeframe: Timeframe,
+        *,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        include_defective: bool = False,
+    ) -> tuple[Bar, ...]:
+        self.requests.append((start, end, as_of))
+        if self.all and start < self.all[0].event_time:
+            raise CoverageError
+        return tuple(
+            bar
+            for bar in self.all
+            if start <= bar.event_time < end and bar.availability_time <= as_of
+        )
+
+    def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
+        if not self.all:
+            return Coverage(
+                instrument_id="fx.eurusd",
+                timeframe=Timeframe.M1,
+                earliest_event_time=None,
+                latest_event_time=None,
+                latest_availability_time=None,
+                clean_bars=0,
+                defective_bars=0,
+            )
+        return Coverage(
+            instrument_id="fx.eurusd",
+            timeframe=Timeframe.M1,
+            earliest_event_time=self.all[0].event_time,
+            latest_event_time=self.all[-1].event_time,
+            latest_availability_time=self.all[-1].availability_time,
+            clean_bars=len(self.all),
+            defective_bars=0,
+        )
+
+
+def _engine(count: int) -> tuple[FeatureEngine, FakeStore]:
+    store = FakeStore(count)
+    return FeatureEngine(store), store
+
+
+LATER = BASE + timedelta(days=30)
+
+
+def test_the_same_instant_gives_the_same_atr_however_much_history_is_stored() -> None:
+    """THE test of this phase (I-18).
+
+    Wilder's ATR is recursive, so an implementation that computed over
+    'whatever the store holds' would return a different number as history
+    accumulated -- a backtest re-run months later would size positions
+    differently with no code change and nothing to point at.
+    """
+
+    shallow, _ = _engine(200)
+    deep, _ = _engine(2000)
+    args = {"period": 14, "as_of": LATER}
+
+    assert shallow.atr("fx.eurusd", Timeframe.M1, **args) == deep.atr(
+        "fx.eurusd", Timeframe.M1, **args
+    )
+
+
+def test_the_window_is_exactly_the_period_times_the_multiple() -> None:
+    """Fixed, not 'enough'. The multiple is what makes the seed's influence
+    negligible while keeping the window a constant rather than a judgement."""
+
+    engine, store = _engine(2000)
+
+    engine.atr("fx.eurusd", Timeframe.M1, period=14, as_of=LATER)
+
+    start, end, as_of = store.requests[-1]
+    assert end == as_of == LATER
+    assert (end - start) >= timedelta(minutes=14 * WARMUP_MULTIPLE)
+
+
+def test_a_store_one_bar_short_of_the_window_refuses() -> None:
+    """Not a shorter ATR. Sizing cannot trade what it cannot size."""
+
+    period = 14
+    needed = period * WARMUP_MULTIPLE + 1
+    short, _ = _engine(needed - 1)
+    exact, _ = _engine(needed)
+
+    with pytest.raises(InsufficientHistoryError):
+        short.atr("fx.eurusd", Timeframe.M1, period=period, as_of=LATER)
+
+    assert exact.atr("fx.eurusd", Timeframe.M1, period=period, as_of=LATER) > 0
+
+
+def test_an_empty_store_refuses_rather_than_raising_coverage_error() -> None:
+    """A key with nothing stored is a warm-up problem from the caller's side,
+    not a coverage bounds violation to translate."""
+
+    engine, _ = _engine(0)
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.atr("fx.eurusd", Timeframe.M1, period=14, as_of=LATER)
+
+
+def test_a_short_store_is_not_asked_for_more_than_it_holds() -> None:
+    """bars() raises CoverageError when start precedes the earliest stored
+    bar, so a generously wide request would blow up on a young store that
+    nonetheless holds enough bars. The engine clamps to coverage first."""
+
+    engine, store = _engine(200)
+
+    engine.atr("fx.eurusd", Timeframe.M1, period=14, as_of=LATER)
+
+    start, _, _ = store.requests[-1]
+    assert start >= store.all[0].event_time
+
+
+def test_a_feature_never_sees_a_bar_that_had_not_closed() -> None:
+    """Inherited from the store, pinned here because the engine chooses the
+    as_of it passes down and could get that wrong."""
+
+    engine, store = _engine(300)
+
+    engine.atr("fx.eurusd", Timeframe.M1, period=14, as_of=LATER)
+
+    _, _, as_of = store.requests[-1]
+    assert as_of == LATER
+
+
+def test_median_spread_uses_exactly_the_requested_window() -> None:
+    """Every bar carrying the same spread would make this pass against any
+    window at all, so the store is built with a wide older half and a tight
+    recent one: a window of 50 must see only the tight bars."""
+
+    store = FakeStore(0)
+    store.all = [_bar(i, spread=100) for i in range(200)] + [
+        _bar(200 + i, spread=6) for i in range(50)
+    ]
+    engine = FeatureEngine(store)
+
+    assert engine.median_spread_points(
+        "fx.eurusd", Timeframe.M1, window=50, as_of=LATER
+    ) == Decimal("6")
+    assert engine.median_spread_points(
+        "fx.eurusd", Timeframe.M1, window=250, as_of=LATER
+    ) == Decimal("100")
+
+
+def test_median_spread_refuses_a_window_the_store_cannot_fill() -> None:
+    engine, _ = _engine(10)
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.median_spread_points("fx.eurusd", Timeframe.M1, window=50, as_of=LATER)
