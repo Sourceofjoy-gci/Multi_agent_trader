@@ -3,7 +3,7 @@
 import sys
 import time
 
-ACCOUNT_TRADE_MODE_DEMO = 1
+from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO
 
 
 def skip_reason() -> str | None:
