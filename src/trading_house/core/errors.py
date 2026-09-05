@@ -88,3 +88,9 @@ class CoverageError(TradingHouseError):
     """Raised when a market-data read asks for more than the store holds."""
 
     public_message = "requested market data exceeds stored coverage"
+
+
+class InsufficientHistoryError(TradingHouseError):
+    """Raised when a feature needs more history than the store holds."""
+
+    public_message = "insufficient history to compute the feature"

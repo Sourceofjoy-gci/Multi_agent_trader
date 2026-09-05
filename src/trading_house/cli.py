@@ -43,6 +43,7 @@ from trading_house.core.errors import (
     CoverageError,
     DatabaseUnavailableError,
     ExitCode,
+    InsufficientHistoryError,
     MigrationMismatchError,
     NonDemoAccountError,
     SchemaValidationError,
@@ -79,6 +80,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     BrokerUnavailableError: ExitCode.BROKER,
     NonDemoAccountError: ExitCode.ACCOUNT_MODE,
     CoverageError: ExitCode.COVERAGE,
+    InsufficientHistoryError: ExitCode.COVERAGE,
 }
 
 
