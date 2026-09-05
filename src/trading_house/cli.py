@@ -80,7 +80,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     BrokerUnavailableError: ExitCode.BROKER,
     NonDemoAccountError: ExitCode.ACCOUNT_MODE,
     CoverageError: ExitCode.COVERAGE,
-    InsufficientHistoryError: ExitCode.COVERAGE,
+    InsufficientHistoryError: ExitCode.INSUFFICIENT_HISTORY,
 }
 
 

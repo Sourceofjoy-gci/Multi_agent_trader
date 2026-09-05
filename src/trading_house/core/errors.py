@@ -13,6 +13,7 @@ class ExitCode(IntEnum):
     BROKER = 8
     ACCOUNT_MODE = 9
     COVERAGE = 10
+    INSUFFICIENT_HISTORY = 11
 
 
 class TradingHouseError(Exception):
