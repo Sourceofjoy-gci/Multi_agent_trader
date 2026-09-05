@@ -64,11 +64,13 @@ that window. `WARMUP_MULTIPLE` is **10** — comfortably past where the seed's
 influence decays, and a constant rather than a judgement call at each site.
 
 If the store cannot supply the full window, the engine raises
-`InsufficientHistoryError` — a new member of the existing `TradingHouseError`
-family in `core/errors.py`, with no `ExitCode` because no CLI command surfaces
-it in this phase; Phase 3 decides how sizing reports it (D-2). It does not compute from a shorter one. An
+`InsufficientHistoryError` rather than computing from a shorter one (D-2). An
 ATR from three bars is noise wearing the costume of volatility, and it would
 size a real position.
+
+That error joins the existing `TradingHouseError` family in `core/errors.py`.
+It gets no `ExitCode`, because no CLI command surfaces it in this phase —
+Phase 3 decides how sizing reports it.
 
 ## 4. What ships
 
