@@ -26,6 +26,7 @@ from trading_house.core.errors import (
     ConfigurationError,
     CoverageError,
     DatabaseUnavailableError,
+    InsufficientHistoryError,
     MigrationMismatchError,
     SchemaValidationError,
     SignatureVerificationError,
@@ -312,6 +313,14 @@ def test_exit_codes_are_distinct_per_failure_domain() -> None:
     assert cli.EXIT_CODES[AuditAppendError] == cli.ExitCode.AUDIT_APPEND
     assert cli.EXIT_CODES[SchemaValidationError] == cli.ExitCode.CONFIGURATION
     assert cli.EXIT_CODES[CoverageError] == cli.ExitCode.COVERAGE
+
+
+def test_insufficient_history_is_distinguishable_from_missing_coverage() -> None:
+    """Different remedies: one wants a backfill, the other wants patience or
+    a shorter period. A script branching on exit code has to tell them apart."""
+
+    assert cli.EXIT_CODES[InsufficientHistoryError] == cli.ExitCode.INSUFFICIENT_HISTORY
+    assert cli.EXIT_CODES[CoverageError] != cli.EXIT_CODES[InsufficientHistoryError]
 
 
 def _keypair(tmp_path: Path) -> tuple[Path, Path]:

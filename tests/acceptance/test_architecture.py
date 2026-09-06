@@ -37,6 +37,11 @@ CREDENTIAL_BEARING = frozenset(
     {"trading_house.settings", "trading_house.database", "trading_house.brokers", "psycopg"}
 )
 AGENTS_ROOT = SOURCE_ROOT / "agents"
+FEATURES_ROOT = SOURCE_ROOT / "features"
+# features/ may reach marketdata/ and core/, nothing else this project owns:
+# a feature must never fetch from a broker itself, and Section 8.2 -- not
+# this package -- turns a feature into a risk decision.
+FEATURES_FORBIDDEN = frozenset({"trading_house.brokers", "trading_house.risk"})
 # The reverse of CREDENTIAL_BEARING: no process holding broker credentials may
 # execute agent-authored code (I-11's other direction). These are exactly the
 # modules that could hold or reach credentials.
@@ -167,6 +172,38 @@ def test_the_marketdata_import_guard_can_still_fail() -> None:
     tree = ast.parse("import MetaTrader5\n")
 
     assert "MetaTrader5" in _imported_top_level(tree)
+
+
+def test_no_feature_module_imports_a_broker_or_risk_module() -> None:
+    """features/ may only reach marketdata/ and core/. A feature that could
+    fetch from a broker directly, or size a position itself, would let a
+    caller route around the risk gate Section 8.2 owns."""
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        if not path.is_relative_to(FEATURES_ROOT):
+            continue
+        reached = _reaches(tree, FEATURES_FORBIDDEN)
+        if reached:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.brokers.base import BrokerAdapter",
+        "import trading_house.risk",
+        "from trading_house.risk.sizing import position_size",
+    ],
+)
+def test_the_features_import_guard_can_still_fail(statement: str) -> None:
+    """Guard the guard: prove the detector actually flags a real brokers/ or
+    risk/ import, so a passing check reflects features/ staying clean rather
+    than a detector that stopped looking."""
+
+    assert _reaches(ast.parse(statement + "\n"), FEATURES_FORBIDDEN)
 
 
 def test_the_terminal_module_stays_thin() -> None:
