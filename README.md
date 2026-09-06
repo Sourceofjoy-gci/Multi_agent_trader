@@ -264,14 +264,17 @@ Both are pure functions under the hood
 `.spread.median_spread_points`) fed a bar window the engine assembles; an
 indicator never touches the store itself.
 
-`atr` asks for `period * WARMUP_MULTIPLE` bars, not just `period` — Wilder's
-smoothing is recursive, so its value depends on where the series started,
-and a shorter window would let that seed's influence show up in the answer.
-Ten periods of warm-up puts it below anything that matters, and makes the
-window a fixed constant rather than a judgement call made fresh at every
-call site. This is also why the same `(instrument_id, timeframe, period,
-as_of)` always returns the same number regardless of how much history has
-piled up behind it since (**I-18**): the window is fixed, not "everything
+`atr` asks for `period * WARMUP_MULTIPLE + 1` bars, not just `period` —
+Wilder's smoothing is recursive, so its value depends on where the series
+started, and a shorter window would let that seed's influence show up in
+the answer. Ten periods of warm-up puts it below anything that matters, and
+makes the window a fixed constant rather than a judgement call made fresh
+at every call site. The `+ 1` is separate from warm-up: true range needs a
+previous close, so turning `n` bars into true ranges yields only `n - 1` of
+them, and the extra bar buys back the one warm-up would otherwise lose.
+This is also why the same `(instrument_id, timeframe, period, as_of)`
+always returns the same number regardless of how much history has piled up
+behind it since (**I-18**): the window is fixed, not "everything
 available."
 
 A window the store cannot fill — a young key, or an `as_of` too close to

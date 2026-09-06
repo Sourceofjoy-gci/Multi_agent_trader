@@ -88,3 +88,53 @@ def test_atr_never_exceeds_the_widest_true_range_it_saw(bars: list[Bar]) -> None
     result = wilder_atr(bars, period=5)
 
     assert 0 <= result <= widest
+
+
+@st.composite
+def _constant_true_range_bars(draw: st.DrawFn, count: int) -> tuple[list[Bar], Decimal]:
+    """``count`` bars sharing one fixed ``low``/``high``/``close``, so every
+    true range in the series -- including the first, since the previous
+    close equals every bar's own low -- is exactly the drawn ``span``.
+
+    A constant input series is Wilder's smoothing's fixed point: the seed is
+    the average of ``period`` copies of ``span``, i.e. ``span`` itself, and
+    ``(span * (period - 1) + span) / period`` is ``span`` again, so the
+    result must reproduce ``span`` exactly, not merely fall inside a range.
+    """
+
+    low = draw(PRICES)
+    span = draw(st.decimals(min_value=Decimal("0"), max_value=Decimal("50"), places=5))
+    high = low + span
+    bars = []
+    for index in range(count):
+        opened = BASE + timedelta(minutes=index)
+        bars.append(
+            Bar(
+                instrument_id="fx.eurusd",
+                timeframe=Timeframe.M1,
+                event_time=opened,
+                availability_time=opened + timedelta(minutes=1),
+                open=low,
+                high=high,
+                low=low,
+                close=low,
+                tick_volume=1,
+                spread=1,
+                real_volume=0,
+                quality=BarQuality.OK,
+            )
+        )
+    return bars, span
+
+
+@given(drawn=_constant_true_range_bars(count=20))
+def test_atr_reproduces_a_constant_true_range_exactly(drawn: tuple[list[Bar], Decimal]) -> None:
+    """The bound in the property above is satisfied by ``wilder_atr`` always
+    returning zero, by picking an arbitrary true range out of the window, or
+    by any wrong smoothing weight that happens to land inside the range --
+    none of those survive this one, because a constant series has only one
+    correct answer, not a range of acceptable ones."""
+
+    bars, span = drawn
+
+    assert wilder_atr(bars, period=5) == span
