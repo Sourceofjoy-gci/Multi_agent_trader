@@ -38,6 +38,7 @@ These are assertions the codebase must satisfy at all times. A pull request that
 | I-9 | Every strategy promoted to live capital has an entry in the trial ledger recording how many configurations were tested. | `research/trial_ledger.py` |
 | I-10 | All timestamps are stored as UTC with an explicit `availability_time` distinct from `event_time`. | Schema validation |
 | I-17 | Every market-data read is filtered by `availability_time` against an explicit `as_of`. No read path can expose a bar before it was knowable. | `tests/acceptance/test_phase1_5.py` |
+| I-18 | A feature is computed over a fixed lookback, so the same instrument, timeframe, period and `as_of` always yield the same value. | `tests/unit/features/test_engine.py` |
 
 ### 0.3 Definition of done for the whole system
 

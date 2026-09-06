@@ -247,6 +247,38 @@ Plainly: **M1 holds roughly three months.** Anything that reasons over older
 M1 history hits `CoverageError` at the store boundary rather than silently
 running on a truncated window it never chose.
 
+## Phase 2 — features
+
+`FeatureEngine` (`trading_house.features.engine`) computes indicators from
+stored bars over a window it fixes itself, not whatever the store happens to
+hold. It currently offers:
+
+- **`atr(instrument_id, timeframe, period=, as_of=)`** — Wilder's ATR.
+- **`median_spread_points(instrument_id, timeframe, window=, as_of=)`** —
+  the median bar spread, in points (converting to price needs the
+  instrument contract, which lives behind the broker adapter — Phase 3's
+  problem, not this one's).
+
+Both are pure functions under the hood
+(`trading_house.features.indicators.volatility.wilder_atr`,
+`.spread.median_spread_points`) fed a bar window the engine assembles; an
+indicator never touches the store itself.
+
+`atr` asks for `period * WARMUP_MULTIPLE` bars, not just `period` — Wilder's
+smoothing is recursive, so its value depends on where the series started,
+and a shorter window would let that seed's influence show up in the answer.
+Ten periods of warm-up puts it below anything that matters, and makes the
+window a fixed constant rather than a judgement call made fresh at every
+call site. This is also why the same `(instrument_id, timeframe, period,
+as_of)` always returns the same number regardless of how much history has
+piled up behind it since (**I-18**): the window is fixed, not "everything
+available."
+
+A window the store cannot fill — a young key, or an `as_of` too close to
+the start of history — raises `InsufficientHistoryError` rather than
+returning a shorter answer. A stop sized on quietly less history than the
+caller assumed is a wrong stop with no error to show for it.
+
 ## Operator commands
 
 ```bash
