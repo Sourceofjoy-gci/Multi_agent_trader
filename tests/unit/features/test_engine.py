@@ -4,8 +4,8 @@ from decimal import Decimal
 import pytest
 
 from trading_house.core.errors import CoverageError, InsufficientHistoryError
-from trading_house.features.engine import WARMUP_MULTIPLE, FeatureEngine
-from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe
+from trading_house.features.engine import SPAN_SAFETY, WARMUP_MULTIPLE, FeatureEngine
+from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 
 BASE = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
 
@@ -45,6 +45,18 @@ class FakeStore:
     def __init__(self, count: int) -> None:
         self.all = [_bar(i) for i in range(count)]
         self.requests: list[tuple[datetime, datetime, datetime]] = []
+
+    @classmethod
+    def with_a_weekend_gap(cls, *, before: int, after: int) -> "FakeStore":
+        """Bars for ``before`` minutes, then a 48-hour closure, then ``after``
+        more -- mimicking an FX weekend sitting in the middle of the store's
+        history rather than at either end of it."""
+
+        gap_minutes = 48 * 60
+        resume = before + gap_minutes
+        store = cls(0)
+        store.all = [_bar(i) for i in range(before)] + [_bar(resume + i) for i in range(after)]
+        return store
 
     @classmethod
     def ending_at(cls, newest_minute: int, *, depth: int) -> "FakeStore":
@@ -128,8 +140,9 @@ def test_the_same_instant_gives_the_same_atr_however_much_history_is_stored() ->
 
 
 def test_the_window_is_exactly_the_period_times_the_multiple() -> None:
-    """Fixed, not 'enough'. The multiple is what makes the seed's influence
-    negligible while keeping the window a constant rather than a judgement."""
+    """Fixed, not 'enough'. Pins the exact requested span, not just a lower
+    bound -- a lower-bound assertion would still pass with SPAN_SAFETY
+    deleted entirely, since any wider request clears it too."""
 
     engine, store = _engine(2000)
 
@@ -137,7 +150,11 @@ def test_the_window_is_exactly_the_period_times_the_multiple() -> None:
 
     start, end, as_of = store.requests[-1]
     assert end == as_of == LATER
-    assert (end - start) >= timedelta(minutes=14 * WARMUP_MULTIPLE)
+
+    count = 14 * WARMUP_MULTIPLE + 1
+    span = duration(Timeframe.M1) * count * SPAN_SAFETY
+    anchor = store.all[-1].event_time  # as_of (LATER) sits long past the store's last bar
+    assert start == anchor - span
 
 
 def test_a_store_one_bar_short_of_the_window_refuses() -> None:
@@ -213,3 +230,15 @@ def test_median_spread_refuses_a_window_the_store_cannot_fill() -> None:
 
     with pytest.raises(InsufficientHistoryError):
         engine.median_spread_points("fx.eurusd", Timeframe.M1, window=50, as_of=LATER)
+
+
+def test_a_weekend_gap_does_not_starve_the_window() -> None:
+    """The widened span scales with the bar count; a closure does not. On M1
+    a 48-hour weekend is wider than the whole window, so the first attempt
+    lands inside it -- against a store holding ample history."""
+
+    store = FakeStore.with_a_weekend_gap(before=1000, after=5)
+    engine = FeatureEngine(store)
+    as_of = store.all[-1].availability_time + timedelta(minutes=3)
+
+    assert engine.atr("fx.eurusd", Timeframe.M1, period=14, as_of=as_of) > 0

@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from trading_house.core.errors import InsufficientHistoryError
 from trading_house.features.indicators.spread import median_spread_points as _median_spread
@@ -37,7 +37,6 @@ for holidays.
 """
 
 
-@runtime_checkable
 class BarReader(Protocol):
     """The read surface a feature needs. Deliberately narrower than BarStore,
     which also carries the write path features must never reach."""
@@ -114,6 +113,15 @@ class FeatureEngine:
           store's last bar is much older would compute a ``start`` that
           overshoots every real bar and return nothing, even though the
           store holds plenty of history available as of ``as_of``.
+
+        A third gap the span cannot bridge: it scales with the bar count
+        while a market closure does not -- a 48-hour FX weekend is wider
+        than an entire M1 window, so the first attempt can land entirely
+        inside it even though the store holds months of history. Rather than
+        guess a multiplier large enough for the longest closure (Christmas
+        will eventually exceed it), retry once from the store's earliest bar.
+        The answer is still deterministic: it's always the last ``count``
+        bars, whichever attempt supplied them.
         """
 
         coverage = self._store.coverage(instrument_id, timeframe)
@@ -123,7 +131,21 @@ class FeatureEngine:
         span = duration(timeframe) * count * SPAN_SAFETY
         anchor = min(as_of, coverage.latest_event_time)
         start = max(anchor - span, coverage.earliest_event_time)
-        bars = self._store.bars(instrument_id, timeframe, start=start, end=as_of, as_of=as_of)
+        bars = self._read(instrument_id, timeframe, start=start, as_of=as_of)
+        if len(bars) < count:
+            bars = self._read(
+                instrument_id, timeframe, start=coverage.earliest_event_time, as_of=as_of
+            )
         if len(bars) < count:
             raise InsufficientHistoryError
         return bars[-count:]
+
+    def _read(
+        self,
+        instrument_id: str,
+        timeframe: Timeframe,
+        *,
+        start: datetime,
+        as_of: datetime,
+    ) -> tuple[Bar, ...]:
+        return self._store.bars(instrument_id, timeframe, start=start, end=as_of, as_of=as_of)
