@@ -124,6 +124,9 @@ class FeatureEngine:
         bars, whichever attempt supplied them.
         """
 
+        if count <= 0:
+            raise ValueError("count must be positive")
+
         coverage = self._store.coverage(instrument_id, timeframe)
         if coverage.earliest_event_time is None or coverage.latest_event_time is None:
             raise InsufficientHistoryError

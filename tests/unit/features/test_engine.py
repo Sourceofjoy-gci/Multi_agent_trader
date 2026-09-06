@@ -232,6 +232,17 @@ def test_median_spread_refuses_a_window_the_store_cannot_fill() -> None:
         engine.median_spread_points("fx.eurusd", Timeframe.M1, window=50, as_of=LATER)
 
 
+def test_a_zero_window_is_a_caller_bug_not_a_shortage() -> None:
+    """`bars[-0:]` returns the whole list, so without a guard a zero window
+    silently returns a median of every bar fetched -- a real-looking number
+    where the design promises a refusal."""
+
+    engine, _ = _engine(500)
+
+    with pytest.raises(ValueError, match="positive"):
+        engine.median_spread_points("fx.eurusd", Timeframe.M1, window=0, as_of=LATER)
+
+
 def test_a_weekend_gap_does_not_starve_the_window() -> None:
     """The widened span scales with the bar count; a closure does not. On M1
     a 48-hour weekend is wider than the whole window, so the first attempt
