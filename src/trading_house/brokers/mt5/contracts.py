@@ -111,6 +111,7 @@ def to_instrument_contract(
         base_currency=info.currency_base,
         quote_currency=info.currency_profit,
         price_increment=price_increment,
+        point_size=point,
         quantity_increment=decimal_of(info.volume_step),
         quantity_min=decimal_of(info.volume_min),
         quantity_max=decimal_of(info.volume_max),

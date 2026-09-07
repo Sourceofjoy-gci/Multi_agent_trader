@@ -91,6 +91,32 @@ def test_price_increment_uses_tick_size_not_point() -> None:
     assert contract.price_increment == Decimal("0.0001")
 
 
+def test_point_size_is_carried_through_from_the_symbol_info() -> None:
+    """A stored Bar.spread is an integer in MT5 points. Without the point size
+    on the neutral contract, nothing downstream -- the backtester included --
+    can convert that spread into a price. contracts.py already reads `point`
+    to build min_stop_distance and then throws it away."""
+
+    info = _info(point=0.00001, trade_tick_size=0.00001)
+
+    contract = to_instrument_contract(info, instrument_id="fx.eurusd")
+
+    assert contract.point_size == Decimal("0.00001")
+
+
+def test_point_size_is_independent_of_price_increment() -> None:
+    """point and trade_tick_size are equal on most FX symbols and are not the
+    same field. A mapping that aliased one to the other would pass the test
+    above and be wrong on any symbol where they differ."""
+
+    info = _info(point=0.001, trade_tick_size=0.005)
+
+    contract = to_instrument_contract(info, instrument_id="metal.xauusd")
+
+    assert contract.point_size == Decimal("0.001")
+    assert contract.price_increment == Decimal("0.005")
+
+
 @pytest.mark.parametrize(
     ("filling_mode", "exemode", "expected"),
     [

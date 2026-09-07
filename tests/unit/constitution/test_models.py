@@ -4,11 +4,39 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from trading_house.constitution.models import Constitution, parse_constitution_yaml
+from trading_house.constitution.models import BookLimits, Constitution, parse_constitution_yaml
 from trading_house.core.errors import ConfigurationError
 from trading_house.core.values import AssetClass, Horizon
 
 CONSTITUTION_BYTES = Path("config/risk_constitution.yaml").read_bytes()
+
+
+def _book_payload(**overrides: object) -> dict[str, object]:
+    """A complete, valid ``BookLimits`` payload -- the fx_scalp book shape
+    from config/risk_constitution.yaml -- with ``overrides`` applied."""
+
+    payload: dict[str, object] = {
+        "capital_fraction": Decimal("0.30"),
+        "horizon": "scalp",
+        "asset_classes": ["fx", "metal"],
+        "risk_per_trade_pct": Decimal("0.25"),
+        "max_concurrent_positions": 3,
+        "daily_loss_stop_pct": Decimal("1.5"),
+        "max_drawdown_halt_pct": Decimal("6.0"),
+        "max_gross_leverage": Decimal("10.0"),
+        "k_sigma": Decimal("1.2"),
+        "k_spread": Decimal("2.0"),
+        "limits": {
+            "horizon": "scalp",
+            "max_orders_per_minute": 15,
+            "max_spread_multiple_at_entry": Decimal("1.5"),
+            "min_expected_edge_after_cost_bps": Decimal("2.0"),
+            "max_position_duration_seconds": 300,
+            "flat_by_session_close": True,
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
 @pytest.fixture
@@ -26,6 +54,8 @@ def valid_data() -> dict[str, object]:
                 "daily_loss_stop_pct": Decimal("1.5"),
                 "max_drawdown_halt_pct": Decimal("6.0"),
                 "max_gross_leverage": Decimal("10.0"),
+                "k_sigma": Decimal("1.2"),
+                "k_spread": Decimal("2.0"),
                 "limits": {
                     "horizon": "scalp",
                     "max_orders_per_minute": 15,
@@ -44,6 +74,8 @@ def valid_data() -> dict[str, object]:
                 "daily_loss_stop_pct": Decimal("2.5"),
                 "max_drawdown_halt_pct": Decimal("10.0"),
                 "max_gross_leverage": Decimal("5.0"),
+                "k_sigma": Decimal("2.5"),
+                "k_spread": Decimal("2.0"),
                 "limits": {
                     "horizon": "swing",
                     "max_overnight_positions": 6,
@@ -62,6 +94,8 @@ def valid_data() -> dict[str, object]:
                 "daily_loss_stop_pct": Decimal("2.0"),
                 "max_drawdown_halt_pct": Decimal("8.0"),
                 "max_gross_leverage": Decimal("3.0"),
+                "k_sigma": Decimal("2.5"),
+                "k_spread": Decimal("2.0"),
                 "limits": {
                     "horizon": "swing",
                     "max_overnight_positions": 4,
@@ -80,6 +114,8 @@ def valid_data() -> dict[str, object]:
                 "daily_loss_stop_pct": Decimal("8.0"),
                 "max_drawdown_halt_pct": Decimal("40.0"),
                 "max_gross_leverage": Decimal("20.0"),
+                "k_sigma": Decimal("2.5"),
+                "k_spread": Decimal("2.0"),
                 "limits": {
                     "horizon": "swing",
                     "max_overnight_positions": 2,
@@ -510,3 +546,34 @@ def test_yaml_float_conversion_failures_are_redacted(scalar: str) -> None:
 
     assert str(error.value) == "configuration invalid"
     assert scalar not in str(error.value)
+
+
+def test_book_limits_require_both_stop_multipliers() -> None:
+    """k_sigma and k_spread are risk parameters: halving k_sigma halves every
+    stop distance and roughly doubles every position size. A book that omits
+    them must not load, because a default would be an unsigned risk decision."""
+
+    payload = _book_payload()
+    del payload["k_sigma"]
+
+    with pytest.raises(ValidationError):
+        BookLimits.model_validate(payload)
+
+
+def test_stop_multipliers_must_be_positive() -> None:
+    """A zero k_sigma removes the volatility term from the stop distance
+    entirely and leaves the max() to the broker floor."""
+
+    with pytest.raises(ValidationError):
+        BookLimits.model_validate(_book_payload(k_sigma=Decimal("0")))
+
+
+def test_stop_multipliers_accept_yaml_integers() -> None:
+    """YAML `k_sigma: 2` parses as int, and strict mode rejects an int for a
+    Decimal field unless the before-validator converts it, exactly as every
+    other Decimal on this model does."""
+
+    limits = BookLimits.model_validate(_book_payload(k_sigma=2, k_spread=3))
+
+    assert limits.k_sigma == Decimal("2")
+    assert limits.k_spread == Decimal("3")

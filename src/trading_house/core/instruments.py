@@ -37,6 +37,10 @@ class InstrumentContract(CanonicalModel):
     base_currency: NonEmptyStr
     quote_currency: NonEmptyStr
     price_increment: PositiveDecimal
+    # MT5's `point`. Equal to price_increment on most FX symbols and NOT the
+    # same field: a stored Bar.spread is an integer count of these, so without
+    # it a spread cannot be converted to a price distance.
+    point_size: PositiveDecimal
     quantity_increment: PositiveDecimal
     quantity_min: PositiveDecimal
     quantity_max: PositiveDecimal

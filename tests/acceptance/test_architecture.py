@@ -42,6 +42,13 @@ FEATURES_ROOT = SOURCE_ROOT / "features"
 # a feature must never fetch from a broker itself, and Section 8.2 -- not
 # this package -- turns a feature into a risk decision.
 FEATURES_FORBIDDEN = frozenset({"trading_house.brokers", "trading_house.risk"})
+RISK_ROOT = SOURCE_ROOT / "risk"
+# risk/ may reach core/ and constitution/, nothing else this project owns. The
+# same arithmetic has to produce the same answer in live trading and in a
+# backtester with no terminal, and a broker or store import would end that.
+RISK_FORBIDDEN = frozenset(
+    {"trading_house.brokers", "trading_house.marketdata", "trading_house.features"}
+)
 # The reverse of CREDENTIAL_BEARING: no process holding broker credentials may
 # execute agent-authored code (I-11's other direction). These are exactly the
 # modules that could hold or reach credentials.
@@ -204,6 +211,43 @@ def test_the_features_import_guard_can_still_fail(statement: str) -> None:
     than a detector that stopped looking."""
 
     assert _reaches(ast.parse(statement + "\n"), FEATURES_FORBIDDEN)
+
+
+def test_no_risk_module_imports_a_broker_store_or_feature_module() -> None:
+    """A backtest whose sizing diverges from production lies about expectancy,
+    so the risk arithmetic must not be able to reach live infrastructure."""
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        if not path.is_relative_to(RISK_ROOT):
+            continue
+        reached = _reaches(tree, RISK_FORBIDDEN)
+        if reached:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
+
+
+def test_the_risk_package_is_not_empty() -> None:
+    """Guard the guard: an empty risk/ would make the loop above pass
+    vacuously, so a passing check reflects clean code rather than no code."""
+
+    assert sorted(RISK_ROOT.rglob("*.py"))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.brokers.mt5.gateway import Gateway",
+        "import trading_house.marketdata",
+        "from trading_house.features.engine import FeatureEngine",
+    ],
+)
+def test_the_risk_import_guard_can_still_fail(statement: str) -> None:
+    """Guard the guard: prove the detector flags a real import, so a passing
+    check reflects risk/ staying clean rather than a detector gone blind."""
+
+    assert _reaches(ast.parse(statement + "\n"), RISK_FORBIDDEN)
 
 
 def test_the_terminal_module_stays_thin() -> None:
