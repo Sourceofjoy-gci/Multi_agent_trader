@@ -19,6 +19,26 @@ def _engine(constitution: Constitution) -> RiskEngine:
     return RiskEngine(constitution, FixedClock(NOW))
 
 
+def _assert_risk_money_is_the_loss_at_the_emitted_stop(
+    decision, proposal, contract, constitution
+) -> None:
+    """D-8 and I-19, checked against the stop the decision actually carries.
+
+    Every other assertion in this file compares ``risk_money`` to a figure
+    worked from the pre-quantisation distance, which is exactly the number a
+    broken engine reports. This one compares it to the loss at
+    ``decision.stop_loss_price``, which is the price the broker will fill.
+    """
+
+    ticks = abs(proposal.entry_price_ref - decision.stop_loss_price) / contract.price_increment
+    realised = ticks * contract.value_per_price_increment * decision.approved_quantity.amount
+    assert decision.risk_money == realised
+
+    book = constitution.books[proposal.book]
+    book_equity = _facts()["firm_equity"] * book.capital_fraction
+    assert decision.risk_money <= book_equity * book.risk_per_trade_pct / Decimal(100)
+
+
 def test_an_unknown_book_is_rejected_before_anything_is_computed(constitution) -> None:
     decision = _engine(constitution).evaluate(
         _proposal(book="does_not_exist"), contract=_contract(), **_facts()
@@ -132,6 +152,27 @@ def test_a_tick_inside_the_age_limit_passes(constitution) -> None:
     assert RejectionReason.TICK_STALE not in decision.reasons
 
 
+def test_a_tick_stamped_beyond_the_clock_drift_allowance_is_rejected(constitution) -> None:
+    """An age bounded only from above accepts a tick stamped an hour ahead, and
+    an hour-ahead tick is no more usable than an hour-old one.
+    ``safe_mode_triggers.scalp.max_clock_drift_ms`` is 500, so 400ms of forward
+    jitter is tolerated and one second ahead is not."""
+
+    inside_drift = _engine(constitution).evaluate(
+        _proposal(),
+        contract=_contract(),
+        **_facts(tick_time=NOW + timedelta(milliseconds=400)),
+    )
+    ahead_of_the_clock = _engine(constitution).evaluate(
+        _proposal(),
+        contract=_contract(),
+        **_facts(tick_time=NOW + timedelta(seconds=1)),
+    )
+
+    assert inside_drift.verdict == "APPROVED"
+    assert RejectionReason.TICK_STALE in ahead_of_the_clock.reasons
+
+
 def test_every_failing_gate_contributes_its_own_reason(constitution) -> None:
     """One rejection listing three faults is one diagnosis; three sequential
     rejections are three round trips."""
@@ -170,6 +211,70 @@ def test_an_approved_decision_carries_the_realised_risk_not_the_budget(constitut
     assert decision.approved_quantity.amount == Decimal("0.25")
     assert decision.stop_loss_price == Decimal("1.09700")
     assert decision.risk_money == Decimal("75.00")
+
+
+def test_an_off_grid_entry_sizes_from_the_one_tick_stop_it_emits(constitution) -> None:
+    """``entry_price_ref`` carries no tick-grid constraint, and ``stop_price``
+    quantises AWAY from entry, so an off-grid reference pushes the emitted stop
+    further out than the distance the risk model asked for.
+
+        entry         = 1.100005 -- half a tick off the 0.00001 grid
+        distance      = max(vol 0, cost 0, structural 0.000005,
+                            floor 0.00001) rounded up   = 0.00001
+        stop          = floor(1.100005 - 0.00001)       = 1.09999
+        effective     = 1.100005 - 1.09999              = 0.000015 (1.5 ticks)
+        budget        = 100_000 x 0.30 x 0.25 / 100     = 75.00
+        volume        = floor((75.00 / 1.50) / 0.01)x0.01 = 50.00
+        risk_money    = 1.5 x 1.00 x 50.00              = 75.00
+
+    Sizing from the pre-quantisation 0.00001 instead approves 75 lots, whose
+    loss at the emitted 1.09999 is 112.50 -- 50% over the signed budget, while
+    ``risk_money`` still reports 75.00.
+    """
+
+    contract = _contract()
+    proposal = _proposal(
+        entry_price_ref=Decimal("1.100005"), invalidation_price=Decimal("1.100000")
+    )
+
+    decision = _engine(constitution).evaluate(
+        proposal,
+        contract=contract,
+        **_facts(atr=Decimal("0"), median_spread_points=Decimal("0")),
+    )
+
+    assert decision.verdict == "APPROVED"
+    assert decision.stop_loss_price == Decimal("1.09999")
+    _assert_risk_money_is_the_loss_at_the_emitted_stop(decision, proposal, contract, constitution)
+    assert decision.approved_quantity.amount == Decimal("50.00")
+
+
+def test_an_off_grid_entry_sizes_from_the_wide_stop_it_emits(constitution) -> None:
+    """The same defect at a realistic stop width, where it is a 0.17% overshoot
+    rather than 50% -- small enough to hide, and still a breach of I-19.
+
+        entry         = 1.100005, invalidation 1.097005
+        distance      = structural 0.00300 (already on the grid)
+        stop          = floor(1.100005 - 0.00300)       = 1.09700
+        effective     = 1.100005 - 1.09700              = 0.003005 (300.5 ticks)
+        volume        = floor((75.00 / 300.50) / 0.01)x0.01 = 0.24
+        risk_money    = 300.5 x 1.00 x 0.24             = 72.12
+
+    Sizing from 0.00300 gives 0.25 lots and reports 75.00, but the loss at the
+    emitted 1.09700 is 75.125.
+    """
+
+    contract = _contract()
+    proposal = _proposal(
+        entry_price_ref=Decimal("1.100005"), invalidation_price=Decimal("1.097005")
+    )
+
+    decision = _engine(constitution).evaluate(proposal, contract=contract, **_facts())
+
+    assert decision.verdict == "APPROVED"
+    assert decision.stop_loss_price == Decimal("1.09700")
+    _assert_risk_money_is_the_loss_at_the_emitted_stop(decision, proposal, contract, constitution)
+    assert decision.approved_quantity.amount == Decimal("0.24")
 
 
 def test_book_equity_is_the_books_slice_not_firm_equity(constitution) -> None:
@@ -283,6 +388,30 @@ def test_execution_path_rejects_when_headroom_is_below_two_times(constitution) -
     )
 
     assert RejectionReason.INSUFFICIENT_FREE_MARGIN_HEADROOM in decision.reasons
+
+
+def test_a_margin_rejection_keeps_the_gates_that_had_already_passed(constitution) -> None:
+    """The margin rule runs on an already-approved decision, so its rejection
+    must carry that decision's ``checks_passed`` forward. Dropping them would
+    make the audit record claim no gate was ever evaluated."""
+
+    decision = _engine(constitution).evaluate_for_execution(
+        _proposal(),
+        margin=_Margin(free="1900", required="1000"),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert RejectionReason.INSUFFICIENT_FREE_MARGIN_HEADROOM in decision.reasons
+    assert decision.checks_passed
+    for cleared in (
+        RejectionReason.UNKNOWN_BOOK,
+        RejectionReason.SPREAD_EXCEEDS_CEILING,
+        RejectionReason.TICK_STALE,
+        RejectionReason.STOP_PRICE_NOT_POSITIVE,
+        RejectionReason.BELOW_MIN_LOT,
+    ):
+        assert cleared in decision.checks_passed
 
 
 def test_execution_path_approves_at_exactly_two_times(constitution) -> None:

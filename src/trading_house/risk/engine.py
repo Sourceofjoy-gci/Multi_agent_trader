@@ -48,6 +48,8 @@ class RejectionReason(str, Enum):  # noqa: UP042
     SIDE_NOT_PERMITTED = "side_not_permitted"
     ASSET_CLASS_NOT_PERMITTED = "asset_class_not_permitted"
     SPREAD_EXCEEDS_CEILING = "spread_exceeds_ceiling"
+    # Covers an unusable tick timestamp in either direction: too old, or
+    # stamped further ahead of the clock than max_clock_drift_ms allows.
     TICK_STALE = "tick_stale"
     BELOW_MIN_LOT = "below_min_lot"
     STOP_PRICE_NOT_POSITIVE = "stop_price_not_positive"
@@ -164,11 +166,27 @@ class RiskEngine:
             return self._reject(proposal, [RejectionReason.STOP_PRICE_NOT_POSITIVE], passed)
         passed.append(RejectionReason.STOP_PRICE_NOT_POSITIVE)
 
+        stop_loss_price = stop_price(
+            side=proposal.side,
+            entry_price_ref=proposal.entry_price_ref,
+            stop_distance=distance,
+            contract=contract,
+        )
+        # entry_price_ref is a strategy's reference price and carries no
+        # tick-grid constraint, so stop_price's away-from-entry quantisation
+        # can land the emitted stop up to one increment further out than
+        # `distance`. Everything downstream must be derived from the stop that
+        # is actually emitted: sizing from `distance` would let the realised
+        # loss exceed the budget the volume was derived from, by half again on
+        # a one-tick stop. Away-from-entry only ever widens, so this can only
+        # shrink the position -- it never relaxes I-19.
+        effective_distance = abs(proposal.entry_price_ref - stop_loss_price)
+
         # The book's own slice, not firm equity. Passing firm equity here would
         # over-risk the sleeve (capital_fraction 0.10) by ten times.
         book_equity = firm_equity * book.capital_fraction
         volume = compute_volume(
-            stop_distance=distance,
+            stop_distance=effective_distance,
             book_equity=book_equity,
             risk_per_trade_pct=book.risk_per_trade_pct,
             contract=contract,
@@ -186,7 +204,10 @@ class RiskEngine:
             # the floored value can never drop below the minimum.
             volume = quantise_down(contract.quantity_max, contract.quantity_increment)
 
-        ticks = distance / contract.price_increment
+        # Not necessarily a whole number of ticks: an off-grid entry leaves a
+        # fractional remainder, and the loss is proportional to the true price
+        # distance, not to a tidied one.
+        ticks = effective_distance / contract.price_increment
         risk_money = ticks * contract.value_per_price_increment * volume
         return RISK_DECISION_ADAPTER.validate_python(
             {
@@ -196,12 +217,7 @@ class RiskEngine:
                 "checks_passed": tuple(check.value for check in passed),
                 "constitution_version": self._constitution.version,
                 "approved_quantity": PositiveQuantity(amount=volume, unit="lots"),
-                "stop_loss_price": stop_price(
-                    side=proposal.side,
-                    entry_price_ref=proposal.entry_price_ref,
-                    stop_distance=distance,
-                    contract=contract,
-                ),
+                "stop_loss_price": stop_loss_price,
                 "take_profit_price": None,
                 "risk_money": risk_money,
                 "risk_pct_of_book": risk_money / book_equity * Decimal(100),
@@ -234,10 +250,21 @@ class RiskEngine:
         return tick_points <= ceiling * median_points
 
     def _tick_fresh(self, book: BookLimits, tick_time: datetime) -> bool:
+        """Bounded on both sides, so ``TICK_STALE`` means an unusable timestamp
+        in either direction.
+
+        An age bounded only from above accepts a tick stamped an hour into the
+        future, and a tick from a clock that far out of step is no more usable
+        than one an hour old. ``max_clock_drift_ms`` is the constitution's own
+        tolerance for that skew.
+        """
+
         triggers = self._constitution.safe_mode_triggers[book.horizon]
         # float() builds a duration threshold here, not a money value.
         max_age = timedelta(seconds=float(triggers.max_tick_age_seconds))
-        return self._clock.now() - ensure_utc(tick_time) <= max_age
+        max_drift = timedelta(milliseconds=triggers.max_clock_drift_ms)
+        age = self._clock.now() - ensure_utc(tick_time)
+        return -max_drift <= age <= max_age
 
     def _reject(
         self,

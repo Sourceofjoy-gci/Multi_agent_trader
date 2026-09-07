@@ -74,6 +74,13 @@ def compute_volume(
 
     ``book_equity`` is the book's own slice of firm equity, not firm equity.
     The caller does that multiply; see the engine.
+
+    ``stop_distance`` is NOT assumed to be a whole number of price increments.
+    The engine sizes from the distance to the stop it actually emits, and
+    ``stop_price`` anchors on a reference price that need not sit on the tick
+    grid, so a fractional ``ticks`` is the normal case. Quantising it here to
+    restore integrality would understate the distance and reintroduce exactly
+    the overshoot this division avoids.
     """
 
     if stop_distance <= 0:

@@ -98,15 +98,24 @@ the stop distance, and therefore the lot size, a function of one quote.
 
 ### 4.2 Volume
 
-From the **quantised** distance, never the raw one:
+From the **effective** distance `d_eff = |entry_price_ref - stop_price|` — the
+distance to the stop that is actually emitted, defined in §4.3 — never from the
+raw distance and never from §4.1's `d`:
 
 ```
 book_equity   = firm_equity * book.capital_fraction
 budget        = book_equity * book.risk_per_trade_pct / 100
-ticks         = d / price_increment                   # an exact integer by construction
+ticks         = d_eff / price_increment               # fractional when entry is off the grid
 money_per_lot = ticks * value_per_price_increment
 volume        = floor((budget / money_per_lot) / quantity_increment) * quantity_increment
 ```
+
+`ticks` is **not** an integer in general. `d` is a whole number of increments
+by construction, but `d_eff` is not, because `entry_price_ref` need not sit on
+the tick grid (§4.3). The loss is proportional to the true price distance, so
+`d_eff` is divided as it stands; quantising it back onto the grid would
+understate it and restore the very overshoot §4.4 forbids. `risk_money` is
+computed from the same `d_eff`, which is what makes D-8's claim true.
 
 The `capital_fraction` multiply is load-bearing. `BookLimits`'s own docstring
 states its percentages are relative to that book's slice of firm equity, so
@@ -123,9 +132,19 @@ would shrink it further needs book state (D-1).
 **The stop is anchored on `proposal.entry_price_ref`, not on the live tick.**
 `BUY: entry_price_ref - d`, `SELL: entry_price_ref + d`, each then quantised
 **away from entry**, because `entry_price_ref` is a strategy's reference price
-and is not guaranteed to sit on the tick grid. Away-from-entry only ever widens,
-so §4.4 of this spec's guarantee survives the second rounding. A stop price at or below zero
-is a rejection, not a clamp.
+and is not guaranteed to sit on the tick grid. A stop price at or below zero is
+a rejection, not a clamp.
+
+Away-from-entry only ever widens — and a wider stop is a **larger** loss at that
+stop, not a smaller one, so this rounding does not survive §4.4 on its own. The
+guarantee holds only if the sizing is derived from the effective
+post-quantisation distance `d_eff = |entry_price_ref - stop_price|`, which is
+what §4.2 divides. Sizing from §4.1's `d` while emitting a stop `d_eff` away
+overshoots the budget by `d_eff / d` — up to 50% on a one-tick stop — while
+`risk_money` still reports the budget figure, breaking I-19 and falsifying D-8.
+The stop price is therefore computed **before** the volume, not alongside it.
+Because `d_eff >= d` always, sizing from `d_eff` can only shrink the position,
+so the guarantee is strengthened rather than weakened.
 
 Anchoring on the reference rather than the tick is what makes the decision
 replayable: the same proposal and the same stored bars must yield the same stop
