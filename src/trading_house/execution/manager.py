@@ -18,6 +18,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from trading_house.core.clock import Clock
+from trading_house.core.errors import IntentAlreadySubmittedError
 from trading_house.core.schemas import OrderIntent
 from trading_house.core.values import IntentState
 from trading_house.core.venue import ExecutionOutcome, recovery_for
@@ -39,6 +40,14 @@ def _snapshot(intent: OrderIntent, strategy_id: str) -> dict[str, Any]:
     does not carry -- so that a later reconcile can rebuild a
     ``PositionState`` from this payload alone. Every ``Decimal`` is recorded
     as a string; a float in JSONB is silent corruption of the money path.
+
+    ``venue_ref`` and ``t_submit_utc`` are recorded here -- not derived --
+    because reconciliation (Task 4) has no other source for magic, server
+    symbol and submit time on an UNKNOWN intent: there is no CONFIRMED
+    payload to fall back on, and execution/ may not import ``derive_magic``
+    from brokers/. The caller populates ``intent.venue_ref`` before calling
+    ``submit()``; a value derived a second time here is the same defect as
+    deriving it twice anywhere else.
     """
 
     return {
@@ -54,6 +63,10 @@ def _snapshot(intent: OrderIntent, strategy_id: str) -> dict[str, Any]:
         "take_profit": _decimal_str(intent.take_profit),
         "time_in_force": intent.time_in_force.value,
         "max_slippage_bps": str(intent.max_slippage_bps),
+        "venue_ref": intent.venue_ref.model_dump(mode="json")
+        if intent.venue_ref is not None
+        else None,
+        "t_submit_utc": intent.t_submit_utc.isoformat(),
     }
 
 
@@ -87,6 +100,12 @@ class OrderManager:
         self._clock = clock
 
     def submit(self, intent: OrderIntent, strategy_id: str) -> IntentState:
+        # Refuse before writing anything. If this intent_id has any ledger
+        # event at all -- SUBMITTING, terminal, whatever -- a second submit()
+        # is the resend §3.6 forbids, not a retry. A genuine retry mints a
+        # fresh intent_id and starts over.
+        if self._ledger.current_state(intent.intent_id) is not None:
+            raise IntentAlreadySubmittedError()
         now = self._clock.now()
         self._ledger.append(
             intent.intent_id, IntentState.SUBMITTING, now, _snapshot(intent, strategy_id)

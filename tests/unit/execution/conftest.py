@@ -32,7 +32,11 @@ class FakeVenue:
             self.executed.append(intent)
             raise TimeoutError("no response")
         if self.behaviour == "lost_before_execution":
-            raise TimeoutError("no response")
+            # Looks like "the request never left the box" -- a ConnectionError
+            # raised while reading the response looks identical. Nothing in
+            # the exception says which happened, so this must be treated
+            # exactly like lost_after_execution: UNKNOWN, never resent.
+            raise ConnectionError("no response")
         if self.behaviour == "reject":
             return ExecutionOutcome(
                 accepted=False,

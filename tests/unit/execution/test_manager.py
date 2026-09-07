@@ -11,18 +11,23 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from tests.unit.execution.conftest import FakeVenue, RecordingLedger
 from trading_house.core.clock import FixedClock
+from trading_house.core.errors import IntentAlreadySubmittedError
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
-from trading_house.core.venue import RecoveryAction, RejectReason
+from trading_house.core.venue import Mt5VenueRef, RecoveryAction, RejectReason, Venue
 from trading_house.execution.manager import OrderManager
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
 STRATEGY_ID = "trend_following"
 
 
-def _intent(*, quantity: Decimal = Decimal("0.10")) -> OrderIntent:
+def _intent(
+    *, quantity: Decimal = Decimal("0.10"), venue_ref: Mt5VenueRef | None = None
+) -> OrderIntent:
     return OrderIntent(
         intent_id="intent-1",
         proposal_id="proposal-1",
@@ -36,7 +41,7 @@ def _intent(*, quantity: Decimal = Decimal("0.10")) -> OrderIntent:
         max_slippage_bps=Decimal("2"),
         state=IntentState.SUBMITTING,
         t_submit_utc=NOW,
-        venue_ref=None,
+        venue_ref=venue_ref,
         outcome=None,
     )
 
@@ -148,3 +153,64 @@ def test_every_decimal_in_the_snapshot_is_a_string() -> None:
     assert snapshot["quantity"] == "0.10"
     assert snapshot["stop_loss"] == "1.0950"
     assert snapshot["max_slippage_bps"] == "2"
+
+
+def test_a_response_lost_before_execution_still_does_not_resend() -> None:
+    """A ConnectionError raised while reading the response looks exactly like
+    one raised before the request ever left the box -- nothing in the
+    exception says which. §3.6 forbids treating "it never left" as knowable
+    from the exception alone, so even this case, which *looks* safest to
+    retry, must be recorded UNKNOWN and never resent."""
+
+    ledger, venue = RecordingLedger(), FakeVenue(behaviour="lost_before_execution")
+
+    state = OrderManager(ledger, venue, FixedClock(NOW)).submit(_intent(), STRATEGY_ID)
+
+    assert state is IntentState.UNKNOWN
+    assert len(venue.calls) == 1
+
+
+def test_a_second_submit_for_the_same_intent_id_is_refused() -> None:
+    """submit() is not a retry mechanism. Once an intent_id has any ledger
+    event, a second submit() call must be refused before it ever writes or
+    calls the venue again -- a caller wanting a genuine retry mints a fresh
+    intent_id (§3.6)."""
+
+    ledger, venue = RecordingLedger(), FakeVenue()
+    manager = OrderManager(ledger, venue, FixedClock(NOW))
+
+    manager.submit(_intent(), STRATEGY_ID)
+    with pytest.raises(IntentAlreadySubmittedError):
+        manager.submit(_intent(), STRATEGY_ID)
+
+    assert len(venue.calls) == 1
+
+
+def test_the_submitting_snapshot_records_venue_ref_and_submit_time() -> None:
+    """Task 4's reconciliation sweep reads magic, server symbol and submit
+    time back out of the SUBMITTING payload -- it is the only payload an
+    UNKNOWN intent ever gets. execution/ does not derive these; the caller
+    populates ``venue_ref`` before calling submit()."""
+
+    ledger, venue = RecordingLedger(), FakeVenue()
+    venue_ref = Mt5VenueRef(venue=Venue.MT5, magic=110042, server_symbol="EURUSD")
+
+    OrderManager(ledger, venue, FixedClock(NOW)).submit(_intent(venue_ref=venue_ref), STRATEGY_ID)
+
+    snapshot = ledger.appended[0][2]
+    assert snapshot["venue_ref"]["magic"] == 110042
+    assert snapshot["venue_ref"]["server_symbol"] == "EURUSD"
+    assert snapshot["t_submit_utc"] == NOW.isoformat()
+
+
+def test_the_submitting_snapshot_allows_a_null_venue_ref() -> None:
+    """Populating venue_ref is the caller's job, not this task's. An intent
+    submitted with no venue_ref must still submit cleanly and record
+    ``venue_ref: null`` rather than requiring one."""
+
+    ledger, venue = RecordingLedger(), FakeVenue()
+
+    state = OrderManager(ledger, venue, FixedClock(NOW)).submit(_intent(), STRATEGY_ID)
+
+    assert state is IntentState.CONFIRMED
+    assert ledger.appended[0][2]["venue_ref"] is None

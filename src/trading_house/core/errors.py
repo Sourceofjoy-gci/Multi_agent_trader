@@ -14,6 +14,7 @@ class ExitCode(IntEnum):
     ACCOUNT_MODE = 9
     COVERAGE = 10
     INSUFFICIENT_HISTORY = 11
+    DUPLICATE_INTENT = 12
 
 
 class TradingHouseError(Exception):
@@ -95,3 +96,12 @@ class InsufficientHistoryError(TradingHouseError):
     """Raised when a feature needs more history than the store holds."""
 
     public_message = "insufficient history to compute the feature"
+
+
+class IntentAlreadySubmittedError(TradingHouseError):
+    """Raised when ``submit()`` is called for an intent_id the ledger already
+    has events for. A genuine retry must mint a fresh intent_id (§3.6);
+    resubmitting the same one is exactly the resend that risks doubling a
+    position."""
+
+    public_message = "intent already submitted; retry requires a fresh intent_id"

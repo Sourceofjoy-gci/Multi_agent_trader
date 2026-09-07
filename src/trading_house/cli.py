@@ -44,6 +44,7 @@ from trading_house.core.errors import (
     DatabaseUnavailableError,
     ExitCode,
     InsufficientHistoryError,
+    IntentAlreadySubmittedError,
     MigrationMismatchError,
     NonDemoAccountError,
     SchemaValidationError,
@@ -81,6 +82,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     NonDemoAccountError: ExitCode.ACCOUNT_MODE,
     CoverageError: ExitCode.COVERAGE,
     InsufficientHistoryError: ExitCode.INSUFFICIENT_HISTORY,
+    IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
 }
 
 
