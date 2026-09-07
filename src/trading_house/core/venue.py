@@ -4,6 +4,9 @@
 reference, where forensics can reach them and the risk engine cannot.
 """
 
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Literal, Self
 
@@ -118,6 +121,23 @@ class PrecheckResult(CanonicalModel):
         if self.would_accept and self.reject_reason is not None:
             raise ValueError("a passing precheck cannot carry a reject_reason")
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class DealRecord:
+    """A neutral, execution-owned shape for one broker deal.
+
+    Deliberately not ``Mt5Deal`` -- ``execution/`` must not import
+    ``brokers/``, so the MT5 adapter maps its own deal rows into this shape
+    at the boundary rather than the reconciler reaching across layers for
+    a broker-specific type.
+    """
+
+    magic: int
+    server_symbol: str
+    volume: Decimal
+    position_ticket: int
+    dealt_at: datetime
 
 
 class RecoveryAction(str, Enum):  # noqa: UP042

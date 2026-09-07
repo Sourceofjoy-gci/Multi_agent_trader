@@ -51,6 +51,7 @@ from trading_house.core.errors import (
     SignatureVerificationError,
     TimestampError,
     TradingHouseError,
+    UnresolvedIntentsError,
 )
 from trading_house.core.values import BookId
 from trading_house.database.connection import open_runtime_connection
@@ -83,6 +84,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     CoverageError: ExitCode.COVERAGE,
     InsufficientHistoryError: ExitCode.INSUFFICIENT_HISTORY,
     IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
+    UnresolvedIntentsError: ExitCode.UNRESOLVED_INTENTS,
 }
 
 

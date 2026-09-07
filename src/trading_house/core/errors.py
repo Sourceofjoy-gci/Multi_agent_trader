@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from enum import IntEnum
 from typing import ClassVar
 
@@ -15,6 +16,7 @@ class ExitCode(IntEnum):
     COVERAGE = 10
     INSUFFICIENT_HISTORY = 11
     DUPLICATE_INTENT = 12
+    UNRESOLVED_INTENTS = 13
 
 
 class TradingHouseError(Exception):
@@ -105,3 +107,16 @@ class IntentAlreadySubmittedError(TradingHouseError):
     position."""
 
     public_message = "intent already submitted; retry requires a fresh intent_id"
+
+
+class UnresolvedIntentsError(TradingHouseError):
+    """Raised by the gate when the ledger holds intents still in a
+    non-terminal state (I-20). Names them: an operator who cannot see which
+    intent is stuck cannot clear it."""
+
+    public_message = "unresolved intents block further order submission"
+
+    def __init__(self, intent_ids: Sequence[str]) -> None:
+        self.intent_ids = tuple(intent_ids)
+        message = f"{self.public_message}: {', '.join(self.intent_ids)}"
+        Exception.__init__(self, message)

@@ -9,14 +9,72 @@ the primary instrument and not a convenience.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from trading_house.core.schemas import OrderIntent
-from trading_house.core.values import IntentState, PositiveQuantity
-from trading_house.core.venue import ExecutionOutcome, Mt5VenueRef, RejectReason, Venue
+from trading_house.core.schemas import OrderIntent, Side
+from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
+from trading_house.core.venue import DealRecord, ExecutionOutcome, Mt5VenueRef, RejectReason, Venue
 from trading_house.execution.ledger import NON_TERMINAL_STATES, IntentEvent
+
+NOW = datetime(2026, 8, 25, tzinfo=UTC)
+BASE = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+
+
+def _intent(
+    *,
+    intent_id: str = "intent-1",
+    quantity: Decimal = Decimal("0.10"),
+    venue_ref: Mt5VenueRef | None = None,
+) -> OrderIntent:
+    return OrderIntent(
+        intent_id=intent_id,
+        proposal_id="proposal-1",
+        book="fx_scalp",
+        instrument_id="fx.eurusd",
+        side=Side.BUY,
+        quantity=PositiveQuantity(amount=quantity, unit="lots"),
+        stop_loss=Decimal("1.0950"),
+        take_profit=None,
+        time_in_force=TimeInForce.IOC,
+        max_slippage_bps=Decimal("2"),
+        state=IntentState.SUBMITTING,
+        t_submit_utc=NOW,
+        venue_ref=venue_ref,
+        outcome=None,
+    )
+
+
+def _snapshot_payload(**overrides: Any) -> dict[str, Any]:
+    """A SUBMITTING payload shaped exactly like ``OrderManager``'s own
+    snapshot -- same keys, every ``Decimal`` a string -- so the reconciliation
+    sweep tests read back real submit-time data, not a shortcut shape."""
+
+    fields: dict[str, Any] = {
+        "book": "fx_scalp",
+        "instrument_id": "fx.eurusd",
+        "intent_id": "i-1",
+        "max_slippage_bps": "2",
+        "proposal_id": "proposal-1",
+        "quantity": "0.25",
+        "quantity_unit": "lots",
+        "side": Side.BUY.value,
+        "stop_loss": "1.0950",
+        "take_profit": None,
+        "time_in_force": TimeInForce.IOC.value,
+        "venue_ref": {
+            "venue": Venue.MT5.value,
+            "magic": 110042,
+            "server_symbol": "EURUSD",
+            "order_ticket": None,
+            "position_ticket": None,
+            "retcode": None,
+        },
+        "t_submit_utc": BASE.isoformat(),
+    }
+    fields.update(overrides)
+    return fields
 
 
 class FakeVenue:
@@ -122,3 +180,18 @@ class RecordingLedger:
             for intent_id, events in self._events.items()
             if events[-1].state in NON_TERMINAL_STATES
         )
+
+
+class FakeDeals:
+    """A ``DealSource`` double: a fixed set of deals and a fixed terminal
+    health, so reconciliation tests control both without a broker."""
+
+    def __init__(self, *, deals: tuple[DealRecord, ...] = (), healthy: bool = True) -> None:
+        self.deals = deals
+        self.healthy = healthy
+
+    def deals_since(self, start: datetime) -> tuple[DealRecord, ...]:
+        return self.deals
+
+    def terminal_healthy(self) -> bool:
+        return self.healthy

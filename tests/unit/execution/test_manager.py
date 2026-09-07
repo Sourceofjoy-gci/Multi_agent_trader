@@ -7,43 +7,20 @@ must never double a position -- is proven by
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from tests.unit.execution.conftest import FakeVenue, RecordingLedger
+from tests.unit.execution.conftest import NOW, FakeVenue, RecordingLedger, _intent
 from trading_house.core.clock import FixedClock
 from trading_house.core.errors import IntentAlreadySubmittedError
-from trading_house.core.schemas import OrderIntent, Side
-from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
+from trading_house.core.schemas import OrderIntent
+from trading_house.core.values import IntentState
 from trading_house.core.venue import Mt5VenueRef, RecoveryAction, RejectReason, Venue
 from trading_house.execution.manager import OrderManager
 
-NOW = datetime(2026, 8, 25, tzinfo=UTC)
 STRATEGY_ID = "trend_following"
-
-
-def _intent(
-    *, quantity: Decimal = Decimal("0.10"), venue_ref: Mt5VenueRef | None = None
-) -> OrderIntent:
-    return OrderIntent(
-        intent_id="intent-1",
-        proposal_id="proposal-1",
-        book="fx_scalp",
-        instrument_id="fx.eurusd",
-        side=Side.BUY,
-        quantity=PositiveQuantity(amount=quantity, unit="lots"),
-        stop_loss=Decimal("1.0950"),
-        take_profit=None,
-        time_in_force=TimeInForce.IOC,
-        max_slippage_bps=Decimal("2"),
-        state=IntentState.SUBMITTING,
-        t_submit_utc=NOW,
-        venue_ref=venue_ref,
-        outcome=None,
-    )
 
 
 def test_the_ledger_records_submitting_before_the_venue_is_called() -> None:
