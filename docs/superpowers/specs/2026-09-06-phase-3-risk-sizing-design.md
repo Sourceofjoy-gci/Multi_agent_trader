@@ -132,8 +132,10 @@ would shrink it further needs book state (D-1).
 **The stop is anchored on `proposal.entry_price_ref`, not on the live tick.**
 `BUY: entry_price_ref - d`, `SELL: entry_price_ref + d`, each then quantised
 **away from entry**, because `entry_price_ref` is a strategy's reference price
-and is not guaranteed to sit on the tick grid. A stop price at or below zero is
-a rejection, not a clamp.
+and is not guaranteed to sit on the tick grid. A BUY whose stop could not land
+on a positive tick — `entry_price_ref - d < price_increment` — is a rejection,
+not a clamp. SELL needs no such check: `entry_price_ref` is positive and `d`
+is at least one increment, so the sum cannot be non-positive.
 
 Away-from-entry only ever widens — and a wider stop is a **larger** loss at that
 stop, not a smaller one, so this rounding does not survive §4.4 on its own. The
@@ -185,7 +187,7 @@ one contributes a reason (D-7).
 | `side_not_permitted` | `contract.can_open_long` / `can_open_short` |
 | `asset_class_not_permitted` | `book.asset_classes` |
 | `spread_exceeds_ceiling` | see below |
-| `tick_stale` | `safe_mode_triggers[horizon].max_tick_age_seconds` against `Clock.now()` |
+| `tick_stale` | `safe_mode_triggers[horizon]` against `Clock.now()`, bounded on BOTH sides: `max_tick_age_seconds` behind, `max_clock_drift_ms` ahead — a tick stamped in the future is as unusable as a stale one |
 | `below_min_lot` | §4.2 |
 | `stop_price_not_positive` | §4.3 |
 
