@@ -282,6 +282,37 @@ the start of history — raises `InsufficientHistoryError` rather than
 returning a shorter answer. A stop sized on quietly less history than the
 caller assumed is a wrong stop with no error to show for it.
 
+## Phase 3 — risk and sizing
+
+`RiskEngine` (`trading_house.risk.engine`) is the deterministic gate every
+`TradeProposal` must clear before it can size a position: it checks the book,
+the instrument, the side, the spread and tick freshness, then sizes the
+position from a monetary loss budget and a stop distance (never from a
+profit target or a model's confidence, per **I-3**) and returns an
+`APPROVED`, `RESIZED` or `REJECTED` decision.
+
+It exposes two entry points, not one:
+
+- **`evaluate(...)`** is pure over its arguments — the same proposal and the
+  same market facts always yield the same decision — so a backtester with no
+  terminal can replay it exactly.
+- **`evaluate_for_execution(...)`** adds the master spec's 8.1 free-margin
+  headroom check via a `MarginPort`. That check needs a live account, so it
+  cannot appear in the pure path; splitting the two means forgetting the
+  margin check is a differently named function, not a forgotten line.
+
+`book_equity` — the amount the sizing arithmetic risks a percentage of — is
+the *book's own slice* of firm equity (`firm_equity * capital_fraction`), not
+firm equity itself. Passing firm equity there would over-risk every sleeve by
+however much its capital fraction understates.
+
+The stop distance is computed first and **quantises up** to the instrument's
+tick grid; the volume is then computed from that already-widened distance and
+**quantises down** to the lot grid. Both roundings push the same way, so
+realised risk is bounded above by the budget instead of straddling it
+(**I-19**) — reversing either rounding direction would let a position exceed
+the signed risk budget on roughly half of all trades.
+
 ## Operator commands
 
 ```bash
