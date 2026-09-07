@@ -98,6 +98,11 @@ class BookLimits(ConstitutionModel):
     daily_loss_stop_pct: Percentage
     max_drawdown_halt_pct: Percentage
     max_gross_leverage: PositiveDecimal
+    # Stop-distance multipliers, consumed by risk/sizing.py. They sit behind the
+    # signature because halving k_sigma halves every stop and roughly doubles
+    # every position size -- the same reason risk_per_trade_pct is here.
+    k_sigma: PositiveDecimal
+    k_spread: PositiveDecimal
     limits: HorizonLimits
 
     @field_validator(
@@ -106,6 +111,8 @@ class BookLimits(ConstitutionModel):
         "daily_loss_stop_pct",
         "max_drawdown_halt_pct",
         "max_gross_leverage",
+        "k_sigma",
+        "k_spread",
         mode="before",
     )
     @classmethod

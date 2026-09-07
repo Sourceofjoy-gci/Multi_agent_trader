@@ -22,6 +22,13 @@ books:
     daily_loss_stop_pct: 1.5
     max_drawdown_halt_pct: 6.0
     max_gross_leverage: 10.0
+    # Stop-distance multipliers (master spec 8.2). Starting points: scalp uses
+    # 1.2x ATR (the table's 1.0-1.5 band, above the ~65% noise stop-out floor),
+    # swing uses 2.5x (the low end of its 2.5-3.0 band). k_spread 2.0 requires
+    # every stop to clear twice the median spread, so a trade cannot be stopped
+    # out by its own round-trip cost.
+    k_sigma: 1.2
+    k_spread: 2.0
     limits:
       horizon: scalp
       max_orders_per_minute: 15
@@ -38,6 +45,8 @@ books:
     daily_loss_stop_pct: 2.5
     max_drawdown_halt_pct: 10.0
     max_gross_leverage: 5.0
+    k_sigma: 2.5
+    k_spread: 2.0
     limits:
       horizon: swing
       max_overnight_positions: 6
@@ -54,6 +63,8 @@ books:
     daily_loss_stop_pct: 2.0
     max_drawdown_halt_pct: 8.0
     max_gross_leverage: 3.0
+    k_sigma: 2.5
+    k_spread: 2.0
     limits:
       horizon: swing
       max_overnight_positions: 4
@@ -70,6 +81,8 @@ books:
     daily_loss_stop_pct: 8.0
     max_drawdown_halt_pct: 40.0
     max_gross_leverage: 20.0
+    k_sigma: 2.5
+    k_spread: 2.0
     limits:
       horizon: swing
       max_overnight_positions: 2

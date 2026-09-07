@@ -20,6 +20,8 @@ RISK_BEARING_NAMES = frozenset(
         "capital_fraction",
         "max_concurrent_positions",
         "max_orders_per_minute",
+        "k_sigma",
+        "k_spread",
     }
 )
 

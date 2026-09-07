@@ -12,6 +12,7 @@ VALID: dict[str, object] = {
     "base_currency": "EUR",
     "quote_currency": "USD",
     "price_increment": Decimal("0.00001"),
+    "point_size": Decimal("0.00001"),
     "quantity_increment": Decimal("0.01"),
     "quantity_min": Decimal("0.01"),
     "quantity_max": Decimal("100"),
