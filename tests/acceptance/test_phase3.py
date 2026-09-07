@@ -5,10 +5,33 @@ The general import rule lives in test_architecture.py; this file asserts what
 Phase 3 itself promised.
 """
 
+import ast
 from pathlib import Path
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RISK = PROJECT_ROOT / "src" / "trading_house" / "risk"
+
+PURE_IMPORTS = frozenset(
+    {
+        "__future__",
+        "decimal",
+        "trading_house.core.instruments",
+        "trading_house.core.schemas",
+    }
+)
+IMPURE_BUILTINS = frozenset({"open", "input"})
+
+
+def _imported_modules(tree: ast.Module) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
 
 
 def test_no_risk_module_reaches_a_broker_or_the_store() -> None:
@@ -25,13 +48,40 @@ def test_no_risk_module_reaches_a_broker_or_the_store() -> None:
             assert forbidden not in source, f"{path.name} imports {forbidden}"
 
 
-def test_the_sizing_module_holds_no_io() -> None:
-    """risk/sizing.py is pure arithmetic. A Clock, a Protocol or a constitution
-    reference in it means the boundary has moved."""
+def test_the_sizing_module_imports_nothing_that_could_perform_io() -> None:
+    """risk/sizing.py is pure arithmetic, and purity is asserted by an
+    allow-list rather than by banning three names. The deny-list this replaced
+    passed against an injected ``import time`` and a wall-clock read, so it
+    proved nothing about purity at all."""
 
-    source = (RISK / "sizing.py").read_text(encoding="utf-8")
-    for forbidden in ("Clock", "Protocol", "Constitution"):
-        assert forbidden not in source, f"sizing.py references {forbidden}"
+    tree = ast.parse((RISK / "sizing.py").read_text(encoding="utf-8"))
+    unexpected = _imported_modules(tree) - PURE_IMPORTS
+
+    assert unexpected == set(), f"sizing.py imports {sorted(unexpected)}"
+
+
+def test_the_sizing_module_calls_no_impure_builtin() -> None:
+    """An import allow-list cannot see ``open()``, which needs no import."""
+
+    tree = ast.parse((RISK / "sizing.py").read_text(encoding="utf-8"))
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert called & IMPURE_BUILTINS == set()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["import time", "import os", "from datetime import datetime"],
+)
+def test_the_purity_guard_can_still_fail(statement: str) -> None:
+    """Guard the guard: the first of these is the exact injection that defeated
+    the check this replaced."""
+
+    assert _imported_modules(ast.parse(statement + "\n")) - PURE_IMPORTS
 
 
 def test_every_approved_decision_type_requires_a_stop_price() -> None:
