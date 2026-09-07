@@ -4,17 +4,15 @@ Every hand-worked expected value here is worked longhand in a comment so a
 reader can verify it without running the code.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
-from tests.unit.risk.conftest import _contract, _facts, _proposal
+from tests.unit.risk.conftest import NOW, _contract, _facts, _proposal
 from trading_house.constitution.models import Constitution
 from trading_house.core.clock import FixedClock
 from trading_house.core.schemas import RejectedRiskDecision
 from trading_house.core.values import AssetClass
 from trading_house.risk.engine import RejectionReason, RiskEngine
-
-NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
 
 
 def _engine(constitution: Constitution) -> RiskEngine:
@@ -76,8 +74,16 @@ def test_a_spread_above_the_ceiling_is_rejected(constitution) -> None:
 
 
 def test_a_swing_book_uses_only_the_safe_mode_multiple(constitution) -> None:
-    """SwingLimits has no entry multiple, so 2.0x must pass on fx_swing and
-    fail on fx_scalp. If this passes on both, the scalp branch is dead."""
+    """SwingLimits has no entry multiple, so 2.0x passes on fx_swing under the
+    3.0x safe-mode trigger alone.
+
+    This does NOT prove the scalp ``min()`` branch is live: with a swing
+    book, ``max_spread_multiple_of_median`` is 3.0, so 2.0x passes whether or
+    not that branch exists. The branch is proven by
+    ``test_a_spread_above_the_ceiling_is_rejected``, where the scalp ceiling
+    (1.5x) drops below the safe-mode multiple (3.0x) and rejects a spread the
+    safe-mode multiple alone would have passed.
+    """
 
     decision = _engine(constitution).evaluate(
         _proposal(book="fx_swing"),
@@ -85,6 +91,7 @@ def test_a_swing_book_uses_only_the_safe_mode_multiple(constitution) -> None:
         **_facts(tick_spread_points=Decimal("20")),
     )
 
+    assert decision.verdict == "APPROVED"
     assert RejectionReason.SPREAD_EXCEEDS_CEILING not in decision.reasons
 
 
@@ -98,6 +105,7 @@ def test_a_zero_median_spread_disables_the_ratio_gate(constitution) -> None:
         **_facts(median_spread_points=Decimal("0"), tick_spread_points=Decimal("2")),
     )
 
+    assert decision.verdict == "APPROVED"
     assert RejectionReason.SPREAD_EXCEEDS_CEILING not in decision.reasons
 
 
@@ -120,6 +128,7 @@ def test_a_tick_inside_the_age_limit_passes(constitution) -> None:
         **_facts(tick_time=NOW - timedelta(seconds=1)),
     )
 
+    assert decision.verdict == "APPROVED"
     assert RejectionReason.TICK_STALE not in decision.reasons
 
 
@@ -219,6 +228,25 @@ def test_a_position_above_the_maximum_lot_is_clamped_and_marked_resized(
     assert decision.approved_quantity.amount == Decimal("0.10")
     # risk_money follows the clamped size: 300 x 1.00 x 0.10 = 30.00
     assert decision.risk_money == Decimal("30.00")
+
+
+def test_a_resized_volume_lands_on_the_lot_grid(constitution) -> None:
+    """quantity_max is never validated as a grid multiple (unlike
+    quantity_min), so a broker-supplied max of 0.15 against a 0.1 increment
+    is off-grid. Clamping straight to it would emit a volume MT5 rejects
+    outright; flooring to the grid must yield 0.1 instead."""
+
+    contract = _contract(
+        quantity_increment=Decimal("0.1"),
+        quantity_min=Decimal("0.1"),
+        quantity_max=Decimal("0.15"),
+    )
+
+    decision = _engine(constitution).evaluate(_proposal(), contract=contract, **_facts())
+
+    assert decision.verdict == "RESIZED"
+    assert decision.approved_quantity.amount == Decimal("0.1")
+    assert decision.approved_quantity.amount % contract.quantity_increment == 0
 
 
 def test_a_stop_that_cannot_land_above_zero_is_rejected(constitution) -> None:

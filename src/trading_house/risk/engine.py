@@ -25,7 +25,12 @@ from trading_house.core.schemas import (
     TradeProposal,
 )
 from trading_house.core.values import PositiveQuantity, Quantity
-from trading_house.risk.sizing import compute_stop_distance, compute_volume, stop_price
+from trading_house.risk.sizing import (
+    compute_stop_distance,
+    compute_volume,
+    quantise_down,
+    stop_price,
+)
 
 MARGIN_HEADROOM_MULTIPLE = Decimal(2)
 
@@ -105,7 +110,14 @@ class RiskEngine:
 
         # The independent gates all run; each contributes its own reason.
         reasons: list[RejectionReason] = []
-        passed: list[RejectionReason] = []
+        # The prelude checks above were also checked and ruled out to get
+        # here, so they belong in the audit trail on every path from this
+        # point on, whatever the eventual verdict.
+        passed: list[RejectionReason] = [
+            RejectionReason.UNKNOWN_BOOK,
+            RejectionReason.INSTRUMENT_MISMATCH,
+            RejectionReason.NON_POSITIVE_EQUITY,
+        ]
         _record(
             self._side_permitted(proposal.side, contract),
             RejectionReason.SIDE_NOT_PERMITTED,
@@ -167,7 +179,12 @@ class RiskEngine:
 
         resized = volume > contract.quantity_max
         if resized:
-            volume = contract.quantity_max
+            # quantity_max is not validated as a grid multiple (unlike
+            # quantity_min), so clamping straight to it can land off-grid and
+            # MT5 rejects the order outright. Floor to the grid instead: since
+            # quantity_min is on the grid and quantity_max >= quantity_min,
+            # the floored value can never drop below the minimum.
+            volume = quantise_down(contract.quantity_max, contract.quantity_increment)
 
         ticks = distance / contract.price_increment
         risk_money = ticks * contract.value_per_price_increment * volume
@@ -276,5 +293,11 @@ class RiskEngine:
             price=proposal.entry_price_ref,
         )
         if required <= 0 or margin.free_margin() < required * MARGIN_HEADROOM_MULTIPLE:
-            return self._reject(proposal, [RejectionReason.INSUFFICIENT_FREE_MARGIN_HEADROOM], [])
+            # decision.checks_passed is tuple[str, ...] on the schema; convert
+            # back to RejectionReason so the gates evaluate() already cleared
+            # are not dropped from the audit trail.
+            checks_passed = [RejectionReason(value) for value in decision.checks_passed]
+            return self._reject(
+                proposal, [RejectionReason.INSUFFICIENT_FREE_MARGIN_HEADROOM], checks_passed
+            )
         return decision
