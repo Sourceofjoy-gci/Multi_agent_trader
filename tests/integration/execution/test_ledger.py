@@ -99,32 +99,87 @@ def test_an_intent_that_reached_a_terminal_state_is_not_reopened(
     assert ledger.non_terminal() == ()
 
 
-def test_the_database_refuses_an_update_from_the_runtime_role(
+def test_the_runtime_role_holds_no_update_privilege_at_all(
     database: DatabaseHarness,
 ) -> None:
-    """Append-only by grant and trigger, not by application discipline.
-    Discipline is not evidence; this is."""
+    """This proves only the grant, not the trigger: ``trading_house_runtime`` holds no
+    UPDATE privilege on ``execution.intent_events`` (migration 0004 grants it only
+    SELECT, INSERT), so Postgres refuses the statement on privilege alone, before it
+    ever consults a trigger. Catching the bare ``psycopg.errors.Error`` base class here
+    would also pass if the trigger were broken or missing -- it swallows a syntax error
+    or a missing table just as happily as a privilege violation -- so this asserts the
+    specific sqlstate ``42501`` ("insufficient privilege") instead. The trigger itself
+    is proved separately, from a role that *has* the privilege: see
+    ``test_the_trigger_rejects_an_update_from_a_role_with_the_privilege`` below.
+    """
 
     ledger = PostgresIntentLedger(lambda: open_runtime_connection(SecretStr(database.runtime_dsn)))
     ledger.append("i-1", IntentState.SUBMITTING, NOW, {})
 
     with (
         open_runtime_connection(SecretStr(database.runtime_dsn)) as connection,
-        pytest.raises(psycopg.errors.Error),
+        pytest.raises(psycopg.errors.InsufficientPrivilege) as exc_info,
     ):
         connection.execute(
             "UPDATE execution.intent_events SET state = 'CONFIRMED' WHERE intent_id = 'i-1'"
         )
+    assert exc_info.value.sqlstate == "42501"
 
 
-def test_the_database_refuses_a_delete_from_the_runtime_role(
+def test_the_runtime_role_holds_no_delete_privilege_at_all(
     database: DatabaseHarness,
 ) -> None:
+    """Same reasoning as the UPDATE case above: this proves the grant only. The runtime
+    role has no DELETE privilege on the table, so the statement is refused as sqlstate
+    ``42501`` before any trigger runs. The trigger is proved separately below."""
+
     ledger = PostgresIntentLedger(lambda: open_runtime_connection(SecretStr(database.runtime_dsn)))
     ledger.append("i-1", IntentState.SUBMITTING, NOW, {})
 
     with (
         open_runtime_connection(SecretStr(database.runtime_dsn)) as connection,
-        pytest.raises(psycopg.errors.Error),
+        pytest.raises(psycopg.errors.InsufficientPrivilege) as exc_info,
     ):
         connection.execute("DELETE FROM execution.intent_events")
+    assert exc_info.value.sqlstate == "42501"
+
+
+def test_the_trigger_rejects_an_update_from_a_role_with_the_privilege(
+    database: DatabaseHarness, ledger: PostgresIntentLedger
+) -> None:
+    """This proves only the trigger, not the grant: ``trading_house_owner`` holds UPDATE
+    outright (it created the table), so if the statement is still refused, the grant
+    cannot be why -- only ``intent_events_no_mutation`` firing explains it. Together with
+    the runtime-role tests above, the two layers are now each proved by a test the other
+    cannot pass: a test that cannot tell a privilege check from a trigger firing proves
+    neither."""
+
+    ledger.append("i-1", IntentState.SUBMITTING, NOW, {})
+
+    with psycopg.connect(database.migration_dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SET ROLE trading_house_owner")
+            with pytest.raises(psycopg.errors.RaiseException) as exc_info:
+                cursor.execute(
+                    "UPDATE execution.intent_events SET state = 'CONFIRMED' WHERE intent_id = 'i-1'"
+                )
+            assert exc_info.value.sqlstate == "P0001"
+        connection.rollback()
+
+
+def test_the_trigger_rejects_a_delete_from_a_role_with_the_privilege(
+    database: DatabaseHarness, ledger: PostgresIntentLedger
+) -> None:
+    """Same reasoning as the UPDATE case above, for DELETE: the owner role has the
+    privilege the grant would otherwise deny, so a rejection here can only be the
+    trigger."""
+
+    ledger.append("i-1", IntentState.SUBMITTING, NOW, {})
+
+    with psycopg.connect(database.migration_dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SET ROLE trading_house_owner")
+            with pytest.raises(psycopg.errors.RaiseException) as exc_info:
+                cursor.execute("DELETE FROM execution.intent_events WHERE intent_id = 'i-1'")
+            assert exc_info.value.sqlstate == "P0001"
+        connection.rollback()
