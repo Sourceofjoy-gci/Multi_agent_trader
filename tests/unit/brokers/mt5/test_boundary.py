@@ -32,7 +32,7 @@ EXPECTED_PORT_METHODS = {
     "symbol_tick",
     "positions",
     "order_check",
-    "order_send",
+    "send_order",
     "history_deals",
     "last_error",
     "copy_rates_range",

@@ -157,7 +157,7 @@ class Mt5Terminal:
             return None
         return Mt5CheckResult(retcode=int(result.retcode), comment=str(result.comment))
 
-    def order_send(self, request: Mapping[str, object]) -> Mt5SendResult | None:
+    def send_order(self, request: Mapping[str, object]) -> Mt5SendResult | None:
         result = mt5.order_send(dict(request))
         if result is None:
             return None

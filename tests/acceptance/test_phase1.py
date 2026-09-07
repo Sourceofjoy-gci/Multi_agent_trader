@@ -32,14 +32,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFUSING_METHODS = ("submit", "amend_protection", "close")
 
 TERMINAL_MODULE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5" / "terminal.py"
-BOUNDARY_MODULE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5" / "boundary.py"
-# boundary.py names order_send only in TerminalPort's Protocol declaration (a
-# ``...`` body -- it calls nothing); terminal.py is the one real call. Exempting
-# boundary.py costs nothing because the guards compose: the separate MetaTrader5
-# import guard (test_architecture.py's MT5_IMPORT_ALLOWED) allows only
-# terminal.py to import the module, so boundary.py has no way to obtain
-# MetaTrader5 to call order_send on even though it may name the string.
-ORDER_SEND_ALLOWED = frozenset({TERMINAL_MODULE, BOUNDARY_MODULE})
+# terminal.py is the one real call, wrapping mt5.order_send(...). Every other
+# module -- including boundary.py, whose TerminalPort Protocol method is named
+# send_order for exactly this reason -- must be free of the substring
+# entirely: an import guard elsewhere stops a module from *importing*
+# MetaTrader5, but says nothing about a module reaching into sys.modules for
+# an instance another module already imported, so this guard cannot lean on
+# that one and must check every file itself.
+ORDER_SEND_ALLOWED = frozenset({TERMINAL_MODULE})
 
 BINDING = parse_venue_binding(
     b"""
@@ -101,9 +101,8 @@ def _adapter() -> Mt5BrokerAdapter:
 
 
 def test_no_order_send_call_exists_anywhere_in_source() -> None:
-    """``order_send`` is the only MT5 call that moves money, and exactly two
-    modules -- ``brokers/mt5/terminal.py`` and ``brokers/mt5/boundary.py`` --
-    may name it.
+    """``order_send`` is the only MT5 call that moves money, and exactly one
+    module -- ``brokers/mt5/terminal.py`` -- may name it.
 
     A substring check rather than an AST walk, deliberately: this must fail
     even if the name appears in a comment, a string, or a getattr lookup.
@@ -120,14 +119,6 @@ def test_the_terminal_module_is_where_order_send_actually_lives() -> None:
 
     assert TERMINAL_MODULE.exists()
     assert "order_send" in TERMINAL_MODULE.read_text(encoding="utf-8")
-
-
-def test_the_boundary_module_is_where_order_send_is_declared() -> None:
-    """Guard the guard: if the Protocol declaration moves or is reworded,
-    boundary.py's exemption goes stale and must stop being granted."""
-
-    assert BOUNDARY_MODULE.exists()
-    assert "order_send" in BOUNDARY_MODULE.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("method", REFUSING_METHODS)
