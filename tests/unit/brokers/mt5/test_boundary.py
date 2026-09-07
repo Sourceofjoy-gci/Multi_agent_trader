@@ -9,7 +9,9 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_MODE_DISABLED,
     SYMBOL_TRADE_MODE_FULL,
     Mt5Bar,
+    Mt5Deal,
     Mt5Position,
+    Mt5SendResult,
     Mt5SymbolInfo,  # noqa: F401 -- imported to prove it is part of the boundary's surface
     Mt5Tick,
     TerminalPort,
@@ -30,6 +32,8 @@ EXPECTED_PORT_METHODS = {
     "symbol_tick",
     "positions",
     "order_check",
+    "order_send",
+    "history_deals",
     "last_error",
     "copy_rates_range",
 }
@@ -115,6 +119,68 @@ def test_position_dto_carries_the_magic_used_for_book_attribution() -> None:
         opened_at=datetime(2026, 8, 25, 9, 0, tzinfo=UTC),
     )
     assert position.magic == 110001
+
+
+def test_send_result_carries_every_ticket_mt5_can_return() -> None:
+    """A submission can yield an order ticket, a position ticket and a deal
+    ticket, and reconciliation needs all three: the deal proves execution, the
+    position is what the guard will later modify, and the order is what a
+    pending request is cancelled by."""
+
+    result = Mt5SendResult(
+        retcode=10009,
+        order_ticket=1,
+        position_ticket=2,
+        deal_ticket=3,
+        volume=0.25,
+        price=1.10000,
+        comment="Done",
+    )
+
+    assert (result.order_ticket, result.position_ticket, result.deal_ticket) == (1, 2, 3)
+
+
+def test_send_result_tickets_are_optional_because_a_rejection_has_none() -> None:
+    """A rejected send returns a retcode and nothing else. Making the tickets
+    required would force the terminal layer to invent zeros, and zero is a
+    meaningful magic value elsewhere in this codebase."""
+
+    result = Mt5SendResult(
+        retcode=10019,
+        order_ticket=None,
+        position_ticket=None,
+        deal_ticket=None,
+        volume=0.0,
+        price=0.0,
+        comment="No money",
+    )
+
+    assert result.order_ticket is None
+
+
+def test_deal_carries_the_fields_reconciliation_matches_on() -> None:
+    """Matching is by magic AND symbol AND volume AND time, because magic is a
+    locator that collides, not an identity."""
+
+    dealt = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+    deal = Mt5Deal(
+        ticket=9,
+        order_ticket=8,
+        position_ticket=7,
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=0.25,
+        price=1.10000,
+        is_buy=True,
+        dealt_at=dealt,
+    )
+
+    assert (deal.magic, deal.server_symbol, deal.volume, deal.dealt_at) == (
+        110042,
+        "EURUSD",
+        0.25,
+        dealt,
+    )
 
 
 def test_boundary_module_does_not_import_metatrader5() -> None:

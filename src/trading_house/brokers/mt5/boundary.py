@@ -212,6 +212,30 @@ class Mt5CheckResult:
     comment: str
 
 
+@dataclass(frozen=True, slots=True)
+class Mt5SendResult:
+    retcode: int
+    order_ticket: int | None
+    position_ticket: int | None
+    deal_ticket: int | None
+    volume: float
+    price: float
+    comment: str
+
+
+@dataclass(frozen=True, slots=True)
+class Mt5Deal:
+    ticket: int
+    order_ticket: int
+    position_ticket: int
+    magic: int
+    server_symbol: str
+    volume: float
+    price: float
+    is_buy: bool
+    dealt_at: datetime
+
+
 @runtime_checkable
 class TerminalPort(Protocol):
     """Every MetaTrader 5 call the gateway makes. Nothing wider."""
@@ -228,4 +252,6 @@ class TerminalPort(Protocol):
     ) -> Sequence[Mt5Bar] | None: ...
     def positions(self) -> Sequence[Mt5Position]: ...
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None: ...
+    def order_send(self, request: Mapping[str, object]) -> Mt5SendResult | None: ...
+    def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal]: ...
     def last_error(self) -> tuple[int, str]: ...

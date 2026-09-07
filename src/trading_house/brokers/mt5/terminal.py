@@ -16,7 +16,9 @@ import MetaTrader5 as mt5
 from trading_house.brokers.mt5.boundary import (
     Mt5Bar,
     Mt5CheckResult,
+    Mt5Deal,
     Mt5Position,
+    Mt5SendResult,
     Mt5SymbolInfo,
     Mt5Tick,
     establish_utc_offset,
@@ -154,6 +156,39 @@ class Mt5Terminal:
         if result is None:
             return None
         return Mt5CheckResult(retcode=int(result.retcode), comment=str(result.comment))
+
+    def order_send(self, request: Mapping[str, object]) -> Mt5SendResult | None:
+        result = mt5.order_send(dict(request))
+        if result is None:
+            return None
+        return Mt5SendResult(
+            retcode=int(result.retcode),
+            order_ticket=int(result.order) or None,
+            position_ticket=int(getattr(result, "position", 0)) or None,
+            deal_ticket=int(result.deal) or None,
+            volume=float(result.volume),
+            price=float(result.price),
+            comment=str(result.comment),
+        )
+
+    def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal]:
+        raw = mt5.history_deals_get(start, end)
+        if raw is None:
+            return ()
+        return tuple(
+            Mt5Deal(
+                ticket=int(d.ticket),
+                order_ticket=int(d.order),
+                position_ticket=int(d.position_id),
+                magic=int(d.magic),
+                server_symbol=d.symbol,
+                volume=float(d.volume),
+                price=float(d.price),
+                is_buy=int(d.type) == 0,
+                dealt_at=self._to_utc(d.time),
+            )
+            for d in raw
+        )
 
     def last_error(self) -> tuple[int, str]:
         code, description = mt5.last_error()
