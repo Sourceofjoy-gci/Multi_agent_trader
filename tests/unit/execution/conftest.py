@@ -184,13 +184,33 @@ class RecordingLedger:
 
 class FakeDeals:
     """A ``DealSource`` double: a fixed set of deals and a fixed terminal
-    health, so reconciliation tests control both without a broker."""
+    health, so reconciliation tests control both without a broker.
 
-    def __init__(self, *, deals: tuple[DealRecord, ...] = (), healthy: bool = True) -> None:
+    ``ledger`` and ``intent_id`` are optional: when given, ``deals_since``
+    records ``ledger.current_state(intent_id)`` into ``observed_states`` at
+    the moment it is called -- the only way a test can see what state the
+    ledger was in *during* the poll, since this stub otherwise has no view
+    of ledger state at all.
+    """
+
+    def __init__(
+        self,
+        *,
+        deals: tuple[DealRecord, ...] = (),
+        healthy: bool = True,
+        ledger: RecordingLedger | None = None,
+        intent_id: str | None = None,
+    ) -> None:
         self.deals = deals
         self.healthy = healthy
+        self._ledger = ledger
+        self._intent_id = intent_id
+        self.observed_states: list[IntentState | None] = []
 
     def deals_since(self, start: datetime) -> tuple[DealRecord, ...]:
+        ledger, intent_id = self._ledger, self._intent_id
+        if ledger is not None and intent_id is not None:
+            self.observed_states.append(ledger.current_state(intent_id))
         return self.deals
 
     def terminal_healthy(self) -> bool:

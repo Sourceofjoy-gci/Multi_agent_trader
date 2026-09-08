@@ -110,6 +110,21 @@ def test_a_deal_stamped_slightly_before_submission_still_matches() -> None:
     assert _verdict(deals=(_deal(dealt_at=BASE - timedelta(seconds=30)),)) is (Verdict.CONFIRMED)
 
 
+def test_a_deal_stamped_exactly_at_the_lookback_boundary_matches() -> None:
+    """The comparison is ``window_start <= deal.dealt_at``: a deal stamped
+    exactly MATCH_LOOKBACK (60s) before t_submit is still on our side of the
+    line, not one tick outside it."""
+
+    assert _verdict(deals=(_deal(dealt_at=BASE - timedelta(seconds=60)),)) is Verdict.CONFIRMED
+
+
+def test_a_deal_stamped_one_second_beyond_the_lookback_boundary_does_not_match() -> None:
+    """One second earlier than the boundary above: now outside the window,
+    so it cannot be ours."""
+
+    assert _verdict(deals=(_deal(dealt_at=BASE - timedelta(seconds=61)),)) is Verdict.STILL_UNKNOWN
+
+
 def test_no_match_inside_the_timeout_stays_unknown() -> None:
     """Before RESOLUTION_TIMEOUT elapses, absence of a deal is not evidence.
     Declaring FAILED here would abandon an order still working its way
@@ -120,6 +135,21 @@ def test_no_match_inside_the_timeout_stays_unknown() -> None:
 
 def test_no_match_after_the_timeout_fails() -> None:
     assert _verdict(now=BASE + timedelta(seconds=31)) is Verdict.FAILED
+
+
+def test_no_match_exactly_at_the_timeout_fails() -> None:
+    """The comparison is ``now - t_submit >= RESOLUTION_TIMEOUT``: exactly
+    30s of silence already justifies FAILED, not one tick past it."""
+
+    assert _verdict(now=BASE + timedelta(seconds=30)) is Verdict.FAILED
+
+
+def test_no_match_one_tick_before_the_timeout_stays_unknown() -> None:
+    """One microsecond short of the boundary above: the timeout has not
+    elapsed yet, so absence of a deal is still not evidence of failure."""
+
+    just_under = BASE + timedelta(seconds=30) - timedelta(microseconds=1)
+    assert _verdict(now=just_under) is Verdict.STILL_UNKNOWN
 
 
 def test_an_unhealthy_terminal_never_yields_failed() -> None:
@@ -181,15 +211,25 @@ def test_the_sweep_marks_reconciling_before_it_polls() -> None:
     """A sweep that dies mid-poll must be visible as such rather than looking
     untouched. RECONCILING is in the frozen IntentState enum for this.
 
-    A matching deal is supplied so the sweep actually writes a verdict after
-    RECONCILING -- proving RECONCILING is not simply the last thing written,
-    which is what "visible mid-death" requires.
+    ``FakeDeals`` is handed the ledger so ``deals_since`` -- called during the
+    poll -- can record what state the ledger was actually in at that moment.
+    If RECONCILING were written after polling instead of before, the state
+    observed during the poll would still be UNKNOWN.
+
+    A matching deal is also supplied so the sweep actually writes a verdict
+    after RECONCILING -- proving RECONCILING is not simply the last thing
+    written, which is what "visible mid-death" requires.
     """
 
     ledger = RecordingLedger()
     ledger.append("i-1", IntentState.UNKNOWN, BASE, _snapshot_payload())
+    deals = FakeDeals(deals=(_deal(),), ledger=ledger, intent_id="i-1")
 
-    reconcile_all(ledger, FakeDeals(deals=(_deal(),)), FixedClock(BASE_PLUS_5))
+    reconcile_all(ledger, deals, FixedClock(BASE_PLUS_5))
+
+    assert deals.observed_states == [IntentState.RECONCILING], (
+        "the ledger must already show RECONCILING at the moment deals_since is called"
+    )
 
     states = [state for _, state, _ in ledger.appended]
     assert IntentState.RECONCILING in states
