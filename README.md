@@ -313,6 +313,58 @@ realised risk is bounded above by the budget instead of straddling it
 (**I-19**) — reversing either rounding direction would let a position exceed
 the signed risk budget on roughly half of all trades.
 
+## Phase 4 — execution
+
+Phase 4 is the write path: an append-only intent ledger, an order manager
+that sends to the venue exactly once, a reconciler that resolves whatever a
+lost response left ambiguous, and the CLI commands that drive all three.
+
+**The durability point.** `IntentLedger.append()` commits to Postgres
+*before* `OrderManager.submit()` ever calls the venue — SUBMITTING is durable
+on disk before an order can possibly exist at the broker. MT5 carries no
+client order ID, so a timed-out send is genuinely ambiguous between "lost on
+the way out" (nothing happened) and "lost on the way back" (the order
+executed and the confirmation never arrived), and nothing in the response
+tells the two apart. Writing SUBMITTING first is what makes that intent
+findable afterwards regardless of which one occurred; a crash between the
+write and the send would otherwise leave a real broker position that nothing
+would ever go looking for.
+
+**`submit()` never reconciles.** A lost response is recorded as UNKNOWN and
+`submit()` returns — it does not retry, and it does not poll the venue to
+find out what happened. Resolving an UNKNOWN intent is `reconcile_all()`'s
+job, run either by `order reconcile` or by the same recovery path after a
+crash. Folding that into `submit()` would mean the resend path and the
+crash-recovery path are different code, and only one of them would ever be
+exercised routinely.
+
+**The gate runs on every order-placing command.** `require_clean_ledger`
+(I-20) refuses whenever the ledger holds any non-terminal intent — naming it
+— before `order submit` or `order status` do anything else, including
+touching the venue. `order reconcile` is the one exception: it is the
+command that clears the unresolved condition, and gating it would deadlock
+the system against itself.
+
+### Commands
+
+```bash
+uv run trading-house order submit --intent-id ... --proposal-id ... --strategy-id ... \
+  --book fx_scalp --instrument fx.eurusd --side BUY --quantity 0.01 --stop-loss 1.0950
+uv run trading-house order reconcile
+uv run trading-house order status --intent-id ...
+```
+
+- **`order submit`** builds one `OrderIntent`, stamps its venue magic from
+  the signed binding, and calls `OrderManager.submit()`. Refuses first if any
+  earlier intent is unresolved (I-20).
+- **`order reconcile`** resolves every non-terminal intent against the
+  venue's own deal history and writes back CONFIRMED, FAILED, or leaves it
+  STILL_UNKNOWN. The only order command that does **not** gate on
+  `require_clean_ledger` — it is what clears the gate for everything else.
+- **`order status`** reports one intent's full ledger history. Gated like
+  `order submit`: a status report is not trustworthy while an earlier intent
+  is still unresolved either.
+
 ## Operator commands
 
 ```bash

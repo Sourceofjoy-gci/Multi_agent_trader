@@ -49,6 +49,14 @@ RISK_ROOT = SOURCE_ROOT / "risk"
 RISK_FORBIDDEN = frozenset(
     {"trading_house.brokers", "trading_house.marketdata", "trading_house.features"}
 )
+EXECUTION_ROOT = SOURCE_ROOT / "execution"
+# execution/ may reach core/ and database/, nothing else this project owns:
+# it declares the venue port (VenueSubmitPort/DealSource) it needs and the
+# MT5 adapter satisfies it structurally, so the ledger and order manager
+# stay testable without MetaTrader5 installed.
+EXECUTION_FORBIDDEN = frozenset(
+    {"trading_house.brokers", "trading_house.risk", "trading_house.marketdata"}
+)
 # The reverse of CREDENTIAL_BEARING: no process holding broker credentials may
 # execute agent-authored code (I-11's other direction). These are exactly the
 # modules that could hold or reach credentials.
@@ -248,6 +256,46 @@ def test_the_risk_import_guard_can_still_fail(statement: str) -> None:
     check reflects risk/ staying clean rather than a detector gone blind."""
 
     assert _reaches(ast.parse(statement + "\n"), RISK_FORBIDDEN)
+
+
+def test_no_execution_module_imports_a_broker_risk_or_marketdata_module() -> None:
+    """execution/ imports core/ and database/ only. Reaching brokers/ directly
+    would make the order manager and reconciler untestable without
+    MetaTrader5 installed; reaching risk/ or marketdata/ has no reason to
+    exist on the order-submission path at all."""
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        if not path.is_relative_to(EXECUTION_ROOT):
+            continue
+        reached = _reaches(tree, EXECUTION_FORBIDDEN)
+        if reached:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
+
+
+def test_the_execution_package_is_not_empty() -> None:
+    """Guard the guard: an empty execution/ would make the loop above pass
+    vacuously, so a passing check reflects clean code rather than no code."""
+
+    assert sorted(EXECUTION_ROOT.rglob("*.py"))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter",
+        "import trading_house.risk",
+        "from trading_house.marketdata.store import PostgresBarStore",
+    ],
+)
+def test_the_execution_import_guard_can_still_fail(statement: str) -> None:
+    """Guard the guard: prove the detector flags a real import, so a passing
+    check reflects execution/ staying clean rather than a detector gone
+    blind."""
+
+    assert _reaches(ast.parse(statement + "\n"), EXECUTION_FORBIDDEN)
 
 
 def test_the_terminal_module_stays_thin() -> None:

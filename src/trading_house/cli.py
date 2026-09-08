@@ -13,10 +13,11 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, cast
 from uuid import uuid4
@@ -31,6 +32,7 @@ from trading_house.brokers.base import ReconciliationReport
 from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
 from trading_house.brokers.mt5.boundary import TerminalPort
 from trading_house.brokers.mt5.gateway import Mt5Gateway
+from trading_house.brokers.mt5.magic import derive_magic
 from trading_house.constitution.binding import VenueBinding, load_venue_binding
 from trading_house.constitution.loader import load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
@@ -54,9 +56,20 @@ from trading_house.core.errors import (
     TradingHouseError,
     UnresolvedIntentsError,
 )
-from trading_house.core.values import BookId
+from trading_house.core.schemas import OrderIntent, Side
+from trading_house.core.values import (
+    BookId,
+    IntentState,
+    PositiveQuantity,
+    QuantityUnit,
+    TimeInForce,
+)
+from trading_house.core.venue import DealRecord, Mt5VenueRef, Venue
 from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
+from trading_house.execution.ledger import PostgresIntentLedger
+from trading_house.execution.manager import OrderManager
+from trading_house.execution.reconciler import reconcile_all, require_clean_ledger
 from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
@@ -102,10 +115,12 @@ constitution_app = typer.Typer(no_args_is_help=True, help="Risk-constitution com
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 audit_app = typer.Typer(no_args_is_help=True, help="Audit-ledger commands.")
 data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
+order_app = typer.Typer(no_args_is_help=True, help="Order commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
 app.add_typer(data_app, name="data")
+app.add_typer(order_app, name="order")
 
 
 @app.callback()
@@ -131,6 +146,11 @@ def _execute(operation: Callable[[], dict[str, JsonValue]]) -> dict[str, JsonVal
 
     try:
         return operation()
+    except UnresolvedIntentsError as error:
+        # str(error) names the offending intent ids; the class-level
+        # public_message alone does not, and an operator who cannot see
+        # which intent is stuck cannot clear it.
+        raise _fail(str(error), EXIT_CODES[UnresolvedIntentsError]) from None
     except TradingHouseError as error:
         raise _fail(
             error.public_message, EXIT_CODES.get(type(error), ExitCode.CONFIGURATION)
@@ -618,6 +638,191 @@ def health(
             "audit_entries_verified": report.audit_entries_verified,
             "books_reconciled": cast(list[JsonValue], sorted(report.books_reconciled)),
             "open_positions": report.open_positions,
+        }
+
+    _run(operation)
+
+
+def _intent_ledger() -> PostgresIntentLedger:
+    settings = _settings()
+    return PostgresIntentLedger(lambda: open_runtime_connection(settings.database_dsn))
+
+
+@contextmanager
+def _order_adapter(
+    venue_binding: Path,
+    venue_binding_signature: Path,
+    venue_binding_public_key: Path,
+) -> Iterator[tuple[Mt5BrokerAdapter, VenueBinding, SystemClock]]:
+    """Build a live ``Mt5BrokerAdapter`` for one order command.
+
+    Structured like ``_history_provider``: an absent or unreachable terminal
+    is ``BrokerUnavailableError``, never a silent no-op -- an order command
+    that swallowed this would look like it did nothing when it actually
+    never tried to reach the venue at all.
+    """
+
+    terminal_factory = _mt5_terminal_factory()
+    if terminal_factory is None:
+        raise BrokerUnavailableError()
+
+    binding = load_venue_binding(venue_binding, venue_binding_signature, venue_binding_public_key)
+    clock = SystemClock()
+    probe_symbol = next(iter(binding.instruments.values())).server_symbol
+    gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock)
+    gateway.start()
+    try:
+        yield Mt5BrokerAdapter(gateway, binding, clock=clock), binding, clock
+    finally:
+        gateway.stop()
+
+
+@dataclass
+class _AdapterDealSource:
+    """Adapts ``Mt5BrokerAdapter`` to the reconciler's own ``DealSource``
+    port: the adapter's connectivity check is named ``health()``, not
+    ``terminal_healthy()``, so this is the one place that gap is bridged."""
+
+    adapter: Mt5BrokerAdapter
+
+    def deals_since(self, start: datetime) -> Sequence[DealRecord]:
+        return self.adapter.deals_since(start)
+
+    def terminal_healthy(self) -> bool:
+        return self.adapter.health().connected
+
+
+@order_app.command("submit")
+def order_submit(
+    intent_id: Annotated[str, typer.Option("--intent-id")],
+    proposal_id: Annotated[str, typer.Option("--proposal-id")],
+    strategy_id: Annotated[str, typer.Option("--strategy-id")],
+    book: Annotated[str, typer.Option("--book")],
+    instrument: Annotated[str, typer.Option("--instrument")],
+    side: Annotated[Side, typer.Option("--side")],
+    quantity: Annotated[str, typer.Option("--quantity")],
+    stop_loss: Annotated[str, typer.Option("--stop-loss")],
+    take_profit: Annotated[str | None, typer.Option("--take-profit")] = None,
+    quantity_unit: Annotated[QuantityUnit, typer.Option("--quantity-unit")] = "lots",
+    time_in_force: Annotated[TimeInForce, typer.Option("--time-in-force")] = TimeInForce.GTC,
+    max_slippage_bps: Annotated[str, typer.Option("--max-slippage-bps")] = "5",
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Submit one order intent to the venue.
+
+    Refuses before touching the venue at all while any earlier intent is
+    still unresolved (I-20) -- ``require_clean_ledger`` runs first, and the
+    intent is built and sent only once it has passed.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        ledger = _intent_ledger()
+        require_clean_ledger(ledger)
+
+        with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
+            adapter,
+            binding,
+            clock,
+        ):
+            book_binding = binding.books.get(book)
+            instrument_binding = binding.instruments.get(instrument)
+            if book_binding is None or instrument_binding is None:
+                raise ConfigurationError()
+            venue_ref = Mt5VenueRef(
+                venue=Venue.MT5,
+                magic=derive_magic(intent_id, book_binding.magic_range),
+                server_symbol=instrument_binding.server_symbol,
+            )
+            intent = OrderIntent(
+                intent_id=intent_id,
+                proposal_id=proposal_id,
+                book=book,
+                instrument_id=instrument,
+                side=side,
+                quantity=PositiveQuantity(amount=Decimal(quantity), unit=quantity_unit),
+                stop_loss=Decimal(stop_loss),
+                take_profit=Decimal(take_profit) if take_profit is not None else None,
+                time_in_force=time_in_force,
+                max_slippage_bps=Decimal(max_slippage_bps),
+                state=IntentState.SUBMITTING,
+                t_submit_utc=clock.now(),
+                venue_ref=venue_ref,
+            )
+            state = OrderManager(ledger, adapter, clock).submit(intent, strategy_id)
+        return {"intent_id": intent_id, "state": state.value}
+
+    _run(operation)
+
+
+@order_app.command("reconcile")
+def order_reconcile(
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Resolve every unresolved intent against the venue's own deal history.
+
+    The one order command that does NOT run ``require_clean_ledger`` first:
+    this is the command that clears the condition, and gating it would
+    deadlock the system against itself.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        ledger = _intent_ledger()
+        with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
+            adapter,
+            _binding,
+            clock,
+        ):
+            results = reconcile_all(ledger, _AdapterDealSource(adapter), clock)
+        return {
+            "results": cast(
+                dict[str, JsonValue],
+                {intent_id: verdict.value for intent_id, verdict in results.items()},
+            )
+        }
+
+    _run(operation)
+
+
+@order_app.command("status")
+def order_status(
+    intent_id: Annotated[str, typer.Option("--intent-id")],
+) -> None:
+    """Report one intent's full ledger history.
+
+    Gated like every other order-placing command: an operator cannot trust
+    a status report while an earlier intent is still unresolved.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        ledger = _intent_ledger()
+        require_clean_ledger(ledger)
+        events = ledger.events_for(intent_id)
+        return {
+            "intent_id": intent_id,
+            "current_state": events[-1].state.value if events else None,
+            "events": cast(
+                list[JsonValue],
+                [
+                    {
+                        "seq": event.seq,
+                        "state": event.state.value,
+                        "event_time": event.event_time.isoformat(),
+                    }
+                    for event in events
+                ],
+            ),
         }
 
     _run(operation)
