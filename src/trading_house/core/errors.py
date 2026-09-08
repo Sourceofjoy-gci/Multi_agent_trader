@@ -82,6 +82,19 @@ class BrokerUnavailableError(TradingHouseError):
     public_message = "broker terminal unavailable"
 
 
+class BrokerError(TradingHouseError):
+    """Raised when a broker response leaves an order's outcome unknown.
+
+    A ``None`` result from an order-send call is never a rejection -- the
+    order may have executed with its confirmation lost in transit. Reporting
+    it as a rejection would let the caller record REJECTED for a position
+    that actually exists, and nothing would ever look for it again. Raising
+    keeps the intent in an unresolved state for reconciliation to settle.
+    """
+
+    public_message = "broker response unusable; order outcome unknown"
+
+
 class NonDemoAccountError(TradingHouseError):
     """Raised when the connected account is not a demo account."""
 

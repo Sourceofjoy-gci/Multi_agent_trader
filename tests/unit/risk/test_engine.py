@@ -129,6 +129,30 @@ def test_a_zero_median_spread_disables_the_ratio_gate(constitution) -> None:
     assert RejectionReason.SPREAD_EXCEEDS_CEILING not in decision.reasons
 
 
+def test_a_zero_median_no_longer_admits_an_enormous_spread(constitution) -> None:
+    """R-8, carried from Phase 3 on condition it closed before any order could
+    be placed. Before this gate, median 0 with a 100000-point tick spread was
+    APPROVED at full size, because the ratio gate compares against the median
+    and a multiple of zero admits everything."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(),
+        contract=_contract(),
+        **_facts(median_spread_points=Decimal("0"), tick_spread_points=Decimal("100000")),
+    )
+
+    assert RejectionReason.SPREAD_EXCEEDS_STOP_FRACTION in decision.reasons
+
+
+def test_an_ordinary_spread_passes_the_fraction_gate(constitution) -> None:
+    """Guard the guard: a gate that rejected everything would also pass the
+    test above."""
+
+    decision = _engine(constitution).evaluate(_proposal(), contract=_contract(), **_facts())
+
+    assert decision.verdict == "APPROVED"
+
+
 def test_a_stale_tick_is_rejected(constitution) -> None:
     """safe_mode_triggers.scalp allows 2 seconds."""
 
@@ -240,7 +264,15 @@ def test_an_off_grid_entry_sizes_from_the_one_tick_stop_it_emits(constitution) -
     decision = _engine(constitution).evaluate(
         proposal,
         contract=contract,
-        **_facts(atr=Decimal("0"), median_spread_points=Decimal("0")),
+        # tick_spread_points is zeroed too: R-8's gate compares the current
+        # spread to the emitted stop, and the default 10-point spread would
+        # dwarf this test's 1-tick stop and reject it for a reason unrelated
+        # to what is under test here.
+        **_facts(
+            atr=Decimal("0"),
+            median_spread_points=Decimal("0"),
+            tick_spread_points=Decimal("0"),
+        ),
     )
 
     assert decision.verdict == "APPROVED"

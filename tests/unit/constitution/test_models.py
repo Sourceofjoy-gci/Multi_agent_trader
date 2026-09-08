@@ -26,6 +26,7 @@ def _book_payload(**overrides: object) -> dict[str, object]:
         "max_gross_leverage": Decimal("10.0"),
         "k_sigma": Decimal("1.2"),
         "k_spread": Decimal("2.0"),
+        "max_spread_fraction_of_stop": Decimal("25.0"),
         "limits": {
             "horizon": "scalp",
             "max_orders_per_minute": 15,
@@ -56,6 +57,7 @@ def valid_data() -> dict[str, object]:
                 "max_gross_leverage": Decimal("10.0"),
                 "k_sigma": Decimal("1.2"),
                 "k_spread": Decimal("2.0"),
+                "max_spread_fraction_of_stop": Decimal("25.0"),
                 "limits": {
                     "horizon": "scalp",
                     "max_orders_per_minute": 15,
@@ -76,6 +78,7 @@ def valid_data() -> dict[str, object]:
                 "max_gross_leverage": Decimal("5.0"),
                 "k_sigma": Decimal("2.5"),
                 "k_spread": Decimal("2.0"),
+                "max_spread_fraction_of_stop": Decimal("25.0"),
                 "limits": {
                     "horizon": "swing",
                     "max_overnight_positions": 6,
@@ -96,6 +99,7 @@ def valid_data() -> dict[str, object]:
                 "max_gross_leverage": Decimal("3.0"),
                 "k_sigma": Decimal("2.5"),
                 "k_spread": Decimal("2.0"),
+                "max_spread_fraction_of_stop": Decimal("25.0"),
                 "limits": {
                     "horizon": "swing",
                     "max_overnight_positions": 4,
@@ -116,6 +120,7 @@ def valid_data() -> dict[str, object]:
                 "max_gross_leverage": Decimal("20.0"),
                 "k_sigma": Decimal("2.5"),
                 "k_spread": Decimal("2.0"),
+                "max_spread_fraction_of_stop": Decimal("25.0"),
                 "limits": {
                     "horizon": "swing",
                     "max_overnight_positions": 2,
@@ -177,6 +182,7 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert fx_scalp.daily_loss_stop_pct == Decimal("1.5")
     assert fx_scalp.max_drawdown_halt_pct == Decimal("6.0")
     assert fx_scalp.max_gross_leverage == Decimal("10.0")
+    assert fx_scalp.max_spread_fraction_of_stop == Decimal("25.0")
     assert fx_scalp.limits.horizon is Horizon.SCALP
     assert fx_scalp.limits.max_orders_per_minute == 15
     assert fx_scalp.limits.max_spread_multiple_at_entry == Decimal("1.5")
@@ -577,3 +583,20 @@ def test_stop_multipliers_accept_yaml_integers() -> None:
 
     assert limits.k_sigma == Decimal("2")
     assert limits.k_spread == Decimal("3")
+
+
+def test_a_book_requires_the_spread_fraction_ceiling() -> None:
+    """R-8's gate has nothing to compare against without this. A book that
+    omits it must not load, same as a book that omits k_sigma."""
+
+    payload = _book_payload()
+    del payload["max_spread_fraction_of_stop"]
+
+    with pytest.raises(ValidationError):
+        BookLimits.model_validate(payload)
+
+
+def test_the_spread_fraction_ceiling_accepts_yaml_integers() -> None:
+    limits = BookLimits.model_validate(_book_payload(max_spread_fraction_of_stop=25))
+
+    assert limits.max_spread_fraction_of_stop == Decimal("25")

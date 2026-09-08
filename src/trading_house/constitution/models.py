@@ -103,6 +103,10 @@ class BookLimits(ConstitutionModel):
     # every position size -- the same reason risk_per_trade_pct is here.
     k_sigma: PositiveDecimal
     k_spread: PositiveDecimal
+    # The absolute economic ceiling on cost, and the reason it exists: the
+    # ratio gate compares the current spread to the MEDIAN, and a zero median
+    # disables it entirely. This one never references the median.
+    max_spread_fraction_of_stop: Percentage
     limits: HorizonLimits
 
     @field_validator(
@@ -113,6 +117,7 @@ class BookLimits(ConstitutionModel):
         "max_gross_leverage",
         "k_sigma",
         "k_spread",
+        "max_spread_fraction_of_stop",
         mode="before",
     )
     @classmethod

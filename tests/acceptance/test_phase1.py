@@ -29,7 +29,13 @@ from trading_house.core.errors import NonDemoAccountError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-REFUSING_METHODS = ("submit", "amend_protection", "close")
+# Phase 4 filled in submit() and close(); only amend_protection still refuses.
+# Amending a protective stop is the position guard, and belongs to the NEXT
+# phase -- this phase submits and closes, but never touches a stop or
+# take-profit on a position that is already open. Narrowing this tuple to
+# match what Phase 4 actually implemented, rather than deleting the test,
+# keeps it pinned: it must keep failing if stop modification ever lands here.
+REFUSING_METHODS = ("amend_protection",)
 
 TERMINAL_MODULE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5" / "terminal.py"
 # terminal.py is the one real call, wrapping mt5.order_send(...). Every other
@@ -123,8 +129,10 @@ def test_the_terminal_module_is_where_order_send_actually_lives() -> None:
 
 @pytest.mark.parametrize("method", REFUSING_METHODS)
 def test_every_mutating_method_refuses_in_this_phase(method: str) -> None:
-    """The refusal happens before any argument is examined, which is why
-    these can be called with nothing meaningful."""
+    """Pins the position guard: amending a protective stop is the next
+    phase's business, not this one's. The refusal happens before any
+    argument is examined, which is why this can be called with nothing
+    meaningful."""
 
     bound = getattr(_adapter(), method)
     arity = len(inspect.signature(bound).parameters)

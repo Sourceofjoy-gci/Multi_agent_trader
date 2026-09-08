@@ -1,21 +1,26 @@
-from collections.abc import Callable
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
 from tests.unit.brokers.mt5.conftest import FakeTerminal
 from trading_house.brokers.base import BrokerAdapter
-from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
-from trading_house.brokers.mt5.boundary import Mt5CheckResult, Mt5Position
+from trading_house.brokers.mt5.adapter import ConfirmedIntentSource, Mt5BrokerAdapter
+from trading_house.brokers.mt5.boundary import Mt5CheckResult, Mt5Position, Mt5SendResult
 from trading_house.brokers.mt5.gateway import Mt5Gateway
+from trading_house.brokers.mt5.magic import derive_magic
+from trading_house.brokers.mt5.retcodes import RETCODE_REJECT_REASON
 from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
-from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
+from trading_house.core.errors import BrokerError, BrokerUnavailableError, ConfigurationError
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, RejectReason, Venue
 from trading_house.marketdata.models import Timeframe
+
+_MAGIC_RANGE = (110000, 119999)  # fx_scalp's declared range, below
 
 BINDING = parse_venue_binding(
     b"""
@@ -51,13 +56,27 @@ def _intent(**overrides: object) -> OrderIntent:
         "quantity": PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
         **overrides,
     }
+    # Every other test in this module cares about something other than
+    # venue_ref, so it defaults to a magic derived the same way the real
+    # caller derives one -- present, but only ever asserted on by the tests
+    # that are actually about stamping.
+    kwargs.setdefault(
+        "venue_ref",
+        Mt5VenueRef(
+            venue=Venue.MT5,
+            magic=derive_magic(str(kwargs["intent_id"]), _MAGIC_RANGE),
+            server_symbol="EURUSD",
+        ),
+    )
     return OrderIntent(**kwargs)  # type: ignore[arg-type]
 
 
-def _adapter(terminal: object) -> tuple[Mt5BrokerAdapter, Mt5Gateway]:
+def _adapter(
+    terminal: object, *, ledger: ConfirmedIntentSource | None = None
+) -> tuple[Mt5BrokerAdapter, Mt5Gateway]:
     gateway = Mt5Gateway(terminal, clock=SystemClock(), request_timeout_seconds=5.0)  # type: ignore[arg-type]
     gateway.start()
-    return Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock()), gateway
+    return Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock(), ledger=ledger), gateway
 
 
 def test_adapter_satisfies_the_broker_protocol(symbol_terminal: FakeTerminal) -> None:
@@ -68,19 +87,15 @@ def test_adapter_satisfies_the_broker_protocol(symbol_terminal: FakeTerminal) ->
         gateway.stop()
 
 
-@pytest.mark.parametrize("method", ["submit", "amend_protection", "close"])
-def test_mutating_methods_refuse_in_this_phase(method: str, symbol_terminal: FakeTerminal) -> None:
-    """Phase 1 sends no orders. These arrive with Phase 3's intent ledger."""
+def test_amend_protection_still_refuses_in_this_phase(symbol_terminal: FakeTerminal) -> None:
+    """submit() and close() arrived in Phase 4. Amending a protective stop is
+    the position guard and belongs to the next phase -- this one must never
+    touch a stop or take-profit on a position already open."""
 
     adapter, gateway = _adapter(symbol_terminal)
-    calls: dict[str, Callable[[], object]] = {
-        "submit": lambda: adapter.submit(_intent()),
-        "amend_protection": lambda: adapter.amend_protection(REF, Decimal("1.0900"), None),
-        "close": lambda: adapter.close(REF, None),
-    }
     try:
-        with pytest.raises(NotImplementedError, match="Phase 3"):
-            calls[method]()
+        with pytest.raises(NotImplementedError, match="next phase"):
+            adapter.amend_protection(REF, Decimal("1.0900"), None)
     finally:
         gateway.stop()
 
@@ -433,3 +448,214 @@ def test_the_terminal_receives_minutes_not_an_already_translated_code() -> None:
         gateway.stop()
 
     assert [req[1] for req in terminal.rate_requests] == [60, 1440]
+
+
+# --- submit() ----------------------------------------------------------
+
+
+def _send_result(**overrides: object) -> Mt5SendResult:
+    fields: dict[str, object] = {
+        "retcode": 10009,
+        "order_ticket": 1,
+        "position_ticket": None,
+        "deal_ticket": 3,
+        "volume": 0.1,
+        "price": 1.10000,
+        "comment": "Done",
+    }
+    fields.update(overrides)
+    return Mt5SendResult(**fields)  # type: ignore[arg-type]
+
+
+def test_submit_builds_a_request_with_float_prices(symbol_terminal: FakeTerminal) -> None:
+    """MT5 returns None with no useful error when sl or tp is an int. This is
+    a documented, commonly-hit trap and the reason every price crossing the
+    boundary is coerced to float."""
+
+    symbol_terminal.send_result = _send_result(volume=0.25)
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        adapter.submit(_intent())
+    finally:
+        gateway.stop()
+
+    request = symbol_terminal.sent[0]
+    assert isinstance(request["sl"], float)
+    assert isinstance(request["volume"], float)
+
+
+def test_submit_stamps_the_request_with_the_intents_own_magic(
+    symbol_terminal: FakeTerminal,
+) -> None:
+    """Reconciliation finds the deal by magic. An unstamped order -- or one
+    re-derived instead of read from the intent -- is unrecoverable after a
+    lost response."""
+
+    symbol_terminal.send_result = _send_result()
+    intent = _intent()
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        adapter.submit(intent)
+    finally:
+        gateway.stop()
+
+    assert intent.venue_ref is not None
+    assert symbol_terminal.sent[0]["magic"] == intent.venue_ref.magic
+    assert intent.venue_ref.magic == derive_magic(intent.intent_id, _MAGIC_RANGE)
+
+
+def test_a_success_retcode_yields_an_accepted_outcome(symbol_terminal: FakeTerminal) -> None:
+    symbol_terminal.send_result = _send_result(volume=0.25, price=1.10050)
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        outcome = adapter.submit(_intent())
+    finally:
+        gateway.stop()
+
+    assert outcome.accepted is True
+    assert outcome.reject_reason is None
+    assert outcome.filled_quantity is not None
+    assert outcome.filled_quantity.amount == Decimal("0.25")
+    assert outcome.fill_price == Decimal("1.1005")
+
+
+def test_a_rejection_retcode_maps_through_the_taxonomy(symbol_terminal: FakeTerminal) -> None:
+    symbol_terminal.send_result = _send_result(retcode=10019, volume=0.0, price=0.0)
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        outcome = adapter.submit(_intent())
+    finally:
+        gateway.stop()
+
+    assert outcome.accepted is False
+    assert outcome.reject_reason is RejectReason.INSUFFICIENT_FUNDS
+
+
+def test_a_none_result_raises_rather_than_returning_a_rejection(
+    symbol_terminal: FakeTerminal,
+) -> None:
+    """A None result is NOT a rejection -- the order may have executed. If
+    the adapter returned ExecutionOutcome(accepted=False) here, the manager
+    would record REJECTED and the position would be orphaned forever, with
+    nothing ever looking for it again."""
+
+    symbol_terminal.send_result = None
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        with pytest.raises(BrokerError):
+            adapter.submit(_intent())
+    finally:
+        gateway.stop()
+
+
+@pytest.mark.parametrize("retcode", sorted(RETCODE_REJECT_REASON))
+def test_every_mapped_retcode_produces_its_own_rejection_reason(
+    retcode: int, symbol_terminal: FakeTerminal
+) -> None:
+    """Exhaustive over the taxonomy, so a code added to the map without
+    handling here fails immediately."""
+
+    symbol_terminal.send_result = _send_result(retcode=retcode, volume=0.0, price=0.0)
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        outcome = adapter.submit(_intent())
+    finally:
+        gateway.stop()
+
+    assert outcome.accepted is False
+    assert outcome.reject_reason is RETCODE_REJECT_REASON[retcode]
+
+
+# --- reconcile() against the intent ledger ------------------------------
+
+
+class _FakeLedger:
+    """A ``ConfirmedIntentSource`` needing no real intent ledger."""
+
+    def __init__(self, payloads: Sequence[Mapping[str, Any]] = ()) -> None:
+        self._payloads = tuple(payloads)
+
+    def confirmed_intents(self) -> Sequence[Mapping[str, Any]]:
+        return self._payloads
+
+
+def _confirmed_payload(**overrides: object) -> Mapping[str, Any]:
+    payload: dict[str, Any] = {
+        "intent_id": "intent-1",
+        "strategy_id": "strat-1",
+        "book": "fx_scalp",
+        "instrument_id": "fx.eurusd",
+        "side": "BUY",
+        "quantity": "0.1",
+        "quantity_unit": "lots",
+        "stop_loss": "1.09700",
+        "venue_ref": {"venue": "mt5", "magic": 110042, "server_symbol": "EURUSD"},
+    }
+    payload.update(overrides)
+    return payload
+
+
+class _SinglePositionTerminal(FakeTerminal):
+    """One open position, magic 110042 -- inside fx_scalp's declared range."""
+
+    def positions(self) -> tuple[Mt5Position, ...]:
+        return (
+            Mt5Position(
+                ticket=1001,
+                magic=110042,
+                server_symbol="EURUSD",
+                volume=0.1,
+                price_open=1.10000,
+                sl=1.09500,
+                tp=1.11000,
+                is_buy=True,
+                opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+            ),
+        )
+
+
+def test_a_position_whose_magic_matches_a_confirmed_intent_is_reported_matched() -> None:
+    adapter, gateway = _adapter(
+        _SinglePositionTerminal(), ledger=_FakeLedger([_confirmed_payload()])
+    )
+    try:
+        report = adapter.reconcile("fx_scalp")
+    finally:
+        gateway.stop()
+
+    assert len(report.positions) == 1
+    assert report.unmatched_venue_refs == ()
+
+
+def test_a_position_with_no_matching_intent_stays_unmatched() -> None:
+    """A manually opened position, or one from another system sharing the
+    account. Adopting it would put a position we never sized under our own
+    risk accounting."""
+
+    adapter, gateway = _adapter(_SinglePositionTerminal(), ledger=_FakeLedger())
+    try:
+        report = adapter.reconcile("fx_scalp")
+    finally:
+        gateway.stop()
+
+    assert report.positions == ()
+    assert len(report.unmatched_venue_refs) == 1
+
+
+def test_a_matched_position_carries_the_stop_the_intent_recorded() -> None:
+    """initial_risk_distance is what every R-multiple derives from, and spec
+    8.2 says it is fixed at entry and never changes. Reading it from the live
+    position's current sl (1.09500, 0.00500 away) rather than the intent's
+    recorded one (1.09700, 0.00300 away) would silently redefine R the moment
+    that stop moved."""
+
+    adapter, gateway = _adapter(
+        _SinglePositionTerminal(),
+        ledger=_FakeLedger([_confirmed_payload(stop_loss="1.09700")]),
+    )
+    try:
+        report = adapter.reconcile("fx_scalp")
+    finally:
+        gateway.stop()
+
+    assert report.positions[0].initial_risk_distance == Decimal("0.00300")
