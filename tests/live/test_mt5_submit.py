@@ -34,7 +34,7 @@ import pytest
 from pydantic import JsonValue
 
 from trading_house.brokers.mt5.boundary import TerminalPort
-from trading_house.brokers.mt5.gateway import Mt5Gateway
+from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.brokers.mt5.magic import derive_magic
 from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
@@ -90,6 +90,26 @@ def _feed_still_live(adapter: Mt5BrokerAdapter) -> bool:
     if not second:
         return False
     return second[0].observed_at > first[0].observed_at
+
+
+def _autotrading_enabled(adapter: Mt5BrokerAdapter) -> bool:
+    """Re-probe the terminal's AutoTrading toggle over the connection this
+    test already holds open -- the same reason ``_feed_still_live`` reuses
+    ``adapter`` rather than a fresh ``_terminal()``: MetaTrader5 is one
+    global session per process, and a second initialize/shutdown cycle here
+    would tear down the very connection this test is about to send over.
+
+    A precondition, not a post-hoc classification of a rejection: retcode
+    10027 (``TRADE_RETCODE_CLIENT_DISABLES_AT``) is a *submission* reply
+    code, and ``order_check`` -- the only other read of trading permission
+    this boundary exposes -- does not share that vocabulary (see
+    ``retcodes.py``), so a precheck cannot be trusted to surface this. The
+    terminal's own AutoTrading toggle is the direct read -- not
+    ``account_info().trade_allowed``, which is a different, account-level
+    permission that stays true even while AutoTrading is off.
+    """
+
+    return adapter._gateway.call(Priority.MARKET_DATA, lambda t: t.autotrading_enabled())
 
 
 @pytest.fixture
@@ -156,6 +176,14 @@ def test_a_minimum_lot_position_opens_confirms_and_closes(
     # order against a feed it decided was live minutes earlier.
     if not _feed_still_live(adapter):
         pytest.skip("the market is closed: the broker clock is not advancing")
+
+    # A terminal with AutoTrading off is a valid demo terminal in a
+    # configuration where submit() cannot possibly succeed -- an
+    # environment precondition, the same class as an unreachable terminal
+    # or a closed market, not a code defect. Re-probed here rather than
+    # trusted from collection, for the same reason as the feed check above.
+    if not _autotrading_enabled(adapter):
+        pytest.skip("AutoTrading is disabled in the terminal; the write path cannot be proven")
 
     # The demo guard runs inside Mt5Gateway.start(); this is its record.
     # This test must never be the thing that discovers the gateway failed

@@ -58,6 +58,14 @@ class Mt5Terminal:
         account = mt5.account_info()
         return -1 if account is None else int(account.trade_mode)
 
+    def autotrading_enabled(self) -> bool:
+        # terminal_info().trade_allowed is the AutoTrading toolbar toggle;
+        # account_info().trade_allowed is a different, account-level
+        # permission that reads True even while AutoTrading is off, and
+        # would not have caught the condition this method exists for.
+        info = mt5.terminal_info()
+        return False if info is None else bool(info.trade_allowed)
+
     def server_utc_offset_seconds(self) -> int:
         offset = establish_utc_offset(
             self._probe_tick_time, lambda: datetime.now(UTC).timestamp(), time.sleep

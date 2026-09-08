@@ -26,6 +26,7 @@ EXPECTED_PORT_METHODS = {
     "initialize",
     "shutdown",
     "account_trade_mode",
+    "autotrading_enabled",
     "terminal_connected",
     "server_utc_offset_seconds",
     "symbol_info",

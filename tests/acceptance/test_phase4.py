@@ -34,6 +34,26 @@ def test_the_manager_cannot_resend() -> None:
 
     source = (EXECUTION / "manager.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
+
+    # Recursion: a function calling itself by name (``self.submit(...)``
+    # from inside ``submit``, or a bare recursive call to any other
+    # function's own name) sends the venue once per level, from a single
+    # call site, inside no loop -- the one shape neither check below is
+    # built to see.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            calls_itself = (isinstance(inner.func, ast.Name) and inner.func.id == node.name) or (
+                isinstance(inner.func, ast.Attribute)
+                and isinstance(inner.func.value, ast.Name)
+                and inner.func.value.id == "self"
+                and inner.func.attr == node.name
+            )
+            assert not calls_itself, f"{node.name} calls itself recursively"
+
     sends = [
         node
         for node in ast.walk(tree)
