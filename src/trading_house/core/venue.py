@@ -140,6 +140,22 @@ class DealRecord:
     dealt_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PositionRecord:
+    """A neutral, execution-owned shape for one open broker position.
+
+    Deal history and open positions answer different questions, and only the
+    second one survives a broker that lost or never wrote the deal: a position
+    that exists is proof the order happened. Same reason as ``DealRecord`` for
+    it living here rather than in ``brokers/``.
+    """
+
+    magic: int
+    server_symbol: str
+    volume: Decimal
+    position_ticket: int
+
+
 class RecoveryAction(str, Enum):  # noqa: UP042
     """The only three responses to a venue rejection.
 

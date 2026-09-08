@@ -339,31 +339,41 @@ crash-recovery path are different code, and only one of them would ever be
 exercised routinely.
 
 **The gate runs on every order-placing command.** `require_clean_ledger`
-(I-20) refuses whenever the ledger holds any non-terminal intent — naming it
-— before `order submit` or `order status` do anything else, including
-touching the venue. `order reconcile` is the one exception: it is the
-command that clears the unresolved condition, and gating it would deadlock
-the system against itself.
+(I-20) first runs the reconciler over every non-terminal intent, then refuses
+if any of them survives that — naming it — before `order submit` builds an
+intent or sends anything. So a restart self-heals rather than waiting for an
+operator to type `order reconcile`, and it still fails closed on whatever the
+sweep could not resolve. `order reconcile` and the read-only `order status`
+are ungated: the first is what clears the condition, and gating a diagnostic
+would make it refuse exactly when an intent is stuck.
 
 ### Commands
 
 ```bash
-uv run trading-house order submit --intent-id ... --proposal-id ... --strategy-id ... \
-  --book fx_scalp --instrument fx.eurusd --side BUY --quantity 0.01 --stop-loss 1.0950
+uv run trading-house order submit --intent-id ... --strategy-id ... \
+  --book fx_scalp --instrument fx.eurusd --side BUY --decision approved-decision.json
 uv run trading-house order reconcile
 uv run trading-house order status --intent-id ...
 ```
 
-- **`order submit`** builds one `OrderIntent`, stamps its venue magic from
-  the signed binding, and calls `OrderManager.submit()`. Refuses first if any
-  earlier intent is unresolved (I-20).
-- **`order reconcile`** resolves every non-terminal intent against the
-  venue's own deal history and writes back CONFIRMED, FAILED, or leaves it
-  STILL_UNKNOWN. The only order command that does **not** gate on
-  `require_clean_ledger` — it is what clears the gate for everything else.
-- **`order status`** reports one intent's full ledger history. Gated like
-  `order submit`: a status report is not trustworthy while an earlier intent
-  is still unresolved either.
+- **`order submit`** reads a serialised `ApprovedRiskDecision` (or
+  `ResizedRiskDecision`) from `--decision`, builds one `OrderIntent` from its
+  `approved_quantity` and `stop_loss_price`, stamps the venue magic from the
+  signed binding, and calls `OrderManager.submit()`. There is deliberately no
+  `--quantity` and no `--stop-loss`: size and stop are Phase 3's output, and
+  free parameters would put every risk gate — `max_spread_fraction_of_stop`
+  included — outside the path of the only command that can trade. A REJECTED
+  decision is refused. Two guards run before anything is sent: a PostgreSQL
+  advisory lock, so two invocations serialise instead of both reading a clean
+  ledger, and the gate (I-20).
+- **`order reconcile`** resolves every non-terminal intent against the venue's
+  own deal history **and its open positions**, writing back CONFIRMED (at the
+  volume actually filled, which a partial fill makes smaller than the one
+  requested), FAILED, or leaving it STILL_UNKNOWN and marking gateway state
+  stale. Ungated — it is what clears the gate for everything else.
+- **`order status`** reports one intent's full ledger history. Ungated: it is
+  read-only, and it is the command an operator needs most at exactly the
+  moment an intent is stuck.
 
 ## Operator commands
 

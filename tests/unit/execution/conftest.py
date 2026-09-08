@@ -15,7 +15,14 @@ from typing import Any
 
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
-from trading_house.core.venue import DealRecord, ExecutionOutcome, Mt5VenueRef, RejectReason, Venue
+from trading_house.core.venue import (
+    DealRecord,
+    ExecutionOutcome,
+    Mt5VenueRef,
+    PositionRecord,
+    RejectReason,
+    Venue,
+)
 from trading_house.execution.ledger import NON_TERMINAL_STATES, IntentEvent
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
@@ -183,8 +190,13 @@ class RecordingLedger:
 
 
 class FakeDeals:
-    """A ``DealSource`` double: a fixed set of deals and a fixed terminal
-    health, so reconciliation tests control both without a broker.
+    """A ``DealSource`` double: fixed deals, fixed open positions and a fixed
+    terminal health, so reconciliation tests control all three without a
+    broker.
+
+    ``deals`` and ``positions`` may each be ``None``, which is the real port's
+    way of saying "I could not read this" -- distinct from an empty tuple,
+    and the whole point of the distinction.
 
     ``ledger`` and ``intent_id`` are optional: when given, ``deals_since``
     records ``ledger.current_state(intent_id)`` into ``observed_states`` at
@@ -196,22 +208,27 @@ class FakeDeals:
     def __init__(
         self,
         *,
-        deals: tuple[DealRecord, ...] = (),
+        deals: tuple[DealRecord, ...] | None = (),
+        positions: tuple[PositionRecord, ...] | None = (),
         healthy: bool = True,
         ledger: RecordingLedger | None = None,
         intent_id: str | None = None,
     ) -> None:
         self.deals = deals
+        self.positions = positions
         self.healthy = healthy
         self._ledger = ledger
         self._intent_id = intent_id
         self.observed_states: list[IntentState | None] = []
 
-    def deals_since(self, start: datetime) -> tuple[DealRecord, ...]:
+    def deals_since(self, start: datetime) -> tuple[DealRecord, ...] | None:
         ledger, intent_id = self._ledger, self._intent_id
         if ledger is not None and intent_id is not None:
             self.observed_states.append(ledger.current_state(intent_id))
         return self.deals
+
+    def positions_now(self) -> tuple[PositionRecord, ...] | None:
+        return self.positions
 
     def terminal_healthy(self) -> bool:
         return self.healthy

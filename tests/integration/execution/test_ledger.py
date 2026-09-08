@@ -12,9 +12,14 @@ import pytest
 from alembic import command
 from pydantic import SecretStr
 
+from trading_house.core.errors import ConcurrentSubmissionError, IntentAlreadySubmittedError
 from trading_house.core.values import IntentState
 from trading_house.database.connection import open_runtime_connection
-from trading_house.execution.ledger import PostgresIntentLedger
+from trading_house.execution.ledger import (
+    ConnectionFactory,
+    PostgresIntentLedger,
+    submission_lock,
+)
 
 if TYPE_CHECKING:
     from ...conftest import DatabaseHarness
@@ -183,3 +188,90 @@ def test_the_trigger_rejects_a_delete_from_a_role_with_the_privilege(
                 cursor.execute("DELETE FROM execution.intent_events WHERE intent_id = 'i-1'")
             assert exc_info.value.sqlstate == "P0001"
         connection.rollback()
+
+
+# --- one SUBMITTING per intent, enforced by the database (I-6) ---------------
+
+
+def _factory(database: DatabaseHarness) -> ConnectionFactory:
+    return lambda: open_runtime_connection(SecretStr(database.runtime_dsn))
+
+
+def test_the_database_refuses_a_second_submitting_row_for_one_intent(
+    database: DatabaseHarness,
+) -> None:
+    """The TOCTOU the application cannot close. ``OrderManager.submit`` reads
+    the ledger and then writes to it; two invocations a millisecond apart both
+    read "no events" and both insert SUBMITTING, and one approved decision
+    becomes two positions. The window is between two statements, so only the
+    database can refuse it -- this asserts the raw INSERT is rejected, not
+    that our own code chose not to issue it."""
+
+    insert = (
+        "INSERT INTO execution.intent_events (intent_id, state, event_time, payload) "
+        "VALUES ('i-race', 'SUBMITTING', %s, '{}'::jsonb)"
+    )
+    with open_runtime_connection(SecretStr(database.runtime_dsn)) as connection:
+        connection.execute(insert, (NOW,))
+        connection.commit()
+        with pytest.raises(psycopg.errors.UniqueViolation) as exc_info:
+            connection.execute(insert, (NOW,))
+        assert exc_info.value.sqlstate == "23505"
+        connection.rollback()
+
+
+def test_the_ledger_reports_a_refused_duplicate_as_an_already_submitted_intent(
+    ledger: PostgresIntentLedger,
+) -> None:
+    """The constraint above, surfaced as the typed error the CLI already maps
+    to an exit code rather than as a raw driver failure."""
+
+    ledger.append("i-race", IntentState.SUBMITTING, NOW, {})
+
+    with pytest.raises(IntentAlreadySubmittedError):
+        ledger.append("i-race", IntentState.SUBMITTING, NOW, {})
+
+
+def test_an_intent_may_still_pass_through_every_other_state(
+    ledger: PostgresIntentLedger,
+) -> None:
+    """Guard the guard: the index is partial for a reason. An intent
+    legitimately accumulates rows after SUBMITTING, and a plain unique index
+    on intent_id would turn the ledger into a single-row table."""
+
+    ledger.append("i-1", IntentState.SUBMITTING, NOW, {})
+    ledger.append("i-1", IntentState.UNKNOWN, NOW, {})
+    ledger.append("i-1", IntentState.RECONCILING, NOW, {})
+    ledger.append("i-1", IntentState.CONFIRMED, NOW, {})
+
+    assert len(ledger.events_for("i-1")) == 4
+
+
+# --- the submission lock (I-6) ----------------------------------------------
+
+
+def test_a_second_submission_cannot_hold_the_lock(database: DatabaseHarness) -> None:
+    """The other half of the race: two *different* intents, both passing a
+    clean gate, both sending. The unique index says nothing about that case;
+    the advisory lock is what makes the two invocations serialise."""
+
+    factory = _factory(database)
+
+    with (
+        submission_lock(factory),
+        pytest.raises(ConcurrentSubmissionError),
+        submission_lock(factory),
+    ):
+        pytest.fail("a second invocation must not hold the submission lock")
+
+
+def test_the_lock_is_released_when_the_sequence_ends(database: DatabaseHarness) -> None:
+    """Guard the guard: a lock that were never released would refuse every
+    subsequent order for the life of the database."""
+
+    factory = _factory(database)
+
+    with submission_lock(factory):
+        pass
+    with submission_lock(factory):
+        pass  # must not raise

@@ -35,7 +35,14 @@ from trading_house.core.errors import BrokerError, BrokerUnavailableError, Confi
 from trading_house.core.instruments import FillPolicy, InstrumentContract
 from trading_house.core.schemas import OrderIntent, PositionState, Side
 from trading_house.core.values import BookId, InstrumentId, PositiveQuantity, Price, QuantityUnit
-from trading_house.core.venue import DealRecord, ExecutionOutcome, PrecheckResult, Venue, VenueRef
+from trading_house.core.venue import (
+    DealRecord,
+    ExecutionOutcome,
+    PositionRecord,
+    PrecheckResult,
+    Venue,
+    VenueRef,
+)
 from trading_house.marketdata.models import Timeframe, duration
 
 _PROTECTION_GUARD = "protective-stop amendment is the next phase's position guard"
@@ -86,6 +93,21 @@ def _deviation_points(
 
     price_tolerance = reference_price * max_slippage_bps / _BPS_DIVISOR
     return int(price_tolerance / point_size)
+
+
+def _lots(quantity: PositiveQuantity) -> float:
+    """MT5's ``volume`` field is lots, always, whatever unit the intent used.
+
+    Sending ``float(amount)`` for a quantity denominated in shares or base
+    units would submit that number of *lots* -- ``--quantity 100
+    --quantity-unit shares`` becomes a hundred-lot order. Nothing downstream
+    can detect that, so it is refused here, at the one place every order
+    request is built.
+    """
+
+    if quantity.unit != "lots":
+        raise ConfigurationError()
+    return float(quantity.amount)
 
 
 def _tick_for(server_symbol: str, terminal: TerminalPort) -> Mt5Tick | None:
@@ -254,7 +276,7 @@ class Mt5BrokerAdapter:
         request: dict[str, object] = {
             "action": _TRADE_ACTION_DEAL,
             "symbol": server_symbol,
-            "volume": float(intent.quantity.amount),
+            "volume": _lots(intent.quantity),
             "type": _ORDER_TYPE_BUY if is_buy else _ORDER_TYPE_SELL,
             "price": tick.ask if is_buy else tick.bid,
             "sl": float(intent.stop_loss),
@@ -307,7 +329,7 @@ class Mt5BrokerAdapter:
         request: dict[str, object] = {
             "action": _TRADE_ACTION_DEAL,
             "symbol": venue_ref.server_symbol,
-            "volume": float(intent.quantity.amount),
+            "volume": _lots(intent.quantity),
             "type": _ORDER_TYPE_BUY if is_buy else _ORDER_TYPE_SELL,
             "price": reference_price,
             "sl": float(intent.stop_loss),
@@ -345,6 +367,8 @@ class Mt5BrokerAdapter:
         if ref.position_ticket is None:
             raise ConfigurationError()
         positions = self._gateway.call(Priority.ORDER, lambda t: t.positions())
+        if positions is None:
+            raise BrokerUnavailableError()
         position = next((p for p in positions if p.ticket == ref.position_ticket), None)
         if position is None:
             raise BrokerUnavailableError()
@@ -356,7 +380,7 @@ class Mt5BrokerAdapter:
         self._note_quote(tick.observed_at)
 
         close_is_buy = not position.is_buy
-        volume = float(quantity.amount) if quantity is not None else position.volume
+        volume = _lots(quantity) if quantity is not None else position.volume
         reference_price = tick.ask if close_is_buy else tick.bid
         request: dict[str, object] = {
             "action": _TRADE_ACTION_DEAL,
@@ -422,17 +446,23 @@ class Mt5BrokerAdapter:
             reject_reason=reject_reason_for(result.retcode),
         )
 
-    def deals_since(self, start: datetime) -> tuple[DealRecord, ...]:
-        """Every broker deal from ``start`` to now, as neutral ``DealRecord``s.
+    def deals_since(self, start: datetime) -> tuple[DealRecord, ...] | None:
+        """Every broker deal from ``start`` to now, as neutral ``DealRecord``s,
+        or ``None`` when the history could not be read at all.
 
         ``execution/`` may not import ``brokers/``, so this is where
         ``Mt5Deal`` crosses into the execution-owned ``DealRecord`` shape --
-        once, here, rather than at every caller.
+        once, here, rather than at every caller. The ``None`` is passed
+        through rather than flattened to ``()``: a failed history query that
+        looked like an empty one would let the reconciler call a live order
+        FAILED.
         """
 
         deals = self._gateway.call(
             Priority.RECONCILE, lambda t: t.history_deals(start, self._clock.now())
         )
+        if deals is None:
+            return None
         return tuple(
             DealRecord(
                 magic=deal.magic,
@@ -442,6 +472,28 @@ class Mt5BrokerAdapter:
                 dealt_at=deal.dealt_at,
             )
             for deal in deals
+        )
+
+    def positions_now(self) -> tuple[PositionRecord, ...] | None:
+        """Every open position as a neutral ``PositionRecord``, or ``None``
+        when the terminal could not be read.
+
+        The reconciler's second source of evidence, and the stronger one: a
+        deal can be missing from history for reasons that have nothing to do
+        with whether a position exists.
+        """
+
+        positions = self._gateway.call(Priority.RECONCILE, lambda t: t.positions())
+        if positions is None:
+            return None
+        return tuple(
+            PositionRecord(
+                magic=position.magic,
+                server_symbol=position.server_symbol,
+                volume=decimal_of(position.volume),
+                position_ticket=position.ticket,
+            )
+            for position in positions
         )
 
     def reconcile(self, book: BookId) -> ReconciliationReport:
@@ -483,6 +535,8 @@ class Mt5BrokerAdapter:
                     confirmed_by_magic[venue_ref["magic"]] = payload
 
         positions = self._gateway.call(Priority.RECONCILE, lambda t: t.positions())
+        if positions is None:
+            raise BrokerUnavailableError()
         matched: list[PositionState] = []
         unmatched: list[VenueRef] = []
         for position in positions:

@@ -17,6 +17,7 @@ class ExitCode(IntEnum):
     INSUFFICIENT_HISTORY = 11
     DUPLICATE_INTENT = 12
     UNRESOLVED_INTENTS = 13
+    CONCURRENT_SUBMISSION = 14
 
 
 class TradingHouseError(Exception):
@@ -133,3 +134,15 @@ class UnresolvedIntentsError(TradingHouseError):
         self.intent_ids = tuple(intent_ids)
         message = f"{self.public_message}: {', '.join(self.intent_ids)}"
         Exception.__init__(self, message)
+
+
+class ConcurrentSubmissionError(TradingHouseError):
+    """Raised when another invocation already holds the submission lock.
+
+    Two ``order submit`` runs a second apart would otherwise both read a
+    clean ledger and both send (I-6). Serialising them is the point; the
+    loser refuses rather than queueing, because by the time the lock frees
+    the ledger it read is stale anyway.
+    """
+
+    public_message = "another order submission is in progress"

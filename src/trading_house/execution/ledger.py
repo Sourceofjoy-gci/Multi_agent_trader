@@ -22,7 +22,8 @@ completed intent would block all further trading forever.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Never, Protocol
@@ -30,8 +31,19 @@ from typing import Any, Never, Protocol
 import psycopg
 from psycopg.types.json import Jsonb
 
-from trading_house.core.errors import DatabaseUnavailableError
+from trading_house.core.errors import (
+    ConcurrentSubmissionError,
+    DatabaseUnavailableError,
+    IntentAlreadySubmittedError,
+)
 from trading_house.core.values import IntentState
+
+# One fixed key for the whole submission sequence. Per-book keys would be
+# the obvious refinement, but the gate is global -- any unresolved intent
+# blocks every book -- so two invocations that could safely proceed in
+# parallel do not exist yet.
+# ponytail: one global lock; split per book when the gate stops being global.
+SUBMISSION_LOCK_KEY = 20260907
 
 NON_TERMINAL_STATES = frozenset(
     {IntentState.SUBMITTING, IntentState.UNKNOWN, IntentState.RECONCILING}
@@ -166,6 +178,11 @@ class PostgresIntentLedger:
                     ),
                 )
             connection.commit()
+        except psycopg.errors.UniqueViolation:
+            # Migration 0005: at most one SUBMITTING row per intent_id, so a
+            # second submission of the same intent is refused by the database
+            # rather than by a check the caller could race past.
+            raise IntentAlreadySubmittedError() from None
         finally:
             connection.close()
 
@@ -201,3 +218,38 @@ class PostgresIntentLedger:
         finally:
             connection.close()
         return tuple(row[0] for row in rows)
+
+
+@contextmanager
+def submission_lock(connection_factory: ConnectionFactory) -> Iterator[None]:
+    """Serialise the whole gate-then-submit sequence across processes.
+
+    The gate reads the ledger, the submission writes SUBMITTING and commits,
+    and only then does the order leave for the broker -- that commit is the
+    durability point and cannot be deferred, so there is no single
+    transaction spanning the sequence for ``pg_advisory_xact_lock`` to attach
+    to. A session-level lock, held on a connection kept open for the
+    duration, is the shape that fits: two invocations a second apart
+    serialise instead of both reading a clean ledger and both sending.
+
+    The loser refuses rather than waiting. By the time the lock frees, the
+    ledger state its gate would have been deciding on is stale anyway, and
+    an operator retry is a better answer than a queued order.
+    """
+
+    connection = connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_try_advisory_lock(%s)", (SUBMISSION_LOCK_KEY,))
+            row = cursor.fetchone()
+        connection.commit()
+        if row is None or not row[0]:
+            raise ConcurrentSubmissionError()
+        try:
+            yield
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s)", (SUBMISSION_LOCK_KEY,))
+            connection.commit()
+    finally:
+        connection.close()

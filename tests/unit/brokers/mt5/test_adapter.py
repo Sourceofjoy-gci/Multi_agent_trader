@@ -8,7 +8,12 @@ import pytest
 from tests.unit.brokers.mt5.conftest import FakeTerminal
 from trading_house.brokers.base import BrokerAdapter
 from trading_house.brokers.mt5.adapter import ConfirmedIntentSource, Mt5BrokerAdapter
-from trading_house.brokers.mt5.boundary import Mt5CheckResult, Mt5Position, Mt5SendResult
+from trading_house.brokers.mt5.boundary import (
+    Mt5CheckResult,
+    Mt5Deal,
+    Mt5Position,
+    Mt5SendResult,
+)
 from trading_house.brokers.mt5.gateway import Mt5Gateway
 from trading_house.brokers.mt5.magic import derive_magic
 from trading_house.brokers.mt5.retcodes import RETCODE_REJECT_REASON
@@ -17,7 +22,7 @@ from trading_house.core.clock import SystemClock
 from trading_house.core.errors import BrokerError, BrokerUnavailableError, ConfigurationError
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
-from trading_house.core.venue import Mt5VenueRef, RejectReason, Venue
+from trading_house.core.venue import Mt5VenueRef, PositionRecord, RejectReason, Venue
 from trading_house.marketdata.models import Timeframe
 
 _MAGIC_RANGE = (110000, 119999)  # fx_scalp's declared range, below
@@ -659,3 +664,107 @@ def test_a_matched_position_carries_the_stop_the_intent_recorded() -> None:
         gateway.stop()
 
     assert report.positions[0].initial_risk_distance == Decimal("0.00300")
+
+
+# --- the lot-size guard (I-6) ------------------------------------------------
+
+
+def test_submit_refuses_a_quantity_that_is_not_in_lots(symbol_terminal: FakeTerminal) -> None:
+    """MT5's ``volume`` field is lots, always. ``--quantity 100
+    --quantity-unit shares`` would otherwise send a hundred-lot order, and
+    nothing downstream could tell."""
+
+    symbol_terminal.send_result = _send_result()
+    adapter, gateway = _adapter(symbol_terminal)
+    try:
+        with pytest.raises(ConfigurationError):
+            adapter.submit(_intent(quantity=PositiveQuantity(amount=Decimal("100"), unit="shares")))
+    finally:
+        gateway.stop()
+
+    assert symbol_terminal.sent == [], "nothing may reach the venue on a refused unit"
+
+
+def test_close_refuses_a_quantity_that_is_not_in_lots() -> None:
+    """The same field on the same request: closing 100 "shares" would send a
+    hundred-lot close."""
+
+    adapter, gateway = _adapter(_SinglePositionTerminal())
+    try:
+        with pytest.raises(ConfigurationError):
+            adapter.close(
+                Mt5VenueRef(
+                    venue=Venue.MT5,
+                    magic=110042,
+                    server_symbol="EURUSD",
+                    position_ticket=1001,
+                ),
+                PositiveQuantity(amount=Decimal("100"), unit="shares"),
+            )
+    finally:
+        gateway.stop()
+
+
+# --- reads that failed are not reads that found nothing (C-2) ----------------
+
+
+def test_deals_since_reports_an_unreadable_history_as_none() -> None:
+    """``history_deals_get`` returns None on error, not on an empty window.
+    Flattening that to () tells the reconciler the order never happened."""
+
+    class _BlindTerminal(FakeTerminal):
+        def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal] | None:
+            return None
+
+    adapter, gateway = _adapter(_BlindTerminal())
+    try:
+        assert adapter.deals_since(datetime(2026, 8, 25, tzinfo=UTC)) is None
+    finally:
+        gateway.stop()
+
+
+def test_positions_now_reports_an_unreadable_terminal_as_none() -> None:
+    class _BlindTerminal(FakeTerminal):
+        def positions(self) -> Sequence[Mt5Position] | None:
+            return None
+
+    adapter, gateway = _adapter(_BlindTerminal())
+    try:
+        assert adapter.positions_now() is None
+    finally:
+        gateway.stop()
+
+
+def test_positions_now_maps_open_positions_to_neutral_records(
+    position_terminal: FakeTerminal,
+) -> None:
+    """The reconciler's second source of evidence, and ``execution/`` may not
+    import ``brokers/`` -- so ``Mt5Position`` crosses into ``PositionRecord``
+    here."""
+
+    adapter, gateway = _adapter(position_terminal)
+    try:
+        records = adapter.positions_now()
+    finally:
+        gateway.stop()
+
+    assert records is not None
+    assert records[0] == PositionRecord(
+        magic=110042, server_symbol="EURUSD", volume=Decimal("0.1"), position_ticket=1001
+    )
+
+
+def test_reconcile_refuses_when_positions_cannot_be_read() -> None:
+    """Reporting "no positions" from a failed read would empty
+    ``unmatched_venue_refs`` and declare the account clean."""
+
+    class _BlindTerminal(FakeTerminal):
+        def positions(self) -> Sequence[Mt5Position] | None:
+            return None
+
+    adapter, gateway = _adapter(_BlindTerminal())
+    try:
+        with pytest.raises(BrokerUnavailableError):
+            adapter.reconcile("fx_scalp")
+    finally:
+        gateway.stop()

@@ -42,6 +42,7 @@ from trading_house.core.errors import (
     AuditIntegrityError,
     BrokerError,
     BrokerUnavailableError,
+    ConcurrentSubmissionError,
     ConfigurationError,
     CoverageError,
     DatabaseUnavailableError,
@@ -56,18 +57,25 @@ from trading_house.core.errors import (
     TradingHouseError,
     UnresolvedIntentsError,
 )
-from trading_house.core.schemas import OrderIntent, Side
+from trading_house.core.schemas import (
+    RISK_DECISION_ADAPTER,
+    OrderIntent,
+    RejectedRiskDecision,
+    Side,
+)
 from trading_house.core.values import (
     BookId,
     IntentState,
-    PositiveQuantity,
-    QuantityUnit,
     TimeInForce,
 )
-from trading_house.core.venue import DealRecord, Mt5VenueRef, Venue
+from trading_house.core.venue import DealRecord, Mt5VenueRef, PositionRecord, Venue
 from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
-from trading_house.execution.ledger import PostgresIntentLedger
+from trading_house.execution.ledger import (
+    ConnectionFactory,
+    PostgresIntentLedger,
+    submission_lock,
+)
 from trading_house.execution.manager import OrderManager
 from trading_house.execution.reconciler import reconcile_all, require_clean_ledger
 from trading_house.marketdata.ingest import backfill, update
@@ -100,6 +108,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     InsufficientHistoryError: ExitCode.INSUFFICIENT_HISTORY,
     IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
     UnresolvedIntentsError: ExitCode.UNRESOLVED_INTENTS,
+    ConcurrentSubmissionError: ExitCode.CONCURRENT_SUBMISSION,
 }
 
 
@@ -643,9 +652,16 @@ def health(
     _run(operation)
 
 
-def _intent_ledger() -> PostgresIntentLedger:
+def _connection_factory() -> ConnectionFactory:
+    """One factory, shared by the ledger and the submission lock -- they must
+    reach the same database, and the lock is worthless if they do not."""
+
     settings = _settings()
-    return PostgresIntentLedger(lambda: open_runtime_connection(settings.database_dsn))
+    return lambda: open_runtime_connection(settings.database_dsn)
+
+
+def _intent_ledger() -> PostgresIntentLedger:
+    return PostgresIntentLedger(_connection_factory())
 
 
 @contextmanager
@@ -653,7 +669,7 @@ def _order_adapter(
     venue_binding: Path,
     venue_binding_signature: Path,
     venue_binding_public_key: Path,
-) -> Iterator[tuple[Mt5BrokerAdapter, VenueBinding, SystemClock]]:
+) -> Iterator[tuple[Mt5BrokerAdapter, Mt5Gateway, VenueBinding, SystemClock]]:
     """Build a live ``Mt5BrokerAdapter`` for one order command.
 
     Structured like ``_history_provider``: an absent or unreachable terminal
@@ -672,7 +688,7 @@ def _order_adapter(
     gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock)
     gateway.start()
     try:
-        yield Mt5BrokerAdapter(gateway, binding, clock=clock), binding, clock
+        yield Mt5BrokerAdapter(gateway, binding, clock=clock), gateway, binding, clock
     finally:
         gateway.stop()
 
@@ -685,8 +701,11 @@ class _AdapterDealSource:
 
     adapter: Mt5BrokerAdapter
 
-    def deals_since(self, start: datetime) -> Sequence[DealRecord]:
+    def deals_since(self, start: datetime) -> Sequence[DealRecord] | None:
         return self.adapter.deals_since(start)
+
+    def positions_now(self) -> Sequence[PositionRecord] | None:
+        return self.adapter.positions_now()
 
     def terminal_healthy(self) -> bool:
         return self.adapter.health().connected
@@ -695,15 +714,11 @@ class _AdapterDealSource:
 @order_app.command("submit")
 def order_submit(
     intent_id: Annotated[str, typer.Option("--intent-id")],
-    proposal_id: Annotated[str, typer.Option("--proposal-id")],
     strategy_id: Annotated[str, typer.Option("--strategy-id")],
     book: Annotated[str, typer.Option("--book")],
     instrument: Annotated[str, typer.Option("--instrument")],
     side: Annotated[Side, typer.Option("--side")],
-    quantity: Annotated[str, typer.Option("--quantity")],
-    stop_loss: Annotated[str, typer.Option("--stop-loss")],
-    take_profit: Annotated[str | None, typer.Option("--take-profit")] = None,
-    quantity_unit: Annotated[QuantityUnit, typer.Option("--quantity-unit")] = "lots",
+    decision: Annotated[Path, typer.Option("--decision")],
     time_in_force: Annotated[TimeInForce, typer.Option("--time-in-force")] = TimeInForce.GTC,
     max_slippage_bps: Annotated[str, typer.Option("--max-slippage-bps")] = "5",
     venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
@@ -714,22 +729,47 @@ def order_submit(
         Path, typer.Option("--venue-binding-public-key")
     ] = DEFAULT_PUBLIC_KEY,
 ) -> None:
-    """Submit one order intent to the venue.
+    """Turn one approved risk decision into a position.
 
-    Refuses before touching the venue at all while any earlier intent is
-    still unresolved (I-20) -- ``require_clean_ledger`` runs first, and the
-    intent is built and sent only once it has passed.
+    Size and stop come from the decision file, never from the command line.
+    Phase 3 produces a decision -- a lot size and a protective stop, both of
+    them the output of every risk gate including
+    ``max_spread_fraction_of_stop``; this command turns *that* into a
+    position. A ``--quantity``/``--stop-loss`` pair would be an order nothing
+    had ever risked, constructible by anyone who can reach the CLI.
+
+    Two guards run before anything is sent: the submission lock, so two
+    invocations serialise instead of both reading a clean ledger, and the
+    gate, which reconciles every unresolved intent and refuses if any
+    survives that (I-20).
     """
 
     def operation() -> dict[str, JsonValue]:
-        ledger = _intent_ledger()
-        require_clean_ledger(ledger)
+        # strict=False only here: JSON has no Decimal, so a serialised
+        # decision necessarily carries its money as strings. Every constraint
+        # on the model -- positive quantity, positive risk, the REJECTED
+        # variant pinned to zero -- still applies.
+        approved = RISK_DECISION_ADAPTER.validate_python(
+            json.loads(decision.read_text(encoding="utf-8")), strict=False
+        )
+        if isinstance(approved, RejectedRiskDecision):
+            # A rejected decision has no approved quantity and no stop. There
+            # is nothing here to submit, and inventing either would be the
+            # unrisked order this command exists to make impossible.
+            raise ConfigurationError()
 
-        with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
-            adapter,
-            binding,
-            clock,
+        factory = _connection_factory()
+        ledger = PostgresIntentLedger(factory)
+        with (
+            submission_lock(factory),
+            _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
+                adapter,
+                gateway,
+                binding,
+                clock,
+            ),
         ):
+            require_clean_ledger(ledger, _AdapterDealSource(adapter), clock, gateway.mark_stale)
             book_binding = binding.books.get(book)
             instrument_binding = binding.instruments.get(instrument)
             if book_binding is None or instrument_binding is None:
@@ -741,13 +781,13 @@ def order_submit(
             )
             intent = OrderIntent(
                 intent_id=intent_id,
-                proposal_id=proposal_id,
+                proposal_id=approved.proposal_id,
                 book=book,
                 instrument_id=instrument,
                 side=side,
-                quantity=PositiveQuantity(amount=Decimal(quantity), unit=quantity_unit),
-                stop_loss=Decimal(stop_loss),
-                take_profit=Decimal(take_profit) if take_profit is not None else None,
+                quantity=approved.approved_quantity,
+                stop_loss=approved.stop_loss_price,
+                take_profit=approved.take_profit_price,
                 time_in_force=time_in_force,
                 max_slippage_bps=Decimal(max_slippage_bps),
                 state=IntentState.SUBMITTING,
@@ -770,21 +810,22 @@ def order_reconcile(
         Path, typer.Option("--venue-binding-public-key")
     ] = DEFAULT_PUBLIC_KEY,
 ) -> None:
-    """Resolve every unresolved intent against the venue's own deal history.
+    """Resolve every unresolved intent against the venue's own deal history
+    and open positions.
 
-    The one order command that does NOT run ``require_clean_ledger`` first:
-    this is the command that clears the condition, and gating it would
-    deadlock the system against itself.
+    Ungated on purpose: this is the command that clears the condition the
+    gate refuses on, and gating it would deadlock the system against itself.
     """
 
     def operation() -> dict[str, JsonValue]:
         ledger = _intent_ledger()
         with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
             adapter,
+            gateway,
             _binding,
             clock,
         ):
-            results = reconcile_all(ledger, _AdapterDealSource(adapter), clock)
+            results = reconcile_all(ledger, _AdapterDealSource(adapter), clock, gateway.mark_stale)
         return {
             "results": cast(
                 dict[str, JsonValue],
@@ -801,13 +842,13 @@ def order_status(
 ) -> None:
     """Report one intent's full ledger history.
 
-    Gated like every other order-placing command: an operator cannot trust
-    a status report while an earlier intent is still unresolved.
+    Deliberately ungated. Spec 6.1 gates order-*placing* commands; gating a
+    read-only diagnostic would make the one command that shows why an intent
+    is stuck refuse exactly when an intent is stuck.
     """
 
     def operation() -> dict[str, JsonValue]:
         ledger = _intent_ledger()
-        require_clean_ledger(ledger)
         events = ledger.events_for(intent_id)
         return {
             "intent_id": intent_id,
