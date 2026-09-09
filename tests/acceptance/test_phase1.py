@@ -9,7 +9,6 @@ proving those checks can still fail. They are deliberately not repeated here.
 
 from __future__ import annotations
 
-import inspect
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -32,14 +31,14 @@ from trading_house.core.venue import Mt5VenueRef, Venue
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Phase 4 filled in submit() and close(); Phase 5 fills in the last stubbed
-# method, amend_protection() -- the position guard. Nothing on the adapter's
-# surface unconditionally refuses any more, so this tuple is narrowed to
-# empty rather than deleted along with the test that parametrizes over it:
-# both stay, so a method stubbed back in with `raise NotImplementedError`
-# still gets caught here. What amend_protection's own implementation must
-# still never do -- close a position on its own initiative -- is pinned
-# below instead, since "refuses in this phase" no longer describes it.
-REFUSING_METHODS: tuple[str, ...] = ()
+# method, amend_protection(). Nothing on the adapter's surface refuses
+# unconditionally any more, so the REFUSING_METHODS tuple and the test that
+# parametrized over it are gone rather than emptied -- an empty parametrize
+# does not run its body once, it reports a skip, which reads as a passing
+# guard in the summary line while asserting nothing. A later phase that stubs
+# a method back out writes its own refusal test; it would have had to anyway,
+# since an empty tuple would have caught nothing. What amend_protection must
+# still never do -- close a position on its own initiative -- is pinned below.
 
 TERMINAL_MODULE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5" / "terminal.py"
 # terminal.py is the one real call, wrapping mt5.order_send(...). Every other
@@ -131,27 +130,13 @@ def test_the_terminal_module_is_where_order_send_actually_lives() -> None:
     assert "order_send" in TERMINAL_MODULE.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("method", REFUSING_METHODS)
-def test_every_mutating_method_refuses_in_this_phase(method: str) -> None:
-    """Pins the position guard: amending a protective stop is the next
-    phase's business, not this one's. The refusal happens before any
-    argument is examined, which is why this can be called with nothing
-    meaningful."""
-
-    bound = getattr(_adapter(), method)
-    arity = len(inspect.signature(bound).parameters)
-
-    with pytest.raises(NotImplementedError):
-        bound(*[cast(Any, None)] * arity)
-
-
 def test_amend_protection_never_closes_a_position_on_its_own_initiative() -> None:
-    """What replaces amend_protection in REFUSING_METHODS now that Phase 5
-    has implemented it: the guard protects, it does not trade (spec section
-    10). A ticket the terminal double below cannot find is refused as a
-    normal outcome, not escalated into a close() -- and it couldn't be: this
-    double exposes no send_order at all, so any attempt to act on the
-    position beyond refusing it would fail loudly, not silently."""
+    """What survives now that Phase 5 has implemented amend_protection: the
+    guard protects, it does not trade (spec section 10). A ticket the
+    terminal double below cannot find is refused as a normal outcome, not
+    escalated into a close() -- and it could not be: this double exposes no
+    send_order at all, so any attempt to act on the position beyond refusing
+    it would fail loudly, not silently."""
 
     gateway = Mt5Gateway(cast(Any, _StubTerminal()), clock=SystemClock())
     gateway.start()
