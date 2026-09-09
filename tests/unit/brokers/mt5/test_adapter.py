@@ -719,9 +719,20 @@ def test_a_widening_stop_is_refused_at_the_boundary() -> None:
     must refuse one handed to it directly -- otherwise a future caller, or a
     bug, could widen a live stop with nothing objecting. The layers must be
     tested separately: an earlier phase claimed enforcement by grant AND
-    trigger while only ever exercising the grant."""
+    trigger while only ever exercising the grant.
 
-    terminal = FakeTerminal(positions=[_position(ticket=7, sl=1.09700, is_buy=True)])
+    The fake is given a SUCCESSFUL send_result deliberately, not the
+    default None: if the widening check were ever deleted, the request
+    would still be built and sent, and a None result would raise
+    BrokerError -- making this test fail for an unrelated reason instead of
+    on its own assertions below. A successful result closes that inference
+    gap: were the check removed, ``outcome.accepted`` would be True and
+    ``terminal.sent`` non-empty, so this test can only pass because the
+    check refused the widen before anything was sent."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=_send_result()
+    )
     adapter, gateway = _adapter(terminal)
     try:
         outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09600"), None)
