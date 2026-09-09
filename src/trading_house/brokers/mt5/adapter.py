@@ -390,6 +390,17 @@ class Mt5BrokerAdapter:
         anything is sent to the broker. The two are tested independently, so
         neither can mask a hole in the other.
 
+        ``take_profit=None`` means *leave the position's existing take-profit
+        alone*, resolved from the position already read here -- it is not a
+        request to remove one, and there is deliberately no way to remove a
+        take-profit through this method, because the guard does not manage
+        take-profits at all. MT5's ``TRADE_ACTION_SLTP`` treats ``tp=0.0`` as
+        *remove the take-profit* (the same convention this codebase already
+        relies on for ``sl`` -- see ``position_record_of``), so resolving
+        ``None`` to the current TP, rather than passing it straight through
+        to ``sltp_request``, is what stops a routine stop tighten from
+        silently erasing a live position's exit target.
+
         A ``None`` result from the terminal is NOT a rejection -- same
         reasoning as ``submit()``: the modification may already have
         landed, and reporting ``ExecutionOutcome(accepted=False)`` here
@@ -407,21 +418,40 @@ class Mt5BrokerAdapter:
         if not _improves_on(position.sl, position.is_buy, stop_loss):
             return _refused(RejectReason.INVALID_STOPS)
 
-        request = sltp_request(position.server_symbol, position.ticket, stop_loss, take_profit)
+        # take_profit=None means leave the position's existing TP alone --
+        # the guard does not manage take-profits at all (see this method's
+        # docstring). Resolving it here, from the position already read
+        # above, is what keeps sltp_request's own None -> 0.0 reachable only
+        # when the position genuinely has none to preserve.
+        tp = take_profit if take_profit is not None else (
+            decimal_of(position.tp) if position.tp is not None else None
+        )
+        request = sltp_request(position.server_symbol, position.ticket, stop_loss, tp)
+        # TOCTOU ceiling: the broker-side sl read above can change between
+        # this read and the send below (MT5 offers no compare-and-swap), so
+        # a strictly-worse stop could in principle still land. Inherent, not
+        # retried or re-checked here.
         result = self._gateway.call(Priority.ORDER, lambda t: t.send_order(request))
         if result is None:
             raise BrokerError()
+        venue_ref = VenueRef(
+            venue=Venue.MT5,
+            magic=position.magic,
+            server_symbol=position.server_symbol,
+            position_ticket=position.ticket,
+            retcode=result.retcode,
+        )
         if result.retcode not in SUCCESS_RETCODES:
-            return _refused(reject_reason_for(result.retcode))
+            return ExecutionOutcome(
+                accepted=False,
+                venue_ref=venue_ref,
+                filled_quantity=None,
+                fill_price=None,
+                reject_reason=reject_reason_for(result.retcode),
+            )
         return ExecutionOutcome(
             accepted=True,
-            venue_ref=VenueRef(
-                venue=Venue.MT5,
-                magic=position.magic,
-                server_symbol=position.server_symbol,
-                position_ticket=position.ticket,
-                retcode=result.retcode,
-            ),
+            venue_ref=venue_ref,
             filled_quantity=None,
             fill_price=None,
             reject_reason=None,

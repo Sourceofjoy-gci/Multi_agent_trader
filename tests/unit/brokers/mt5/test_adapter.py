@@ -700,7 +700,7 @@ def _ref(*, position_ticket: int) -> Mt5VenueRef:
     )
 
 
-def _position(*, ticket: int, sl: float, is_buy: bool) -> Mt5Position:
+def _position(*, ticket: int, sl: float, is_buy: bool, tp: float | None = None) -> Mt5Position:
     return Mt5Position(
         ticket=ticket,
         magic=110042,
@@ -708,7 +708,7 @@ def _position(*, ticket: int, sl: float, is_buy: bool) -> Mt5Position:
         volume=0.1,
         price_open=1.10000,
         sl=sl,
-        tp=None,
+        tp=tp,
         is_buy=is_buy,
         opened_at=datetime(2026, 8, 25, tzinfo=UTC),
     )
@@ -792,6 +792,89 @@ def test_a_position_the_broker_does_not_have_is_refused() -> None:
         gateway.stop()
 
     assert not outcome.accepted
+
+
+def test_take_profit_none_preserves_the_positions_existing_take_profit() -> None:
+    """The guard does not manage take-profits at all, so ``take_profit=None``
+    means *leave it alone* -- it must never resolve to MT5's erase value
+    (``tp=0.0`` on a ``TRADE_ACTION_SLTP`` request removes the take-profit,
+    the same convention this codebase already relies on for ``sl`` at
+    ``adapter.py:137`` and ``terminal.py:156``). Every routine stop tighten
+    passes ``take_profit=None``, so getting this wrong destroys a live
+    position's take-profit on every call."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True, tp=1.10500)],
+        send_result=_send_result(),
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert terminal.sent[0]["tp"] == 1.10500
+
+
+def test_an_explicit_take_profit_is_sent_as_the_new_value() -> None:
+    """Passing an explicit ``take_profit`` still overrides the position's
+    current one, and still crosses the boundary as a float (MT5 returns
+    ``None`` with no useful error when ``tp`` arrives as an int)."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True, tp=1.10500)],
+        send_result=_send_result(),
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), Decimal("1.11000"))
+    finally:
+        gateway.stop()
+
+    request = terminal.sent[0]
+    assert isinstance(request["tp"], float)
+    assert request["tp"] == 1.11000
+
+
+def test_take_profit_none_with_no_existing_take_profit_sends_the_erase_value() -> None:
+    """When the position already has no take-profit, ``take_profit=None``
+    still resolves to MT5's erase value -- there is nothing to preserve, so
+    the erasure convention stays correct in the one case where it is not
+    actually erasing anything."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True, tp=None)],
+        send_result=_send_result(),
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert terminal.sent[0]["tp"] == 0.0
+
+
+def test_a_broker_rejection_carries_its_retcode_in_the_venue_ref() -> None:
+    """Per spec 5.2 there is no alerting -- the audit ledger's ``venue_ref``
+    is the only channel by which an operator learns why a restore failed.
+    Every other rejection path in this adapter preserves the retcode
+    (``_send``'s ``result_ref``); this one must too."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)],
+        send_result=_send_result(retcode=10018, volume=0.0, price=0.0),  # MARKET_CLOSED
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert not outcome.accepted
+    assert outcome.venue_ref is not None
+    assert outcome.venue_ref.retcode == 10018
+    assert outcome.venue_ref.position_ticket == 7
 
 
 # --- reads that failed are not reads that found nothing (C-2) ----------------

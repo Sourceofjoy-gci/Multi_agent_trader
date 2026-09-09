@@ -80,7 +80,15 @@ class BrokerAdapter(Protocol):
     def submit(self, intent: OrderIntent) -> ExecutionOutcome: ...
     def amend_protection(
         self, ref: VenueRef, stop_loss: Price, take_profit: Price | None
-    ) -> ExecutionOutcome: ...
+    ) -> ExecutionOutcome:
+        """Move a live position's protective stop, refusing to widen it.
+
+        ``take_profit=None`` means *leave the position's existing
+        take-profit alone* -- it is not a request to remove one. There is
+        deliberately no way to remove a take-profit through this method,
+        because nothing in this system ever needs to.
+        """
+
     def close(self, ref: VenueRef, quantity: PositiveQuantity | None) -> ExecutionOutcome: ...
     def reconcile(self, book: BookId) -> ReconciliationReport: ...
     def health(self) -> VenueHealth: ...

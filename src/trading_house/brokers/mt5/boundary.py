@@ -220,11 +220,18 @@ def sltp_request(
 ) -> dict[str, object]:
     """Build a ``TRADE_ACTION_SLTP`` request to move a live position's stop.
 
-    Two documented MT5 traps, both encoded here rather than left for a
+    Three documented MT5 traps, all encoded here rather than left for a
     caller to rediscover: ``position`` is required -- ``TRADE_ACTION_SLTP``
-    without it modifies nothing at all, silently -- and ``sl``/``tp`` must be
+    without it modifies nothing at all, silently; ``sl``/``tp`` must be
     genuine floats, since MT5 returns ``None`` with no useful error when
-    either arrives as an int.
+    either arrives as an int; and ``tp=0.0`` means *remove the take-profit*,
+    not *no take-profit given* -- there is no third value that means "leave
+    it alone". ``take_profit=None`` here therefore always resolves to the
+    erase value. It is the caller's job (``Mt5BrokerAdapter.amend_protection``)
+    to have already substituted the position's current TP before calling
+    this, when that is what "leave it alone" actually requires -- this
+    function does not read the position and cannot make that distinction
+    itself.
     """
 
     return {
