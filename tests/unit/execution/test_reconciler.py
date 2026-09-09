@@ -26,7 +26,7 @@ from tests.unit.execution.conftest import (
 from trading_house.core.clock import FixedClock
 from trading_house.core.errors import UnresolvedIntentsError
 from trading_house.core.values import IntentState
-from trading_house.core.venue import DealRecord, PositionRecord
+from trading_house.core.venue import DealEntry, DealRecord, PositionRecord
 from trading_house.execution.ledger import NON_TERMINAL_STATES
 from trading_house.execution.manager import OrderManager
 from trading_house.execution.reconciler import (
@@ -48,6 +48,7 @@ def _deal(**overrides: object) -> DealRecord:
         "volume": Decimal("0.25"),
         "position_ticket": 7,
         "dealt_at": BASE,
+        "entry": DealEntry.IN,
     }
     fields.update(overrides)
     return DealRecord(**fields)  # type: ignore[arg-type]
@@ -59,6 +60,10 @@ def _position(**overrides: object) -> PositionRecord:
         "server_symbol": "EURUSD",
         "volume": Decimal("0.25"),
         "position_ticket": 7,
+        "stop_loss": Decimal("1.09500"),
+        "open_price": Decimal("1.10000"),
+        "is_buy": True,
+        "opened_at": BASE,
     }
     fields.update(overrides)
     return PositionRecord(**fields)  # type: ignore[arg-type]

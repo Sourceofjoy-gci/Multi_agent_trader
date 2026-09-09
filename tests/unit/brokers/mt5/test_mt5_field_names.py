@@ -49,3 +49,15 @@ def test_order_send_result_has_no_position_field() -> None:
     depend on it being populated."""
 
     assert "position" not in dir(mt5.OrderSendResult)
+
+
+def test_the_deal_entry_constants_are_what_the_mapping_assumes() -> None:
+    """These four integers decide whether a deal opened or closed a position.
+    Reading them wrong makes every close look like an open, and the guard
+    would record a closed position as still live."""
+
+    assert (mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT) == (0, 1, 2)
+
+
+def test_a_deal_exposes_its_entry_direction() -> None:
+    assert "entry" in dir(mt5.TradeDeal)

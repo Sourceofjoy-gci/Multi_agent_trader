@@ -17,8 +17,6 @@ Three conversions carry real risk and are handled explicitly here:
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from trading_house.brokers.mt5.boundary import (
     SYMBOL_FILLING_FOK,
     SYMBOL_FILLING_IOC,
@@ -29,6 +27,9 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_MODE_LONGONLY,
     SYMBOL_TRADE_MODE_SHORTONLY,
     Mt5SymbolInfo,
+)
+from trading_house.brokers.mt5.boundary import (
+    decimal_of as decimal_of,  # re-exported: contracts.py is where callers import it from
 )
 from trading_house.core.errors import ConfigurationError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
@@ -45,12 +46,6 @@ _SHORT_TRADE_MODES = frozenset({SYMBOL_TRADE_MODE_FULL, SYMBOL_TRADE_MODE_SHORTO
 _RETURN_EXECUTION_MODES = frozenset(
     {SYMBOL_TRADE_EXECUTION_MARKET, SYMBOL_TRADE_EXECUTION_EXCHANGE}
 )
-
-
-def decimal_of(value: float) -> Decimal:
-    """Convert without binary artifacts. Never use ``Decimal(float)`` directly."""
-
-    return Decimal(str(value))
 
 
 def asset_class_for(instrument_id: str) -> AssetClass:

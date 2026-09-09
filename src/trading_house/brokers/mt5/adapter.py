@@ -24,7 +24,9 @@ from trading_house.brokers.mt5.boundary import (
     Mt5Position,
     Mt5Tick,
     TerminalPort,
+    deal_entry_of,
     mt5_timeframe_code,
+    position_record_of,
 )
 from trading_house.brokers.mt5.contracts import decimal_of, to_instrument_contract
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
@@ -470,6 +472,7 @@ class Mt5BrokerAdapter:
                 volume=decimal_of(deal.volume),
                 position_ticket=deal.position_ticket,
                 dealt_at=deal.dealt_at,
+                entry=deal_entry_of(deal.entry),
             )
             for deal in deals
         )
@@ -486,15 +489,7 @@ class Mt5BrokerAdapter:
         positions = self._gateway.call(Priority.RECONCILE, lambda t: t.positions())
         if positions is None:
             return None
-        return tuple(
-            PositionRecord(
-                magic=position.magic,
-                server_symbol=position.server_symbol,
-                volume=decimal_of(position.volume),
-                position_ticket=position.ticket,
-            )
-            for position in positions
-        )
+        return tuple(position_record_of(position) for position in positions)
 
     def reconcile(self, book: BookId) -> ReconciliationReport:
         """Match every venue position relevant to ``book`` against the intent

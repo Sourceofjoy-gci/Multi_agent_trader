@@ -750,7 +750,14 @@ def test_positions_now_maps_open_positions_to_neutral_records(
 
     assert records is not None
     assert records[0] == PositionRecord(
-        magic=110042, server_symbol="EURUSD", volume=Decimal("0.1"), position_ticket=1001
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=Decimal("0.1"),
+        position_ticket=1001,
+        stop_loss=Decimal("1.095"),
+        open_price=Decimal("1.1"),
+        is_buy=True,
+        opened_at=datetime(2026, 8, 25, tzinfo=UTC),
     )
 
 
