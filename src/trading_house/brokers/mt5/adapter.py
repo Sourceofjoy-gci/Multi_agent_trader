@@ -423,8 +423,10 @@ class Mt5BrokerAdapter:
         # docstring). Resolving it here, from the position already read
         # above, is what keeps sltp_request's own None -> 0.0 reachable only
         # when the position genuinely has none to preserve.
-        tp = take_profit if take_profit is not None else (
-            decimal_of(position.tp) if position.tp is not None else None
+        tp = (
+            take_profit
+            if take_profit is not None
+            else (decimal_of(position.tp) if position.tp is not None else None)
         )
         request = sltp_request(position.server_symbol, position.ticket, stop_loss, tp)
         # TOCTOU ceiling: the broker-side sl read above can change between
