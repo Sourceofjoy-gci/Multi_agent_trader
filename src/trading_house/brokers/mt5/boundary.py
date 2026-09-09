@@ -212,6 +212,30 @@ class Mt5CheckResult:
     comment: str
 
 
+@dataclass(frozen=True, slots=True)
+class Mt5SendResult:
+    retcode: int
+    order_ticket: int | None
+    position_ticket: int | None
+    deal_ticket: int | None
+    volume: float
+    price: float
+    comment: str
+
+
+@dataclass(frozen=True, slots=True)
+class Mt5Deal:
+    ticket: int
+    order_ticket: int
+    position_ticket: int
+    magic: int
+    server_symbol: str
+    volume: float
+    price: float
+    is_buy: bool
+    dealt_at: datetime
+
+
 @runtime_checkable
 class TerminalPort(Protocol):
     """Every MetaTrader 5 call the gateway makes. Nothing wider."""
@@ -219,6 +243,7 @@ class TerminalPort(Protocol):
     def initialize(self) -> bool: ...
     def shutdown(self) -> None: ...
     def account_trade_mode(self) -> int: ...
+    def autotrading_enabled(self) -> bool: ...
     def terminal_connected(self) -> bool: ...
     def server_utc_offset_seconds(self) -> int: ...
     def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None: ...
@@ -226,6 +251,11 @@ class TerminalPort(Protocol):
     def copy_rates_range(
         self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
     ) -> Sequence[Mt5Bar] | None: ...
-    def positions(self) -> Sequence[Mt5Position]: ...
+    # Both of these return None for "could not read", never for "nothing
+    # there": absence of evidence is not evidence of absence when what is
+    # at stake is whether a live position exists.
+    def positions(self) -> Sequence[Mt5Position] | None: ...
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None: ...
+    def send_order(self, request: Mapping[str, object]) -> Mt5SendResult | None: ...
+    def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal] | None: ...
     def last_error(self) -> tuple[int, str]: ...

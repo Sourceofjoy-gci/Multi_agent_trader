@@ -48,6 +48,12 @@ class RejectionReason(str, Enum):  # noqa: UP042
     SIDE_NOT_PERMITTED = "side_not_permitted"
     ASSET_CLASS_NOT_PERMITTED = "asset_class_not_permitted"
     SPREAD_EXCEEDS_CEILING = "spread_exceeds_ceiling"
+    # R-8: the ceiling above compares the CURRENT spread to the MEDIAN, so a
+    # zero median (a genuinely raw-spread account) disables it entirely. This
+    # gate never references the median -- it compares the current spread to
+    # the stop distance itself, which is never zero once a decision reaches
+    # this point.
+    SPREAD_EXCEEDS_STOP_FRACTION = "spread_exceeds_stop_fraction"
     # Covers an unusable tick timestamp in either direction: too old, or
     # stamped further ahead of the clock than max_clock_drift_ms allows.
     TICK_STALE = "tick_stale"
@@ -156,6 +162,14 @@ class RiskEngine:
             k_sigma=book.k_sigma,
             k_spread=book.k_spread,
         )
+
+        # R-8: the current tick spread, priced and compared directly against
+        # the stop distance -- never the median, which is the cost term's
+        # input, not this gate's. Must run after distance is known.
+        spread_price = tick_spread_points * contract.point_size
+        if spread_price * Decimal(100) > distance * book.max_spread_fraction_of_stop:
+            return self._reject(proposal, [RejectionReason.SPREAD_EXCEEDS_STOP_FRACTION], passed)
+        passed.append(RejectionReason.SPREAD_EXCEEDS_STOP_FRACTION)
 
         # Checked here rather than inside stop_price() so an unrepresentable
         # stop is a rejection the caller can read, not an exception to catch.

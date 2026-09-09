@@ -29,6 +29,7 @@ books:
     # out by its own round-trip cost.
     k_sigma: 1.2
     k_spread: 2.0
+    max_spread_fraction_of_stop: 25.0
     limits:
       horizon: scalp
       max_orders_per_minute: 15
@@ -47,6 +48,7 @@ books:
     max_gross_leverage: 5.0
     k_sigma: 2.5
     k_spread: 2.0
+    max_spread_fraction_of_stop: 25.0
     limits:
       horizon: swing
       max_overnight_positions: 6
@@ -65,6 +67,7 @@ books:
     max_gross_leverage: 3.0
     k_sigma: 2.5
     k_spread: 2.0
+    max_spread_fraction_of_stop: 25.0
     limits:
       horizon: swing
       max_overnight_positions: 4
@@ -83,6 +86,7 @@ books:
     max_gross_leverage: 20.0
     k_sigma: 2.5
     k_spread: 2.0
+    max_spread_fraction_of_stop: 25.0
     limits:
       horizon: swing
       max_overnight_positions: 2

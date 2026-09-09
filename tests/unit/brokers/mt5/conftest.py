@@ -19,7 +19,9 @@ from trading_house.brokers.mt5.boundary import (
     ACCOUNT_TRADE_MODE_DEMO,
     Mt5Bar,
     Mt5CheckResult,
+    Mt5Deal,
     Mt5Position,
+    Mt5SendResult,
     Mt5SymbolInfo,
     Mt5Tick,
 )
@@ -31,7 +33,12 @@ class FakeTerminal:
     """A TerminalPort that needs no MetaTrader 5 and no Windows."""
 
     def __init__(
-        self, *, trade_mode: int = ACCOUNT_TRADE_MODE_DEMO, initialises: bool = True
+        self,
+        *,
+        trade_mode: int = ACCOUNT_TRADE_MODE_DEMO,
+        initialises: bool = True,
+        send_result: Mt5SendResult | None = None,
+        deals: Sequence[Mt5Deal] = (),
     ) -> None:
         self.trade_mode = trade_mode
         self.initialises = initialises
@@ -39,6 +46,13 @@ class FakeTerminal:
         self.gate = threading.Event()
         self.gate.set()
         self.rate_requests: list[tuple[str, int, datetime, datetime]] = []
+        # send_result and deals are plain mutable attributes, not just
+        # constructor kwargs, so a test can configure them on an already
+        # -built fixture instance (e.g. ``symbol_terminal``) instead of
+        # subclassing just to thread one value through __init__.
+        self.send_result = send_result
+        self.deals = tuple(deals)
+        self.sent: list[Mapping[str, object]] = []
 
     def initialize(self) -> bool:
         return self.initialises
@@ -73,6 +87,13 @@ class FakeTerminal:
 
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None:
         return Mt5CheckResult(retcode=0, comment="Done")
+
+    def send_order(self, request: Mapping[str, object]) -> Mt5SendResult | None:
+        self.sent.append(request)
+        return self.send_result
+
+    def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal]:
+        return self.deals
 
     def last_error(self) -> tuple[int, str]:
         return 0, "ok"

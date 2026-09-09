@@ -29,7 +29,23 @@ from trading_house.core.errors import NonDemoAccountError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-REFUSING_METHODS = ("submit", "amend_protection", "close")
+# Phase 4 filled in submit() and close(); only amend_protection still refuses.
+# Amending a protective stop is the position guard, and belongs to the NEXT
+# phase -- this phase submits and closes, but never touches a stop or
+# take-profit on a position that is already open. Narrowing this tuple to
+# match what Phase 4 actually implemented, rather than deleting the test,
+# keeps it pinned: it must keep failing if stop modification ever lands here.
+REFUSING_METHODS = ("amend_protection",)
+
+TERMINAL_MODULE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5" / "terminal.py"
+# terminal.py is the one real call, wrapping mt5.order_send(...). Every other
+# module -- including boundary.py, whose TerminalPort Protocol method is named
+# send_order for exactly this reason -- must be free of the substring
+# entirely: an import guard elsewhere stops a module from *importing*
+# MetaTrader5, but says nothing about a module reaching into sys.modules for
+# an instance another module already imported, so this guard cannot lean on
+# that one and must check every file itself.
+ORDER_SEND_ALLOWED = frozenset({TERMINAL_MODULE})
 
 BINDING = parse_venue_binding(
     b"""
@@ -91,20 +107,32 @@ def _adapter() -> Mt5BrokerAdapter:
 
 
 def test_no_order_send_call_exists_anywhere_in_source() -> None:
-    """``order_send`` is the only MetaTrader 5 call that moves money.
+    """``order_send`` is the only MT5 call that moves money, and exactly one
+    module -- ``brokers/mt5/terminal.py`` -- may name it.
 
     A substring check rather than an AST walk, deliberately: this must fail
     even if the name appears in a comment, a string, or a getattr lookup.
     """
 
     for path in sorted((PROJECT_ROOT / "src").rglob("*.py")):
+        if path in ORDER_SEND_ALLOWED:
+            continue
         assert "order_send" not in path.read_text(encoding="utf-8"), path.name
+
+
+def test_the_terminal_module_is_where_order_send_actually_lives() -> None:
+    """Guard the guard: if order_send moves elsewhere, the exemption is stale."""
+
+    assert TERMINAL_MODULE.exists()
+    assert "order_send" in TERMINAL_MODULE.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("method", REFUSING_METHODS)
 def test_every_mutating_method_refuses_in_this_phase(method: str) -> None:
-    """The refusal happens before any argument is examined, which is why
-    these can be called with nothing meaningful."""
+    """Pins the position guard: amending a protective stop is the next
+    phase's business, not this one's. The refusal happens before any
+    argument is examined, which is why this can be called with nothing
+    meaningful."""
 
     bound = getattr(_adapter(), method)
     arity = len(inspect.signature(bound).parameters)

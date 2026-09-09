@@ -1,45 +1,113 @@
-"""The read-only half of BrokerAdapter, backed by the MetaTrader 5 gateway.
+"""``BrokerAdapter`` over the MetaTrader 5 gateway: reads, and now writes.
 
-Phase 1 sends no orders. ``submit``, ``amend_protection`` and ``close`` refuse
-until Phase 3, when the intent ledger exists to make a lost response
-recoverable. Symbol identity comes from the signed venue binding, never from a
-broker string, so a renamed symbol is a config change rather than a code one.
+Symbol identity comes from the signed venue binding, never from a broker
+string, so a renamed symbol is a config change rather than a code one.
 
-``reconcile`` cannot populate ``ReconciliationReport.positions`` in this
-phase either: ``PositionState`` requires ``strategy_id``, ``lifecycle``, the
-R-multiples and ``initial_risk_distance``, none of which are derivable from a
-raw MT5 position without the intent ledger that arrives in Phase 3. See
-``reconcile``'s docstring for what it reports instead.
+``submit`` and ``close`` arrived in Phase 4, alongside the intent ledger that
+makes a lost response recoverable (see ``submit``'s docstring). Amending
+protective stops is the position guard, and belongs to the next phase: this
+one submits and closes, but does not touch a stop or take-profit once a
+position is open.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
+from typing import Any, Protocol
 
 from trading_house.brokers.base import MarketSnapshot, Quote, ReconciliationReport, VenueHealth
-from trading_house.brokers.mt5.boundary import Mt5Bar, Mt5Tick, TerminalPort, mt5_timeframe_code
+from trading_house.brokers.mt5.boundary import (
+    Mt5Bar,
+    Mt5Position,
+    Mt5Tick,
+    TerminalPort,
+    mt5_timeframe_code,
+)
 from trading_house.brokers.mt5.contracts import decimal_of, to_instrument_contract
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
-from trading_house.brokers.mt5.retcodes import check_passed, reject_reason_for
+from trading_house.brokers.mt5.retcodes import SUCCESS_RETCODES, check_passed, reject_reason_for
 from trading_house.constitution.binding import VenueBinding
 from trading_house.core.clock import Clock
-from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
-from trading_house.core.instruments import InstrumentContract
-from trading_house.core.schemas import OrderIntent, Side
-from trading_house.core.values import BookId, InstrumentId, PositiveQuantity, Price
-from trading_house.core.venue import ExecutionOutcome, PrecheckResult, Venue, VenueRef
+from trading_house.core.errors import BrokerError, BrokerUnavailableError, ConfigurationError
+from trading_house.core.instruments import FillPolicy, InstrumentContract
+from trading_house.core.schemas import OrderIntent, PositionState, Side
+from trading_house.core.values import BookId, InstrumentId, PositiveQuantity, Price, QuantityUnit
+from trading_house.core.venue import (
+    DealRecord,
+    ExecutionOutcome,
+    PositionRecord,
+    PrecheckResult,
+    Venue,
+    VenueRef,
+)
 from trading_house.marketdata.models import Timeframe, duration
 
-_PHASE_3 = "order submission arrives in Phase 3 with the intent ledger"
+_PROTECTION_GUARD = "protective-stop amendment is the next phase's position guard"
 
 # MetaTrader 5's own enum values, mirrored so this module never needs to
 # import MetaTrader5 (only terminal.py may). ``order_check`` is a simulation
-# call, not a mutation, so Phase 1 is permitted to build this request.
+# call, not a mutation, so Phase 1 was permitted to build this request; the
+# same mirroring now covers the values a real submission needs too.
 _TRADE_ACTION_DEAL = 1  # MetaTrader5.TRADE_ACTION_DEAL
 _ORDER_TYPE_BUY = 0  # MetaTrader5.ORDER_TYPE_BUY
 _ORDER_TYPE_SELL = 1  # MetaTrader5.ORDER_TYPE_SELL
+_ORDER_FILLING_FOK = 0  # MetaTrader5.ORDER_FILLING_FOK
+_ORDER_FILLING_IOC = 1  # MetaTrader5.ORDER_FILLING_IOC
+_ORDER_FILLING_RETURN = 2  # MetaTrader5.ORDER_FILLING_RETURN
+
+_FILL_POLICY_TO_MT5 = {
+    FillPolicy.IOC: _ORDER_FILLING_IOC,
+    FillPolicy.FOK: _ORDER_FILLING_FOK,
+    FillPolicy.RETURN: _ORDER_FILLING_RETURN,
+}
+# Preference order for a market order (TRADE_ACTION_DEAL): IOC and FOK both
+# settle immediately; RETURN can leave a remainder working and exists mainly
+# for pending orders, so it is only picked when neither immediate policy is
+# on offer.
+_FILL_PREFERENCE = (FillPolicy.IOC, FillPolicy.FOK, FillPolicy.RETURN)
+
+_BPS_DIVISOR = Decimal(10_000)
+
+
+def _type_filling_for(supported: frozenset[FillPolicy]) -> int:
+    """The MT5 filling constant for the first preferred policy this broker
+    actually offers. ``InstrumentContract`` guarantees at least one, so the
+    fallback below is unreachable, not a real code path."""
+
+    for policy in _FILL_PREFERENCE:
+        if policy in supported:
+            return _FILL_POLICY_TO_MT5[policy]
+    raise ConfigurationError()
+
+
+def _deviation_points(
+    max_slippage_bps: Decimal, reference_price: Decimal, point_size: Decimal
+) -> int:
+    """Convert the neutral basis-points slippage tolerance into MT5's
+    ``deviation`` -- an integer count of points from ``reference_price``.
+    Truncating rather than rounding is the conservative direction: it never
+    grants more tolerance than the intent actually asked for."""
+
+    price_tolerance = reference_price * max_slippage_bps / _BPS_DIVISOR
+    return int(price_tolerance / point_size)
+
+
+def _lots(quantity: PositiveQuantity) -> float:
+    """MT5's ``volume`` field is lots, always, whatever unit the intent used.
+
+    Sending ``float(amount)`` for a quantity denominated in shares or base
+    units would submit that number of *lots* -- ``--quantity 100
+    --quantity-unit shares`` becomes a hundred-lot order. Nothing downstream
+    can detect that, so it is refused here, at the one place every order
+    request is built.
+    """
+
+    if quantity.unit != "lots":
+        raise ConfigurationError()
+    return float(quantity.amount)
 
 
 def _tick_for(server_symbol: str, terminal: TerminalPort) -> Mt5Tick | None:
@@ -49,15 +117,81 @@ def _tick_for(server_symbol: str, terminal: TerminalPort) -> Mt5Tick | None:
     return terminal.symbol_tick(server_symbol)
 
 
-class Mt5BrokerAdapter:
-    """Read-only BrokerAdapter over one MetaTrader 5 terminal."""
+class ConfirmedIntentSource(Protocol):
+    """The one thing ``reconcile`` needs from the intent ledger: every
+    CONFIRMED intent's SUBMITTING snapshot (see ``execution.manager``'s
+    ``_snapshot``). Structural, not an import of ``execution.ledger`` --
+    ``brokers/`` must not import ``execution/``.
+    """
 
-    def __init__(self, gateway: Mt5Gateway, binding: VenueBinding, *, clock: Clock) -> None:
+    def confirmed_intents(self) -> Sequence[Mapping[str, Any]]: ...
+
+
+def _position_state_from(payload: Mapping[str, Any], position: Mt5Position) -> PositionState:
+    """Build the matched ``PositionState`` from the intent's own SUBMITTING
+    snapshot plus the live venue position.
+
+    ``initial_risk_distance`` is taken from the intent's *recorded* stop, not
+    the position's current ``sl`` -- spec 8.2 fixes it at entry, and reading
+    it off a live stop would silently redefine R the moment that stop moved.
+    Excursion tracking (``r_multiple_open``, ``mae_r``, ``mfe_r``) is the next
+    phase's job, so all three are reported as 0.0 rather than invented.
+    """
+
+    open_price = decimal_of(position.price_open)
+    stop_loss = Decimal(payload["stop_loss"])
+    return PositionState(
+        intent_id=payload["intent_id"],
+        strategy_id=payload["strategy_id"],
+        book=payload["book"],
+        instrument_id=payload["instrument_id"],
+        side=Side(payload["side"]),
+        quantity=PositiveQuantity(
+            amount=Decimal(payload["quantity"]), unit=payload["quantity_unit"]
+        ),
+        open_price=open_price,
+        current_sl=decimal_of(position.sl),
+        current_tp=decimal_of(position.tp) if position.tp is not None else None,
+        opened_at_utc=position.opened_at,
+        lifecycle="OPEN_PROTECTED",
+        r_multiple_open=0.0,
+        mae_r=0.0,
+        mfe_r=0.0,
+        initial_risk_distance=abs(open_price - stop_loss),
+        venue_ref=VenueRef(
+            venue=Venue.MT5,
+            magic=position.magic,
+            server_symbol=position.server_symbol,
+            position_ticket=position.ticket,
+        ),
+    )
+
+
+class Mt5BrokerAdapter:
+    """``BrokerAdapter`` over one MetaTrader 5 terminal."""
+
+    def __init__(
+        self,
+        gateway: Mt5Gateway,
+        binding: VenueBinding,
+        *,
+        clock: Clock,
+        ledger: ConfirmedIntentSource | None = None,
+    ) -> None:
         self._gateway = gateway
         self._clock = clock
+        self._ledger = ledger
         self._server_symbols = {
             instrument_id: bound.server_symbol
             for instrument_id, bound in binding.instruments.items()
+        }
+        # The reverse of the map above, needed only to turn a raw venue
+        # position's server symbol back into our own instrument id when
+        # closing one -- ``close`` is handed a ``VenueRef``, which carries
+        # the server symbol, not the neutral id.
+        self._instrument_ids = {
+            server_symbol: instrument_id
+            for instrument_id, server_symbol in self._server_symbols.items()
         }
         self._magic_ranges = {book: bound.magic_range for book, bound in binding.books.items()}
         self._started_at = clock.now()
@@ -68,6 +202,12 @@ class Mt5BrokerAdapter:
         if server_symbol is None:
             raise ConfigurationError()
         return server_symbol
+
+    def _instrument_id_for(self, server_symbol: str) -> InstrumentId:
+        instrument_id = self._instrument_ids.get(server_symbol)
+        if instrument_id is None:
+            raise ConfigurationError()
+        return instrument_id
 
     def describe_instrument(self, instrument_id: InstrumentId) -> InstrumentContract:
         server_symbol = self._server_symbol_for(instrument_id)
@@ -136,7 +276,7 @@ class Mt5BrokerAdapter:
         request: dict[str, object] = {
             "action": _TRADE_ACTION_DEAL,
             "symbol": server_symbol,
-            "volume": float(intent.quantity.amount),
+            "volume": _lots(intent.quantity),
             "type": _ORDER_TYPE_BUY if is_buy else _ORDER_TYPE_SELL,
             "price": tick.ask if is_buy else tick.bid,
             "sl": float(intent.stop_loss),
@@ -150,29 +290,225 @@ class Mt5BrokerAdapter:
         return PrecheckResult(would_accept=False, reject_reason=reject_reason_for(result.retcode))
 
     def submit(self, intent: OrderIntent) -> ExecutionOutcome:
-        raise NotImplementedError(_PHASE_3)
+        """Send one order exactly once.
+
+        A ``None`` result from the terminal is NOT a rejection -- it means
+        the round trip to the broker library was lost, and the order may
+        have executed anyway. Reporting ``ExecutionOutcome(accepted=False)``
+        here would let the caller (``execution.manager.OrderManager``)
+        record REJECTED for a position that actually exists, and nothing
+        would ever go looking for it again. Raising ``BrokerError`` instead
+        leaves the intent UNKNOWN, which is exactly the state reconciliation
+        exists to resolve.
+
+        The position ticket is deliberately never read off the send result:
+        verified against the installed MetaTrader5 5.0.6147, its
+        ``OrderSendResult`` carries no ``position`` field at all, so
+        ``Mt5SendResult.position_ticket`` is structurally always ``None``. A
+        reader treating that ``None`` as "no position exists" would conclude
+        the opposite of the truth. The real position ticket comes from the
+        confirming deal, via ``deals_since`` and ``reconcile``, not from here.
+
+        ``intent.venue_ref`` is expected to already carry the magic and
+        server symbol -- stamped by the caller before submission -- and is
+        used as-is rather than derived a second time here.
+        """
+
+        venue_ref = intent.venue_ref
+        if venue_ref is None:
+            raise ConfigurationError()
+
+        contract = self.describe_instrument(intent.instrument_id)
+        tick = self._gateway.call(Priority.ORDER, lambda t: t.symbol_tick(venue_ref.server_symbol))
+        if tick is None:
+            raise BrokerUnavailableError()
+        self._note_quote(tick.observed_at)
+
+        is_buy = intent.side is Side.BUY
+        reference_price = tick.ask if is_buy else tick.bid
+        request: dict[str, object] = {
+            "action": _TRADE_ACTION_DEAL,
+            "symbol": venue_ref.server_symbol,
+            "volume": _lots(intent.quantity),
+            "type": _ORDER_TYPE_BUY if is_buy else _ORDER_TYPE_SELL,
+            "price": reference_price,
+            "sl": float(intent.stop_loss),
+            "tp": float(intent.take_profit) if intent.take_profit is not None else 0.0,
+            "magic": venue_ref.magic,
+            "deviation": _deviation_points(
+                intent.max_slippage_bps, decimal_of(reference_price), contract.point_size
+            ),
+            "type_filling": _type_filling_for(contract.supported_fills),
+        }
+        return self._send(
+            request,
+            magic=venue_ref.magic,
+            server_symbol=venue_ref.server_symbol,
+            fallback_unit=intent.quantity.unit,
+        )
 
     def amend_protection(
         self, ref: VenueRef, stop_loss: Price, take_profit: Price | None
     ) -> ExecutionOutcome:
-        raise NotImplementedError(_PHASE_3)
+        raise NotImplementedError(_PROTECTION_GUARD)
 
     def close(self, ref: VenueRef, quantity: PositiveQuantity | None) -> ExecutionOutcome:
-        raise NotImplementedError(_PHASE_3)
+        """Close all or part of one open position with an opposite-side deal.
+
+        MT5 has no dedicated close call: closing IS a deal, sent the same way
+        an opening one is, with ``position`` set to the ticket being closed
+        and the side reversed from what is *currently* open. ``VenueRef``
+        carries no side, so the position's current side and remaining volume
+        are read fresh from the terminal rather than assumed -- a ref minted
+        at submission time could otherwise go stale against a position
+        already partially closed elsewhere.
+        """
+
+        if ref.position_ticket is None:
+            raise ConfigurationError()
+        positions = self._gateway.call(Priority.ORDER, lambda t: t.positions())
+        if positions is None:
+            raise BrokerUnavailableError()
+        position = next((p for p in positions if p.ticket == ref.position_ticket), None)
+        if position is None:
+            raise BrokerUnavailableError()
+
+        contract = self.describe_instrument(self._instrument_id_for(position.server_symbol))
+        tick = self._gateway.call(Priority.ORDER, lambda t: t.symbol_tick(position.server_symbol))
+        if tick is None:
+            raise BrokerUnavailableError()
+        self._note_quote(tick.observed_at)
+
+        close_is_buy = not position.is_buy
+        volume = _lots(quantity) if quantity is not None else position.volume
+        reference_price = tick.ask if close_is_buy else tick.bid
+        request: dict[str, object] = {
+            "action": _TRADE_ACTION_DEAL,
+            "symbol": position.server_symbol,
+            "position": position.ticket,
+            "volume": volume,
+            "type": _ORDER_TYPE_BUY if close_is_buy else _ORDER_TYPE_SELL,
+            "price": reference_price,
+            "sl": 0.0,
+            "tp": 0.0,
+            "magic": position.magic,
+            "type_filling": _type_filling_for(contract.supported_fills),
+        }
+        return self._send(
+            request,
+            magic=position.magic,
+            server_symbol=position.server_symbol,
+            fallback_unit=quantity.unit if quantity is not None else "lots",
+        )
+
+    def _send(
+        self,
+        request: Mapping[str, object],
+        *,
+        magic: int,
+        server_symbol: str,
+        fallback_unit: QuantityUnit,
+    ) -> ExecutionOutcome:
+        """Shared submit/close tail: call the terminal once, and turn its
+        reply into a neutral outcome. Never returns a rejection for a
+        ``None`` result -- see ``submit``'s docstring."""
+
+        result = self._gateway.call(Priority.ORDER, lambda t: t.send_order(request))
+        if result is None:
+            raise BrokerError()
+
+        # Never Mt5SendResult.position_ticket (see submit's docstring): the
+        # confirming deal is the only trustworthy source, read later by
+        # reconcile(), not here.
+        result_ref = VenueRef(
+            venue=Venue.MT5,
+            magic=magic,
+            server_symbol=server_symbol,
+            order_ticket=result.order_ticket,
+            position_ticket=None,
+            retcode=result.retcode,
+        )
+        if result.retcode in SUCCESS_RETCODES:
+            return ExecutionOutcome(
+                accepted=True,
+                venue_ref=result_ref,
+                filled_quantity=PositiveQuantity(
+                    amount=decimal_of(result.volume), unit=fallback_unit
+                ),
+                fill_price=decimal_of(result.price),
+                reject_reason=None,
+            )
+        return ExecutionOutcome(
+            accepted=False,
+            venue_ref=result_ref,
+            filled_quantity=None,
+            fill_price=None,
+            reject_reason=reject_reason_for(result.retcode),
+        )
+
+    def deals_since(self, start: datetime) -> tuple[DealRecord, ...] | None:
+        """Every broker deal from ``start`` to now, as neutral ``DealRecord``s,
+        or ``None`` when the history could not be read at all.
+
+        ``execution/`` may not import ``brokers/``, so this is where
+        ``Mt5Deal`` crosses into the execution-owned ``DealRecord`` shape --
+        once, here, rather than at every caller. The ``None`` is passed
+        through rather than flattened to ``()``: a failed history query that
+        looked like an empty one would let the reconciler call a live order
+        FAILED.
+        """
+
+        deals = self._gateway.call(
+            Priority.RECONCILE, lambda t: t.history_deals(start, self._clock.now())
+        )
+        if deals is None:
+            return None
+        return tuple(
+            DealRecord(
+                magic=deal.magic,
+                server_symbol=deal.server_symbol,
+                volume=decimal_of(deal.volume),
+                position_ticket=deal.position_ticket,
+                dealt_at=deal.dealt_at,
+            )
+            for deal in deals
+        )
+
+    def positions_now(self) -> tuple[PositionRecord, ...] | None:
+        """Every open position as a neutral ``PositionRecord``, or ``None``
+        when the terminal could not be read.
+
+        The reconciler's second source of evidence, and the stronger one: a
+        deal can be missing from history for reasons that have nothing to do
+        with whether a position exists.
+        """
+
+        positions = self._gateway.call(Priority.RECONCILE, lambda t: t.positions())
+        if positions is None:
+            return None
+        return tuple(
+            PositionRecord(
+                magic=position.magic,
+                server_symbol=position.server_symbol,
+                volume=decimal_of(position.volume),
+                position_ticket=position.ticket,
+            )
+            for position in positions
+        )
 
     def reconcile(self, book: BookId) -> ReconciliationReport:
-        """Report every venue position relevant to ``book``, all unmatched.
+        """Match every venue position relevant to ``book`` against the intent
+        ledger, and report the rest as unmatched.
 
-        Phase 1 has no intent ledger, so none of the fields ``PositionState``
-        requires -- ``strategy_id``, ``lifecycle``, ``r_multiple_open``,
-        ``mae_r``, ``mfe_r``, ``initial_risk_distance`` -- are derivable from
-        a raw MT5 position. Inventing them would be the same mistake this
-        project refuses to make for a fabricated quote, so ``positions`` is
-        always empty here. Every position this call is responsible for is
-        reported in ``unmatched_venue_refs`` instead: an unmatched venue
-        position is exactly what that field means with no ledger to match
-        against. Phase 3's intent ledger is what turns an unmatched ref into
-        a matched ``PositionState``.
+        A position matches when its magic equals a CONFIRMED intent's magic.
+        The matched ``PositionState`` is built from that intent's own
+        SUBMITTING snapshot, never invented from the live position -- see
+        ``_position_state_from``. A position with no matching CONFIRMED
+        intent -- manually opened, or belonging to another system sharing
+        the account -- is reported in ``unmatched_venue_refs`` instead:
+        adopting it would put a position we never sized under our own risk
+        accounting. With no ``ledger`` supplied at all, every position is
+        unmatched, which is this method's original (Phase 1) behaviour.
 
         Scope: a position is this call's business when its magic falls
         inside ``book``'s declared range, or inside no declared range at all
@@ -191,25 +527,39 @@ class Mt5BrokerAdapter:
             if other_book != book
         ]
 
+        confirmed_by_magic: dict[int, Mapping[str, Any]] = {}
+        if self._ledger is not None:
+            for payload in self._ledger.confirmed_intents():
+                venue_ref = payload.get("venue_ref")
+                if venue_ref is not None:
+                    confirmed_by_magic[venue_ref["magic"]] = payload
+
         positions = self._gateway.call(Priority.RECONCILE, lambda t: t.positions())
+        if positions is None:
+            raise BrokerUnavailableError()
+        matched: list[PositionState] = []
         unmatched: list[VenueRef] = []
         for position in positions:
             if any(low <= position.magic <= high for low, high in other_ranges):
                 continue
-            unmatched.append(
-                VenueRef(
-                    venue=Venue.MT5,
-                    magic=position.magic,
-                    server_symbol=position.server_symbol,
-                    order_ticket=None,
-                    position_ticket=position.ticket,
-                    retcode=None,
+            matched_payload = confirmed_by_magic.get(position.magic)
+            if matched_payload is None:
+                unmatched.append(
+                    VenueRef(
+                        venue=Venue.MT5,
+                        magic=position.magic,
+                        server_symbol=position.server_symbol,
+                        order_ticket=None,
+                        position_ticket=position.ticket,
+                        retcode=None,
+                    )
                 )
-            )
+                continue
+            matched.append(_position_state_from(matched_payload, position))
 
         return ReconciliationReport(
             book=book,
-            positions=(),
+            positions=tuple(matched),
             unmatched_venue_refs=tuple(unmatched),
             reconciled_at=self._clock.now(),
         )

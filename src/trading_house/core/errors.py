@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from enum import IntEnum
 from typing import ClassVar
 
@@ -14,6 +15,9 @@ class ExitCode(IntEnum):
     ACCOUNT_MODE = 9
     COVERAGE = 10
     INSUFFICIENT_HISTORY = 11
+    DUPLICATE_INTENT = 12
+    UNRESOLVED_INTENTS = 13
+    CONCURRENT_SUBMISSION = 14
 
 
 class TradingHouseError(Exception):
@@ -79,6 +83,19 @@ class BrokerUnavailableError(TradingHouseError):
     public_message = "broker terminal unavailable"
 
 
+class BrokerError(TradingHouseError):
+    """Raised when a broker response leaves an order's outcome unknown.
+
+    A ``None`` result from an order-send call is never a rejection -- the
+    order may have executed with its confirmation lost in transit. Reporting
+    it as a rejection would let the caller record REJECTED for a position
+    that actually exists, and nothing would ever look for it again. Raising
+    keeps the intent in an unresolved state for reconciliation to settle.
+    """
+
+    public_message = "broker response unusable; order outcome unknown"
+
+
 class NonDemoAccountError(TradingHouseError):
     """Raised when the connected account is not a demo account."""
 
@@ -95,3 +112,37 @@ class InsufficientHistoryError(TradingHouseError):
     """Raised when a feature needs more history than the store holds."""
 
     public_message = "insufficient history to compute the feature"
+
+
+class IntentAlreadySubmittedError(TradingHouseError):
+    """Raised when ``submit()`` is called for an intent_id the ledger already
+    has events for. A genuine retry must mint a fresh intent_id (§3.6);
+    resubmitting the same one is exactly the resend that risks doubling a
+    position."""
+
+    public_message = "intent already submitted; retry requires a fresh intent_id"
+
+
+class UnresolvedIntentsError(TradingHouseError):
+    """Raised by the gate when the ledger holds intents still in a
+    non-terminal state (I-20). Names them: an operator who cannot see which
+    intent is stuck cannot clear it."""
+
+    public_message = "unresolved intents block further order submission"
+
+    def __init__(self, intent_ids: Sequence[str]) -> None:
+        self.intent_ids = tuple(intent_ids)
+        message = f"{self.public_message}: {', '.join(self.intent_ids)}"
+        Exception.__init__(self, message)
+
+
+class ConcurrentSubmissionError(TradingHouseError):
+    """Raised when another invocation already holds the submission lock.
+
+    Two ``order submit`` runs a second apart would otherwise both read a
+    clean ledger and both send (I-6). Serialising them is the point; the
+    loser refuses rather than queueing, because by the time the lock frees
+    the ledger it read is stale anyway.
+    """
+
+    public_message = "another order submission is in progress"

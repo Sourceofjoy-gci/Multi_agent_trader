@@ -16,7 +16,9 @@ import MetaTrader5 as mt5
 from trading_house.brokers.mt5.boundary import (
     Mt5Bar,
     Mt5CheckResult,
+    Mt5Deal,
     Mt5Position,
+    Mt5SendResult,
     Mt5SymbolInfo,
     Mt5Tick,
     establish_utc_offset,
@@ -55,6 +57,14 @@ class Mt5Terminal:
     def account_trade_mode(self) -> int:
         account = mt5.account_info()
         return -1 if account is None else int(account.trade_mode)
+
+    def autotrading_enabled(self) -> bool:
+        # terminal_info().trade_allowed is the AutoTrading toolbar toggle;
+        # account_info().trade_allowed is a different, account-level
+        # permission that reads True even while AutoTrading is off, and
+        # would not have caught the condition this method exists for.
+        info = mt5.terminal_info()
+        return False if info is None else bool(info.trade_allowed)
 
     def server_utc_offset_seconds(self) -> int:
         offset = establish_utc_offset(
@@ -130,10 +140,12 @@ class Mt5Terminal:
             for row in rates
         )
 
-    def positions(self) -> Sequence[Mt5Position]:
+    def positions(self) -> Sequence[Mt5Position] | None:
+        # None means "could not read", never "there are none" -- see
+        # history_deals below for why that distinction is load-bearing.
         raw = mt5.positions_get()
         if raw is None:
-            return ()
+            return None
         return tuple(
             Mt5Position(
                 ticket=int(p.ticket),
@@ -154,6 +166,49 @@ class Mt5Terminal:
         if result is None:
             return None
         return Mt5CheckResult(retcode=int(result.retcode), comment=str(result.comment))
+
+    def send_order(self, request: Mapping[str, object]) -> Mt5SendResult | None:
+        result = mt5.order_send(dict(request))
+        if result is None:
+            return None
+        return Mt5SendResult(
+            retcode=int(result.retcode),
+            order_ticket=int(result.order) or None,
+            position_ticket=int(getattr(result, "position", 0)) or None,
+            deal_ticket=int(result.deal) or None,
+            volume=float(result.volume),
+            price=float(result.price),
+            comment=str(result.comment),
+        )
+
+    def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal] | None:
+        """Deals in the window, or ``None`` when the history cannot be read.
+
+        ``history_deals_get`` returns ``None`` on *error*, not on an empty
+        window -- an empty window is an empty tuple. Flattening the two into
+        ``()`` makes a failed query indistinguishable from "the order never
+        happened", and the reconciler then reaches FAILED for an order that
+        is live at the broker. ``None`` here is what lets the caller treat
+        "I cannot see" as blindness rather than absence.
+        """
+
+        raw = mt5.history_deals_get(start, end)
+        if raw is None:
+            return None
+        return tuple(
+            Mt5Deal(
+                ticket=int(d.ticket),
+                order_ticket=int(d.order),
+                position_ticket=int(d.position_id),
+                magic=int(d.magic),
+                server_symbol=d.symbol,
+                volume=float(d.volume),
+                price=float(d.price),
+                is_buy=int(d.type) == 0,
+                dealt_at=self._to_utc(d.time),
+            )
+            for d in raw
+        )
 
     def last_error(self) -> tuple[int, str]:
         code, description = mt5.last_error()

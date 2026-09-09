@@ -313,6 +313,68 @@ realised risk is bounded above by the budget instead of straddling it
 (**I-19**) — reversing either rounding direction would let a position exceed
 the signed risk budget on roughly half of all trades.
 
+## Phase 4 — execution
+
+Phase 4 is the write path: an append-only intent ledger, an order manager
+that sends to the venue exactly once, a reconciler that resolves whatever a
+lost response left ambiguous, and the CLI commands that drive all three.
+
+**The durability point.** `IntentLedger.append()` commits to Postgres
+*before* `OrderManager.submit()` ever calls the venue — SUBMITTING is durable
+on disk before an order can possibly exist at the broker. MT5 carries no
+client order ID, so a timed-out send is genuinely ambiguous between "lost on
+the way out" (nothing happened) and "lost on the way back" (the order
+executed and the confirmation never arrived), and nothing in the response
+tells the two apart. Writing SUBMITTING first is what makes that intent
+findable afterwards regardless of which one occurred; a crash between the
+write and the send would otherwise leave a real broker position that nothing
+would ever go looking for.
+
+**`submit()` never reconciles.** A lost response is recorded as UNKNOWN and
+`submit()` returns — it does not retry, and it does not poll the venue to
+find out what happened. Resolving an UNKNOWN intent is `reconcile_all()`'s
+job, run either by `order reconcile` or by the same recovery path after a
+crash. Folding that into `submit()` would mean the resend path and the
+crash-recovery path are different code, and only one of them would ever be
+exercised routinely.
+
+**The gate runs on every order-placing command.** `require_clean_ledger`
+(I-20) first runs the reconciler over every non-terminal intent, then refuses
+if any of them survives that — naming it — before `order submit` builds an
+intent or sends anything. So a restart self-heals rather than waiting for an
+operator to type `order reconcile`, and it still fails closed on whatever the
+sweep could not resolve. `order reconcile` and the read-only `order status`
+are ungated: the first is what clears the condition, and gating a diagnostic
+would make it refuse exactly when an intent is stuck.
+
+### Commands
+
+```bash
+uv run trading-house order submit --intent-id ... --strategy-id ... \
+  --book fx_scalp --instrument fx.eurusd --side BUY --decision approved-decision.json
+uv run trading-house order reconcile
+uv run trading-house order status --intent-id ...
+```
+
+- **`order submit`** reads a serialised `ApprovedRiskDecision` (or
+  `ResizedRiskDecision`) from `--decision`, builds one `OrderIntent` from its
+  `approved_quantity` and `stop_loss_price`, stamps the venue magic from the
+  signed binding, and calls `OrderManager.submit()`. There is deliberately no
+  `--quantity` and no `--stop-loss`: size and stop are Phase 3's output, and
+  free parameters would put every risk gate — `max_spread_fraction_of_stop`
+  included — outside the path of the only command that can trade. A REJECTED
+  decision is refused. Two guards run before anything is sent: a PostgreSQL
+  advisory lock, so two invocations serialise instead of both reading a clean
+  ledger, and the gate (I-20).
+- **`order reconcile`** resolves every non-terminal intent against the venue's
+  own deal history **and its open positions**, writing back CONFIRMED (at the
+  volume actually filled, which a partial fill makes smaller than the one
+  requested), FAILED, or leaving it STILL_UNKNOWN and marking gateway state
+  stale. Ungated — it is what clears the gate for everything else.
+- **`order status`** reports one intent's full ledger history. Ungated: it is
+  read-only, and it is the command an operator needs most at exactly the
+  moment an intent is stuck.
+
 ## Operator commands
 
 ```bash
