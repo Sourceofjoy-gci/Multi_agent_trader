@@ -9,6 +9,8 @@ proving those checks can still fail. They are deliberately not repeated here.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -21,12 +23,20 @@ from trading_house.brokers.mt5.boundary import (
     ACCOUNT_TRADE_MODE_CONTEST,
     ACCOUNT_TRADE_MODE_DEMO,
     ACCOUNT_TRADE_MODE_REAL,
+    TRADE_ACTION_SLTP,
+    Mt5Position,
+    Mt5SendResult,
 )
 from trading_house.brokers.mt5.gateway import Mt5Gateway
 from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
 from trading_house.core.errors import NonDemoAccountError
 from trading_house.core.venue import Mt5VenueRef, Venue
+
+# Mirrored the same way adapter.py mirrors it (see that module's docstring):
+# this test needs to prove amend_protection never sends this action, and
+# adapter.py's own copy is private.
+_TRADE_ACTION_DEAL = 1  # MetaTrader5.TRADE_ACTION_DEAL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,24 +140,66 @@ def test_the_terminal_module_is_where_order_send_actually_lives() -> None:
     assert "order_send" in TERMINAL_MODULE.read_text(encoding="utf-8")
 
 
+class _TerminalWithAPosition(_StubTerminal):
+    """A double that actually has a position to amend, and records what
+    gets sent to it -- so a real amend can be exercised, not just the
+    not-found refusal (which a double with no ``send_order`` at all cannot
+    tell apart from a real close attempt: both would fail loudly the same
+    way)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[Mapping[str, object]] = []
+
+    def positions(self) -> tuple[Mt5Position, ...]:
+        return (
+            Mt5Position(
+                ticket=7,
+                magic=1,
+                server_symbol="EURUSD",
+                volume=0.1,
+                price_open=1.10000,
+                sl=1.09700,
+                tp=None,
+                is_buy=True,
+                opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+            ),
+        )
+
+    def send_order(self, request: Mapping[str, object]) -> Mt5SendResult:
+        self.sent.append(request)
+        return Mt5SendResult(
+            retcode=10009,
+            order_ticket=None,
+            position_ticket=None,
+            deal_ticket=1,
+            volume=0.1,
+            price=1.09800,
+            comment="Done",
+        )
+
+
 def test_amend_protection_never_closes_a_position_on_its_own_initiative() -> None:
     """What survives now that Phase 5 has implemented amend_protection: the
-    guard protects, it does not trade (spec section 10). A ticket the
-    terminal double below cannot find is refused as a normal outcome, not
-    escalated into a close() -- and it could not be: this double exposes no
-    send_order at all, so any attempt to act on the position beyond refusing
-    it would fail loudly, not silently."""
+    guard protects, it does not trade (spec section 10). Given a real
+    position to amend, the single request it sends is a TRADE_ACTION_SLTP,
+    never a TRADE_ACTION_DEAL (the action that opens or closes a position) --
+    so amending a stop cannot, itself, close the position out from under it."""
 
-    gateway = Mt5Gateway(cast(Any, _StubTerminal()), clock=SystemClock())
+    terminal = _TerminalWithAPosition()
+    gateway = Mt5Gateway(cast(Any, terminal), clock=SystemClock())
     gateway.start()
     try:
         ref = Mt5VenueRef(venue=Venue.MT5, magic=1, server_symbol="EURUSD", position_ticket=7)
         adapter = Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock())
-        outcome = adapter.amend_protection(ref, Decimal("1.0000"), None)
+        outcome = adapter.amend_protection(ref, Decimal("1.09800"), None)
     finally:
         gateway.stop()
 
-    assert outcome.accepted is False
+    assert outcome.accepted is True
+    assert len(terminal.sent) == 1
+    assert terminal.sent[0]["action"] == TRADE_ACTION_SLTP
+    assert all(request["action"] != _TRADE_ACTION_DEAL for request in terminal.sent)
 
 
 def test_the_adapter_still_presents_the_whole_venue_neutral_surface() -> None:
