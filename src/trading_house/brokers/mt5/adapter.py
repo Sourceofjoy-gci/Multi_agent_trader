@@ -26,9 +26,12 @@ from trading_house.brokers.mt5.boundary import (
     TerminalPort,
     deal_entry_of,
     mt5_timeframe_code,
-    position_record_of,
 )
-from trading_house.brokers.mt5.contracts import decimal_of, to_instrument_contract
+from trading_house.brokers.mt5.contracts import (
+    decimal_of,
+    position_record_of,
+    to_instrument_contract,
+)
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.brokers.mt5.retcodes import SUCCESS_RETCODES, check_passed, reject_reason_for
 from trading_house.constitution.binding import VenueBinding

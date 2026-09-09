@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 
@@ -19,7 +18,6 @@ from trading_house.brokers.mt5.boundary import (
     deal_entry_of,
     establish_utc_offset,
     mt5_timeframe_code,
-    position_record_of,
     server_time_to_utc,
     utc_offset_seconds,
 )
@@ -189,22 +187,6 @@ def test_deal_carries_the_fields_reconciliation_matches_on() -> None:
     )
 
 
-def _mt5_position(**overrides: object) -> Mt5Position:
-    fields: dict[str, object] = {
-        "ticket": 1001,
-        "magic": 110042,
-        "server_symbol": "EURUSD",
-        "volume": 0.1,
-        "price_open": 1.10000,
-        "sl": 1.09500,
-        "tp": 1.11000,
-        "is_buy": True,
-        "opened_at": datetime(2026, 8, 25, tzinfo=UTC),
-    }
-    fields.update(overrides)
-    return Mt5Position(**fields)  # type: ignore[arg-type]
-
-
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [(0, DealEntry.IN), (1, DealEntry.OUT), (2, DealEntry.INOUT), (3, DealEntry.OUT)],
@@ -223,15 +205,6 @@ def test_an_unknown_entry_code_is_refused_not_guessed() -> None:
 
     with pytest.raises(ConfigurationError):
         deal_entry_of(99)
-
-
-def test_a_zero_stop_becomes_none_not_zero() -> None:
-    """MT5 reports "no stop" as 0.0, which is also a valid price. Carrying the
-    zero through makes unprotected indistinguishable from protected-at-zero,
-    and telling those apart is the guard's entire job."""
-
-    assert position_record_of(_mt5_position(sl=0.0)).stop_loss is None
-    assert position_record_of(_mt5_position(sl=1.09700)).stop_loss == Decimal("1.09700")
 
 
 def test_boundary_module_does_not_import_metatrader5() -> None:

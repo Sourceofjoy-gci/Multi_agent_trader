@@ -17,6 +17,8 @@ Three conversions carry real risk and are handled explicitly here:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from trading_house.brokers.mt5.boundary import (
     SYMBOL_FILLING_FOK,
     SYMBOL_FILLING_IOC,
@@ -26,14 +28,26 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_MODE_FULL,
     SYMBOL_TRADE_MODE_LONGONLY,
     SYMBOL_TRADE_MODE_SHORTONLY,
+    Mt5Position,
     Mt5SymbolInfo,
-)
-from trading_house.brokers.mt5.boundary import (
-    decimal_of as decimal_of,  # re-exported: contracts.py is where callers import it from
 )
 from trading_house.core.errors import ConfigurationError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.values import AssetClass, InstrumentId
+from trading_house.core.venue import PositionRecord
+
+
+def decimal_of(value: float) -> Decimal:
+    """Convert without binary artifacts. Never use ``Decimal(float)`` directly.
+
+    MetaTrader 5 returns floats; the canonical contracts are Decimal. Every
+    conversion goes through this because ``Decimal(0.1)`` is
+    ``0.1000000000000000055511151231257827…``, and a silent artifact in
+    ``value_per_price_increment`` propagates straight into position sizing.
+    """
+
+    return Decimal(str(value))
+
 
 _PREFIX_ASSET_CLASS = {
     "fx": AssetClass.FX,
@@ -118,4 +132,25 @@ def to_instrument_contract(
         can_open_long=info.trade_mode in _LONG_TRADE_MODES,
         can_open_short=info.trade_mode in _SHORT_TRADE_MODES,
         supported_fills=fills,
+    )
+
+
+def position_record_of(position: Mt5Position) -> PositionRecord:
+    """Map one broker position into the neutral, execution-owned shape.
+
+    MT5 reports "no stop" as 0.0, which is also a syntactically valid price.
+    Carrying the zero through would make an unprotected position
+    indistinguishable from one protected at zero, so it becomes ``None``
+    here, once, rather than at every caller.
+    """
+
+    return PositionRecord(
+        magic=position.magic,
+        server_symbol=position.server_symbol,
+        volume=decimal_of(position.volume),
+        position_ticket=position.ticket,
+        stop_loss=decimal_of(position.sl) if position.sl != 0.0 else None,
+        open_price=decimal_of(position.price_open),
+        is_buy=position.is_buy,
+        opened_at=position.opened_at,
     )

@@ -1,4 +1,5 @@
 # tests/unit/brokers/mt5/test_contracts.py
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -13,11 +14,13 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_MODE_FULL,
     SYMBOL_TRADE_MODE_LONGONLY,
     SYMBOL_TRADE_MODE_SHORTONLY,
+    Mt5Position,
     Mt5SymbolInfo,
 )
 from trading_house.brokers.mt5.contracts import (
     asset_class_for,
     decimal_of,
+    position_record_of,
     supported_fills,
     to_instrument_contract,
 )
@@ -251,3 +254,28 @@ def test_currencies_map_from_base_and_profit() -> None:
 
     assert contract.base_currency == "XAU"
     assert contract.quote_currency == "USD"
+
+
+def _mt5_position(**overrides: object) -> Mt5Position:
+    fields: dict[str, object] = {
+        "ticket": 1001,
+        "magic": 110042,
+        "server_symbol": "EURUSD",
+        "volume": 0.1,
+        "price_open": 1.10000,
+        "sl": 1.09500,
+        "tp": 1.11000,
+        "is_buy": True,
+        "opened_at": datetime(2026, 8, 25, tzinfo=UTC),
+    }
+    fields.update(overrides)
+    return Mt5Position(**fields)  # type: ignore[arg-type]
+
+
+def test_a_zero_stop_becomes_none_not_zero() -> None:
+    """MT5 reports "no stop" as 0.0, which is also a valid price. Carrying the
+    zero through makes unprotected indistinguishable from protected-at-zero,
+    and telling those apart is the guard's entire job."""
+
+    assert position_record_of(_mt5_position(sl=0.0)).stop_loss is None
+    assert position_record_of(_mt5_position(sl=1.09700)).stop_loss == Decimal("1.09700")

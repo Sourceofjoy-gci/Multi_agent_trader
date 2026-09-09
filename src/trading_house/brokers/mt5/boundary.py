@@ -11,23 +11,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
-from trading_house.core.venue import DealEntry, PositionRecord
-
-
-def decimal_of(value: float) -> Decimal:
-    """Convert without binary artifacts. Never use ``Decimal(float)`` directly.
-
-    Lives here, not in ``contracts.py``, so this module's own mappers
-    (``position_record_of``) can use it without ``contracts.py`` importing
-    this module back -- ``contracts.py`` re-exports it for its own callers.
-    """
-
-    return Decimal(str(value))
-
+from trading_house.core.venue import DealEntry
 
 SYMBOL_TRADE_MODE_DISABLED = 0
 SYMBOL_TRADE_MODE_LONGONLY = 1
@@ -265,27 +252,6 @@ def deal_entry_of(raw: int) -> DealEntry:
     if entry is None:
         raise ConfigurationError()
     return entry
-
-
-def position_record_of(position: Mt5Position) -> PositionRecord:
-    """Map one broker position into the neutral, execution-owned shape.
-
-    MT5 reports "no stop" as 0.0, which is also a syntactically valid price.
-    Carrying the zero through would make an unprotected position
-    indistinguishable from one protected at zero, so it becomes ``None``
-    here, once, rather than at every caller.
-    """
-
-    return PositionRecord(
-        magic=position.magic,
-        server_symbol=position.server_symbol,
-        volume=decimal_of(position.volume),
-        position_ticket=position.ticket,
-        stop_loss=decimal_of(position.sl) if position.sl != 0.0 else None,
-        open_price=decimal_of(position.price_open),
-        is_buy=position.is_buy,
-        opened_at=position.opened_at,
-    )
 
 
 @runtime_checkable
