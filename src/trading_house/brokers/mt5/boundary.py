@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
@@ -33,6 +34,13 @@ SYMBOL_TRADE_EXECUTION_EXCHANGE = 3
 ACCOUNT_TRADE_MODE_DEMO = 0
 ACCOUNT_TRADE_MODE_CONTEST = 1
 ACCOUNT_TRADE_MODE_REAL = 2
+
+# The position guard's one action: modify a live position's SL/TP in place.
+# Mirrored here, not in adapter.py, so the request it builds -- position
+# ticket required, sl/tp coerced to float -- lives next to the position
+# shape it reads, per the same reasoning as every other constant in this
+# module (see the module docstring).
+TRADE_ACTION_SLTP = 6  # MetaTrader5.TRADE_ACTION_SLTP
 
 
 MAX_PLAUSIBLE_OFFSET_SECONDS = 14 * 3600
@@ -205,6 +213,27 @@ class Mt5Position:
     tp: float | None
     is_buy: bool
     opened_at: datetime
+
+
+def sltp_request(
+    server_symbol: str, position_ticket: int, stop_loss: Decimal, take_profit: Decimal | None
+) -> dict[str, object]:
+    """Build a ``TRADE_ACTION_SLTP`` request to move a live position's stop.
+
+    Two documented MT5 traps, both encoded here rather than left for a
+    caller to rediscover: ``position`` is required -- ``TRADE_ACTION_SLTP``
+    without it modifies nothing at all, silently -- and ``sl``/``tp`` must be
+    genuine floats, since MT5 returns ``None`` with no useful error when
+    either arrives as an int.
+    """
+
+    return {
+        "action": TRADE_ACTION_SLTP,
+        "symbol": server_symbol,
+        "position": int(position_ticket),
+        "sl": float(stop_loss),
+        "tp": float(take_profit) if take_profit is not None else 0.0,
+    }
 
 
 @dataclass(frozen=True, slots=True)

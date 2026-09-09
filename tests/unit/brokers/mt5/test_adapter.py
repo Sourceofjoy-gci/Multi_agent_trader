@@ -9,6 +9,7 @@ from tests.unit.brokers.mt5.conftest import FakeTerminal
 from trading_house.brokers.base import BrokerAdapter
 from trading_house.brokers.mt5.adapter import ConfirmedIntentSource, Mt5BrokerAdapter
 from trading_house.brokers.mt5.boundary import (
+    TRADE_ACTION_SLTP,
     Mt5CheckResult,
     Mt5Deal,
     Mt5Position,
@@ -37,8 +38,6 @@ instruments:
   fx.eurusd: {server_symbol: "EURUSD"}
 """
 )
-
-REF = Mt5VenueRef(venue=Venue.MT5, magic=110042, server_symbol="EURUSD")
 
 _INTENT_KWARGS = {
     "intent_id": "intent-1",
@@ -88,19 +87,6 @@ def test_adapter_satisfies_the_broker_protocol(symbol_terminal: FakeTerminal) ->
     adapter, gateway = _adapter(symbol_terminal)
     try:
         assert isinstance(adapter, BrokerAdapter)
-    finally:
-        gateway.stop()
-
-
-def test_amend_protection_still_refuses_in_this_phase(symbol_terminal: FakeTerminal) -> None:
-    """submit() and close() arrived in Phase 4. Amending a protective stop is
-    the position guard and belongs to the next phase -- this one must never
-    touch a stop or take-profit on a position already open."""
-
-    adapter, gateway = _adapter(symbol_terminal)
-    try:
-        with pytest.raises(NotImplementedError, match="next phase"):
-            adapter.amend_protection(REF, Decimal("1.0900"), None)
     finally:
         gateway.stop()
 
@@ -703,6 +689,109 @@ def test_close_refuses_a_quantity_that_is_not_in_lots() -> None:
             )
     finally:
         gateway.stop()
+
+
+# --- amend_protection(): the outer of the two layers enforcing I-8 (D-3) ----
+
+
+def _ref(*, position_ticket: int) -> Mt5VenueRef:
+    return Mt5VenueRef(
+        venue=Venue.MT5, magic=110042, server_symbol="EURUSD", position_ticket=position_ticket
+    )
+
+
+def _position(*, ticket: int, sl: float, is_buy: bool) -> Mt5Position:
+    return Mt5Position(
+        ticket=ticket,
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=0.1,
+        price_open=1.10000,
+        sl=sl,
+        tp=None,
+        is_buy=is_buy,
+        opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+    )
+
+
+def test_a_widening_stop_is_refused_at_the_boundary() -> None:
+    """The SECOND enforcement layer. decide() cannot emit a widening, but this
+    must refuse one handed to it directly -- otherwise a future caller, or a
+    bug, could widen a live stop with nothing objecting. The layers must be
+    tested separately: an earlier phase claimed enforcement by grant AND
+    trigger while only ever exercising the grant."""
+
+    terminal = FakeTerminal(positions=[_position(ticket=7, sl=1.09700, is_buy=True)])
+    adapter, gateway = _adapter(terminal)
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09600"), None)
+    finally:
+        gateway.stop()
+
+    assert not outcome.accepted
+    assert terminal.sent == []  # nothing was even attempted
+
+
+def test_a_tightening_stop_is_sent() -> None:
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=_send_result()
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert outcome.accepted
+    assert terminal.sent[0]["position"] == 7
+
+
+def test_the_request_carries_float_prices_and_the_position_ticket() -> None:
+    """MT5 returns None with no useful error when sl or tp is an int, and
+    TRADE_ACTION_SLTP without a `position` modifies nothing at all. Both are
+    documented traps."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=_send_result()
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    request = terminal.sent[0]
+    assert isinstance(request["sl"], float)
+    assert isinstance(request["tp"], float)
+    assert request["position"] == 7
+    assert request["action"] == TRADE_ACTION_SLTP
+
+
+def test_a_none_result_raises_rather_than_reporting_a_rejection() -> None:
+    """Same rule as submit: a None result may mean the modification landed, so
+    reporting a rejection would record a stop as unchanged when it moved."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=None
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        with pytest.raises(BrokerError):
+            adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+
+def test_a_position_the_broker_does_not_have_is_refused() -> None:
+    """Amending a ticket that no longer exists must not be reported as done."""
+
+    adapter, gateway = _adapter(FakeTerminal(positions=[]))
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert not outcome.accepted
 
 
 # --- reads that failed are not reads that found nothing (C-2) ----------------

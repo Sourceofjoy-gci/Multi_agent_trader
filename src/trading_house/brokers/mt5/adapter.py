@@ -4,10 +4,10 @@ Symbol identity comes from the signed venue binding, never from a broker
 string, so a renamed symbol is a config change rather than a code one.
 
 ``submit`` and ``close`` arrived in Phase 4, alongside the intent ledger that
-makes a lost response recoverable (see ``submit``'s docstring). Amending
-protective stops is the position guard, and belongs to the next phase: this
-one submits and closes, but does not touch a stop or take-profit once a
-position is open.
+makes a lost response recoverable (see ``submit``'s docstring). ``amend_protection``
+is the position guard's outer enforcement layer (Phase 5, D-3): it refuses any
+stop that would widen against the position's current broker-side one, before
+anything reaches the terminal.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from trading_house.brokers.mt5.boundary import (
     TerminalPort,
     deal_entry_of,
     mt5_timeframe_code,
+    sltp_request,
 )
 from trading_house.brokers.mt5.contracts import (
     decimal_of,
@@ -45,12 +46,11 @@ from trading_house.core.venue import (
     ExecutionOutcome,
     PositionRecord,
     PrecheckResult,
+    RejectReason,
     Venue,
     VenueRef,
 )
 from trading_house.marketdata.models import Timeframe, duration
-
-_PROTECTION_GUARD = "protective-stop amendment is the next phase's position guard"
 
 # MetaTrader 5's own enum values, mirrored so this module never needs to
 # import MetaTrader5 (only terminal.py may). ``order_check`` is a simulation
@@ -120,6 +120,32 @@ def _tick_for(server_symbol: str, terminal: TerminalPort) -> Mt5Tick | None:
     instead of closing over a loop variable."""
 
     return terminal.symbol_tick(server_symbol)
+
+
+def _improves_on(current_sl: float, is_buy: bool, new_stop: Decimal) -> bool:
+    """Whether ``new_stop`` moves a position's protection toward profit.
+
+    MT5 reports "no stop" as 0.0 (see ``position_record_of``); any real stop
+    is strictly an improvement over none. Otherwise a BUY's stop may only
+    rise and a SELL's may only fall -- equal counts as no improvement
+    either, so retrying the position's own current stop is refused rather
+    than sent. This is the outer of the two layers enforcing I-8's
+    stop-widening prohibition (D-3): the inner one is ``decide()``, which
+    must never emit a widening in the first place.
+    """
+
+    if current_sl == 0.0:
+        return True
+    current = decimal_of(current_sl)
+    return new_stop > current if is_buy else new_stop < current
+
+
+def _refused(reason: RejectReason) -> ExecutionOutcome:
+    """An outcome that never reached the broker -- refused at this boundary."""
+
+    return ExecutionOutcome(
+        accepted=False, venue_ref=None, filled_quantity=None, fill_price=None, reject_reason=reason
+    )
 
 
 class ConfirmedIntentSource(Protocol):
@@ -355,7 +381,51 @@ class Mt5BrokerAdapter:
     def amend_protection(
         self, ref: VenueRef, stop_loss: Price, take_profit: Price | None
     ) -> ExecutionOutcome:
-        raise NotImplementedError(_PROTECTION_GUARD)
+        """Move a live position's protective stop, refusing to widen it.
+
+        The outer of the two layers enforcing I-8's stop-widening
+        prohibition (D-3): ``decide()`` is the inner one and must never emit
+        a widening in the first place, but this layer refuses one handed to
+        it directly -- by a future caller, or by a bug upstream -- before
+        anything is sent to the broker. The two are tested independently, so
+        neither can mask a hole in the other.
+
+        A ``None`` result from the terminal is NOT a rejection -- same
+        reasoning as ``submit()``: the modification may already have
+        landed, and reporting ``ExecutionOutcome(accepted=False)`` here
+        would record a stop as unchanged when it actually moved.
+        """
+
+        if ref.position_ticket is None:
+            raise ConfigurationError()
+        positions = self._gateway.call(Priority.ORDER, lambda t: t.positions())
+        if positions is None:
+            raise BrokerUnavailableError()
+        position = next((p for p in positions if p.ticket == ref.position_ticket), None)
+        if position is None:
+            return _refused(RejectReason.UNKNOWN)
+        if not _improves_on(position.sl, position.is_buy, stop_loss):
+            return _refused(RejectReason.INVALID_STOPS)
+
+        request = sltp_request(position.server_symbol, position.ticket, stop_loss, take_profit)
+        result = self._gateway.call(Priority.ORDER, lambda t: t.send_order(request))
+        if result is None:
+            raise BrokerError()
+        if result.retcode not in SUCCESS_RETCODES:
+            return _refused(reject_reason_for(result.retcode))
+        return ExecutionOutcome(
+            accepted=True,
+            venue_ref=VenueRef(
+                venue=Venue.MT5,
+                magic=position.magic,
+                server_symbol=position.server_symbol,
+                position_ticket=position.ticket,
+                retcode=result.retcode,
+            ),
+            filled_quantity=None,
+            fill_price=None,
+            reject_reason=None,
+        )
 
     def close(self, ref: VenueRef, quantity: PositiveQuantity | None) -> ExecutionOutcome:
         """Close all or part of one open position with an opposite-side deal.

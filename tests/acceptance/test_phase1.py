@@ -10,6 +10,7 @@ proving those checks can still fail. They are deliberately not repeated here.
 from __future__ import annotations
 
 import inspect
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,16 +27,19 @@ from trading_house.brokers.mt5.gateway import Mt5Gateway
 from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
 from trading_house.core.errors import NonDemoAccountError
+from trading_house.core.venue import Mt5VenueRef, Venue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Phase 4 filled in submit() and close(); only amend_protection still refuses.
-# Amending a protective stop is the position guard, and belongs to the NEXT
-# phase -- this phase submits and closes, but never touches a stop or
-# take-profit on a position that is already open. Narrowing this tuple to
-# match what Phase 4 actually implemented, rather than deleting the test,
-# keeps it pinned: it must keep failing if stop modification ever lands here.
-REFUSING_METHODS = ("amend_protection",)
+# Phase 4 filled in submit() and close(); Phase 5 fills in the last stubbed
+# method, amend_protection() -- the position guard. Nothing on the adapter's
+# surface unconditionally refuses any more, so this tuple is narrowed to
+# empty rather than deleted along with the test that parametrizes over it:
+# both stay, so a method stubbed back in with `raise NotImplementedError`
+# still gets caught here. What amend_protection's own implementation must
+# still never do -- close a position on its own initiative -- is pinned
+# below instead, since "refuses in this phase" no longer describes it.
+REFUSING_METHODS: tuple[str, ...] = ()
 
 TERMINAL_MODULE = PROJECT_ROOT / "src" / "trading_house" / "brokers" / "mt5" / "terminal.py"
 # terminal.py is the one real call, wrapping mt5.order_send(...). Every other
@@ -139,6 +143,26 @@ def test_every_mutating_method_refuses_in_this_phase(method: str) -> None:
 
     with pytest.raises(NotImplementedError):
         bound(*[cast(Any, None)] * arity)
+
+
+def test_amend_protection_never_closes_a_position_on_its_own_initiative() -> None:
+    """What replaces amend_protection in REFUSING_METHODS now that Phase 5
+    has implemented it: the guard protects, it does not trade (spec section
+    10). A ticket the terminal double below cannot find is refused as a
+    normal outcome, not escalated into a close() -- and it couldn't be: this
+    double exposes no send_order at all, so any attempt to act on the
+    position beyond refusing it would fail loudly, not silently."""
+
+    gateway = Mt5Gateway(cast(Any, _StubTerminal()), clock=SystemClock())
+    gateway.start()
+    try:
+        ref = Mt5VenueRef(venue=Venue.MT5, magic=1, server_symbol="EURUSD", position_ticket=7)
+        adapter = Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock())
+        outcome = adapter.amend_protection(ref, Decimal("1.0000"), None)
+    finally:
+        gateway.stop()
+
+    assert outcome.accepted is False
 
 
 def test_the_adapter_still_presents_the_whole_venue_neutral_surface() -> None:
