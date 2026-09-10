@@ -370,12 +370,15 @@ def test_a_recorded_position_the_broker_disowns_is_not_declared_closed() -> None
 def test_adopting_an_orphan_executes_before_it_escalates() -> None:
     """Spec 5.2's escalation ends with "stop attempting modifications" --
     escalating before adopting would leave the orphan naked, the opposite of
-    D-5's intent. The orphan already carries a broker-side stop, so decide()
-    adopts it as-is and marks escalate=True on the same GuardAction."""
+    D-5's intent. This orphan has no broker-side stop at all, so decide()
+    computes one at the default distance and a genuine write goes to the
+    venue -- the scenario that actually exercises the ordering, unlike an
+    orphan retaining its own stop, which (N1) is adopted without any amend at
+    all (see ``test_an_orphan_retaining_its_own_stop_is_adopted_without_a_redundant_amend``)."""
 
     order: list[str] = []
     store = RecordingPositionStore()  # empty: ticket 7 is unrecorded, an orphan
-    venue = FakeProtectionVenue(positions=[_observed(stop_loss=Decimal("1.09700"))])
+    venue = FakeProtectionVenue(positions=[_observed(stop_loss=None)])
     escalator = RecordingEscalator()
 
     real_amend = venue.amend_protection
@@ -396,10 +399,40 @@ def test_adopting_an_orphan_executes_before_it_escalates() -> None:
 
     report = _guard(venue, store, escalator=escalator).cycle()
 
-    assert venue.amended[0].stop_loss == Decimal("1.09700")
+    assert venue.amended[0].stop_loss == Decimal("1.09700")  # 1.10000 - 0.00300
     assert escalator.calls != []
     assert order == ["amend", "escalate"]
     assert report.escalated == 1
+
+
+def test_an_orphan_retaining_its_own_stop_is_adopted_without_a_redundant_amend() -> None:
+    """N1: this branch's target IS the broker's current stop already --
+    decide() copies ``observed.stop_loss`` verbatim (D-5, guard.py:73-79).
+    Sending that back to ``amend_protection`` asks the broker to change
+    nothing, and adapter.py's ``_improves_on`` (I-8) rightly refuses a no-op
+    -- reading that refusal as a failed write withheld the risk basis from a
+    stop that was never wrong, silently losing r_multiple_open/mae_r/mfe_r
+    for the position's entire life. The orphan is already protected at the
+    target, so this is success, not a refusal to interpret."""
+
+    store = RecordingPositionStore()  # empty: an orphan, but one with a stop
+    venue = FakeProtectionVenue(
+        positions=[_observed(stop_loss=Decimal("1.09700"))],
+        closing_price_result=Decimal("1.10150"),  # +0.5R once the basis exists
+    )
+    escalator = RecordingEscalator()
+    guard = _guard(venue, store, escalator=escalator)
+
+    guard.cycle()  # adopts; establishes the risk basis; escalates per D-5
+    guard.cycle()  # the extremum moves off 0.0 and forces a write
+
+    assert venue.amended == []  # no amend was ever sent
+    assert escalator.calls != []  # still escalated per D-5, just not via a write
+    row = store.latest(7)
+    assert row is not None
+    assert row["open_price"] == "1.10000"
+    assert row["initial_risk_distance"] == "0.00300"  # |1.10000 - 1.09700|
+    assert row["mfe_r"] == "0.5"
 
 
 def test_a_refused_adoption_does_not_fix_the_risk_basis_to_a_refused_stop() -> None:

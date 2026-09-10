@@ -325,19 +325,34 @@ class PositionGuard:
         # and action.stop_loss are always present together with an acting
         # kind -- the `and` guards below are for mypy, not a real fallback.
         if action.kind in _ACTING_KINDS and observed is not None and action.stop_loss is not None:
-            acted = True
-            ref = Mt5VenueRef(
-                venue=Venue.MT5,
-                magic=observed.magic,
-                server_symbol=observed.server_symbol,
-                position_ticket=ticket,
-            )
-            take_profit = _decimal_or_none(record.get("take_profit")) if record else None
-            outcome = self._venue.amend_protection(ref, action.stop_loss, take_profit)
-            amend_succeeded = outcome.accepted
-            if action.kind is ActionKind.RESTORE_STOP:
-                failed = self._failed_restores.get(ticket, 0)
-                self._failed_restores[ticket] = 0 if amend_succeeded else failed + 1
+            if action.stop_loss == observed.stop_loss:
+                # The target already IS the broker's current stop -- only
+                # reachable via ADOPT_ORPHAN's retains-its-own-stop branch
+                # (decide() sets stop_loss=observed.stop_loss there verbatim);
+                # RESTORE_STOP's target is only ever chosen when
+                # observed.stop_loss is None, so it can never match here.
+                # Sending this anyway would ask amend_protection to modify
+                # nothing, and adapter.py's _improves_on (I-8) rightly
+                # refuses a no-op amend -- reading that refusal as a failed
+                # write would withhold the risk basis from a stop that is
+                # genuinely already correct. Skipping is not failing: the
+                # position IS protected at the target, so there is no broker
+                # call to make and no attempt to count as `acted`.
+                amend_succeeded = True
+            else:
+                acted = True
+                ref = Mt5VenueRef(
+                    venue=Venue.MT5,
+                    magic=observed.magic,
+                    server_symbol=observed.server_symbol,
+                    position_ticket=ticket,
+                )
+                take_profit = _decimal_or_none(record.get("take_profit")) if record else None
+                outcome = self._venue.amend_protection(ref, action.stop_loss, take_profit)
+                amend_succeeded = outcome.accepted
+                if action.kind is ActionKind.RESTORE_STOP:
+                    failed = self._failed_restores.get(ticket, 0)
+                    self._failed_restores[ticket] = 0 if amend_succeeded else failed + 1
 
         r_open, mae, mfe, extrema_changed = self._update_extrema(observed, record)
 
