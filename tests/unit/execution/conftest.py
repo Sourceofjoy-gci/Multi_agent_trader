@@ -26,6 +26,7 @@ from trading_house.core.venue import (
     VenueRef,
 )
 from trading_house.execution.ledger import NON_TERMINAL_STATES, IntentEvent
+from trading_house.execution.loop import SYSTEM_TICKET
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
 BASE = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
@@ -243,6 +244,11 @@ class FakeProtectionVenue:
     tuple -- the same convention ``FakeDeals`` uses above, for the same
     reason. ``closing_price_result`` is a plain mutable attribute so a test
     can move the price between cycles (see the MAE/MFE extrema test).
+
+    ``price_reads`` records every ``closing_price`` call. Without it a test
+    that names the unavailable-price branch cannot tell "the branch ran and
+    the price was None" from "the branch was never reached", and the second
+    one passes identically.
     """
 
     def __init__(
@@ -256,6 +262,7 @@ class FakeProtectionVenue:
         self._amend_fails = amend_fails
         self.closing_price_result = closing_price_result
         self.amended: list[AmendCall] = []
+        self.price_reads: list[tuple[str, bool]] = []
 
     def positions_now(self) -> Sequence[PositionRecord] | None:
         return self._positions
@@ -277,6 +284,7 @@ class FakeProtectionVenue:
         )
 
     def closing_price(self, server_symbol: str, is_buy: bool) -> Decimal | None:
+        self.price_reads.append((server_symbol, is_buy))
         return self.closing_price_result
 
 
@@ -317,8 +325,18 @@ class RecordingPositionStore:
         return self._latest.get(position_ticket)
 
     def open_positions(self) -> Sequence[Mapping[str, Any]]:
+        """Every non-CLOSED ticket's latest event, flattened the way a SQL
+        ``DISTINCT ON`` row arrives: the payload's keys plus the event's own
+        structural columns.
+
+        ``SYSTEM_TICKET`` is excluded because it is the daemon's own reserved
+        row, not a position -- Task 2's query must exclude it for the same
+        reason. The loop skips it anyway (see
+        ``test_the_daemon_ticket_is_skipped_even_if_the_store_hands_it_back``).
+        """
+
         return tuple(
             {**payload, "position_ticket": ticket}
             for ticket, payload in self._latest.items()
-            if payload.get("lifecycle") != "CLOSED"
+            if payload.get("lifecycle") != "CLOSED" and ticket != SYSTEM_TICKET
         )
