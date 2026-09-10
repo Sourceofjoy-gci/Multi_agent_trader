@@ -84,6 +84,7 @@ values instead, the same discipline the risk engine already follows for ATR.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -284,10 +285,18 @@ class PositionGuard:
                     # unguarded with no record of why. The exception's TYPE
                     # name is the diagnostic; its message never reaches a
                     # payload -- a broker's own text can be inside it.
-                    self._escalator.escalate(
-                        f"a cycle raised {type(exc).__name__}",
-                        {"error_type": type(exc).__name__},
-                    )
+                    with contextlib.suppress(Exception):
+                        # N3: Task 6 wires escalate() to mark_stale() plus an
+                        # audit-ledger append -- both database writes. A
+                        # raising escalator must not do what the raising
+                        # cycle itself could not (I-6): a guard that cannot
+                        # report a problem must still keep protecting
+                        # positions. No retry, no backoff -- `finally` below
+                        # still explains any eventual exit.
+                        self._escalator.escalate(
+                            f"a cycle raised {type(exc).__name__}",
+                            {"error_type": type(exc).__name__},
+                        )
                 stop.wait(interval_seconds)
         finally:
             self._store.append(SYSTEM_TICKET, "GUARD_STOPPED", self._clock.now(), {})

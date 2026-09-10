@@ -67,6 +67,16 @@ class RecordingEscalator:
         self.calls.append((reason, payload))
 
 
+class _RaisingEscalator(RecordingEscalator):
+    """N3: Task 6 wires ``escalate()`` to ``mark_stale()`` plus an audit-
+    ledger append -- both database writes, either of which can fail
+    independently of the cycle that triggered the report."""
+
+    def escalate(self, reason: str, payload: Mapping[str, Any]) -> None:
+        super().escalate(reason, payload)
+        raise RuntimeError("escalator's own database write failed")
+
+
 class _BrokerBlewUp(RuntimeError):
     """Stands in for ``brokers/mt5/adapter.py``'s ``BrokerError``, which the
     real port raises rather than returning None, and whose message can carry
@@ -307,6 +317,31 @@ def test_a_cycle_that_raises_escalates_and_the_daemon_keeps_running() -> None:
     assert venue.reads == 3  # it survived cycle 2 and ran cycle 3
     assert [payload for _, payload in escalator.calls] == [{"error_type": "_BrokerBlewUp"}]
     assert BROKER_TEXT not in repr(escalator.calls)
+    assert store.appended[-1][1] == "GUARD_STOPPED"
+
+
+def test_a_raising_escalator_does_not_kill_the_daemon() -> None:
+    """N3: the escalate() call inside run()'s except handler must be
+    contained on its own. Left unguarded, the escalator's own raise escapes
+    the handler that was reporting a DIFFERENT failure, propagates out of the
+    while loop, and kills the daemon thread -- I-6's promise (the guard
+    outlives anything one cycle can do) held only for the venue, not for the
+    escalator Task 6 wires to two more database writes."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    stop = _CountingStop()
+    venue = _ScriptedVenue(
+        stop,
+        stop_after=2,
+        raise_on=frozenset({1}),
+        positions=[_observed(stop_loss=Decimal("1.09700"))],
+    )
+    escalator = _RaisingEscalator()
+
+    _guard(venue, store, escalator=escalator).run(stop, interval_seconds=0.0)
+
+    assert venue.reads == 2  # it survived both the cycle's raise and the escalator's
+    assert escalator.calls != []  # the escalator was still tried
     assert store.appended[-1][1] == "GUARD_STOPPED"
 
 
