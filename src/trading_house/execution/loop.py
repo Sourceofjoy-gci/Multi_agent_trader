@@ -107,6 +107,11 @@ from trading_house.execution.guard import ActionKind, GuardAction, decide, r_mul
 # can hold -- position tickets are positive.
 SYSTEM_TICKET = 0
 DEFAULT_LIFECYCLE = "OPEN_PROTECTED"
+# The lifecycle a system-level escalation (no one position's business) is
+# filed under, alongside GUARD_STOPPED -- both daemon-only, neither one of
+# core/schemas.py:238's five PositionState values (see PositionStore's
+# docstring: position_events.lifecycle is deliberately a superset).
+SYSTEM_ESCALATED_LIFECYCLE = "GUARD_ESCALATED"
 # decide() only ever returns these two kinds with a venue-side write to make;
 # TIGHTEN_STOP comes from decide_tighten(), which this cycle never calls.
 _ACTING_KINDS = frozenset({ActionKind.RESTORE_STOP, ActionKind.ADOPT_ORPHAN})
@@ -128,6 +133,15 @@ class PositionStore(Protocol):
     also carries daemon-only rows this system writes under ``SYSTEM_TICKET``
     (``"GUARD_STOPPED"``) that no position state machine ever needs. Task 2's
     migration must not constrain this column to the five.
+
+    Row shape: what ``latest()`` and each element of ``open_positions()``
+    return is exactly the last-appended payload's own fields plus
+    ``position_ticket`` and ``lifecycle`` -- nothing structural. This loop
+    carries a fetched row forward verbatim into its next write (see
+    ``_maybe_record``), so any extra structural column (an event id,
+    ``event_time``, ``created_at``) would get copied into every later
+    payload, stringified with ``str()`` -- a Python repr for anything
+    nested, landing in a durable, operator-facing record.
     """
 
     def append(
@@ -238,7 +252,15 @@ class PositionGuard:
     def cycle(self) -> CycleReport:
         observed_all = self._venue.positions_now()
         if observed_all is None:
-            self._escalator.escalate("could not read the broker's open positions", {})
+            reason = "could not read the broker's open positions"
+            self._escalator.escalate(reason, {})
+            # N5: the module docstring promises this module writes the
+            # position event directly for every escalation, system-level
+            # ones included -- an unreadable read is exactly the kind most
+            # worth finding later, filed under SYSTEM_TICKET (loop.py:104-107).
+            self._store.append(
+                SYSTEM_TICKET, SYSTEM_ESCALATED_LIFECYCLE, self._clock.now(), {"reason": reason}
+            )
             return CycleReport(checked=0, acted=0, escalated=1)
 
         observed_all_by_ticket = {p.position_ticket: p for p in observed_all}
@@ -293,9 +315,21 @@ class PositionGuard:
                         # report a problem must still keep protecting
                         # positions. No retry, no backoff -- `finally` below
                         # still explains any eventual exit.
-                        self._escalator.escalate(
-                            f"a cycle raised {type(exc).__name__}",
-                            {"error_type": type(exc).__name__},
+                        error_type = type(exc).__name__
+                        reason = f"a cycle raised {error_type}"
+                        self._escalator.escalate(reason, {"error_type": error_type})
+                        # N5: this module owns the position-event write for
+                        # every escalation directly, system-level ones
+                        # included -- a raised cycle is exactly the kind most
+                        # worth finding later, filed under SYSTEM_TICKET. In
+                        # the same suppressed block as escalate() above: this
+                        # write must not do what the raising cycle could not
+                        # either.
+                        self._store.append(
+                            SYSTEM_TICKET,
+                            SYSTEM_ESCALATED_LIFECYCLE,
+                            self._clock.now(),
+                            {"reason": reason, "error_type": error_type},
                         )
                 stop.wait(interval_seconds)
         finally:

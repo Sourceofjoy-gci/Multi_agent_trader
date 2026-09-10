@@ -173,17 +173,25 @@ def test_an_unreadable_position_list_escalates_and_acts_on_nothing() -> None:
     conclude every position had closed and stop guarding all of them.
 
     ``report.escalated == 1`` alone is the literal 1 hardcoded in that same
-    branch, so it is the escalator that has to be inspected."""
+    branch, so it is the escalator that has to be inspected.
+
+    N5: this is a system-level escalation (no one position's business), and
+    the module docstring promises this module owns the position-event write
+    for every escalation directly -- not only the per-position ones."""
 
     venue = FakeProtectionVenue(positions=None)
     escalator = RecordingEscalator()
+    store = RecordingPositionStore()
 
-    report = _guard(venue, RecordingPositionStore(), escalator=escalator).cycle()
+    report = _guard(venue, store, escalator=escalator).cycle()
 
     assert report.escalated == 1
     assert venue.amended == []
     assert [reason for reason, _ in escalator.calls] == [
         "could not read the broker's open positions"
+    ]
+    assert store.appended == [
+        (SYSTEM_TICKET, "GUARD_ESCALATED", {"reason": "could not read the broker's open positions"})
     ]
 
 
@@ -300,7 +308,11 @@ def test_a_cycle_that_raises_escalates_and_the_daemon_keeps_running() -> None:
     MT5's ``send_order`` returns None, which is any error. An uncaught one
     kills the daemon on the first flaky call, leaves every position unguarded,
     and produces exactly the unexplained gap in the event stream that
-    ``test_shutdown_is_recorded`` exists to prevent."""
+    ``test_shutdown_is_recorded`` exists to prevent.
+
+    N5: the module docstring promises this module owns the position-event
+    write for every escalation directly -- a raised cycle, filed under
+    ``SYSTEM_TICKET``, included."""
 
     store = _protected(RecordingPositionStore(), stop_loss="1.09700")
     stop = _CountingStop()
@@ -317,6 +329,12 @@ def test_a_cycle_that_raises_escalates_and_the_daemon_keeps_running() -> None:
     assert venue.reads == 3  # it survived cycle 2 and ran cycle 3
     assert [payload for _, payload in escalator.calls] == [{"error_type": "_BrokerBlewUp"}]
     assert BROKER_TEXT not in repr(escalator.calls)
+    assert (
+        SYSTEM_TICKET,
+        "GUARD_ESCALATED",
+        {"reason": "a cycle raised _BrokerBlewUp", "error_type": "_BrokerBlewUp"},
+    ) in store.appended
+    assert BROKER_TEXT not in repr(store.appended)
     assert store.appended[-1][1] == "GUARD_STOPPED"
 
 
