@@ -561,6 +561,37 @@ def test_a_record_holding_only_an_open_price_keeps_it() -> None:
     assert store.appended[-1][2]["open_price"] == "1.10000"
 
 
+# --- D-5's per-cycle escalate signal is not spec 5.2's terminal marker (N2) ---
+
+
+def test_an_adopted_orphan_is_still_guarded_after_it_escalates() -> None:
+    """N2: ``action.escalate`` (D-5's adopt-*then*-escalate signal, checked in
+    ``_process``) and ``action.kind is ActionKind.ESCALATE`` (spec 5.2's
+    terminal marker, checked separately in ``_maybe_record``) are two
+    different conditions on purpose. Conflating them would mark every freshly
+    adopted orphan terminal on its very first cycle -- abandoned rather than
+    guarded, the opposite of D-5's intent. This orphan's stop vanishes again
+    on the very next cycle; a still-guarded position restores it for real."""
+
+    store = RecordingPositionStore()  # empty: ticket 7 is unrecorded, an orphan
+    venue = FakeProtectionVenue(positions=[_observed(stop_loss=None)])  # default-distance orphan
+    escalator = RecordingEscalator()
+    guard = _guard(venue, store, escalator=escalator)
+
+    guard.cycle()  # adopts at the default distance; escalates per D-5
+    assert escalator.calls != []
+    assert len(venue.amended) == 1
+    latest = store.latest(7)
+    assert latest is not None
+    assert latest.get("escalated") != "true"  # escalated per D-5, not terminal per 5.2
+
+    venue._positions = [_observed(stop_loss=None)]  # the broker's stop vanishes again
+    report = guard.cycle()
+
+    assert len(venue.amended) == 2  # a second, genuine restore -- not abandoned
+    assert report.acted == 1
+
+
 # --- Escalation is terminal (spec 5.2's "stop attempting modifications") ---
 
 
