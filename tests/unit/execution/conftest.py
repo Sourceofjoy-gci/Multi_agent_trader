@@ -8,7 +8,8 @@ the primary instrument and not a convenience.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -22,6 +23,7 @@ from trading_house.core.venue import (
     PositionRecord,
     RejectReason,
     Venue,
+    VenueRef,
 )
 from trading_house.execution.ledger import NON_TERMINAL_STATES, IntentEvent
 
@@ -232,3 +234,91 @@ class FakeDeals:
 
     def terminal_healthy(self) -> bool:
         return self.healthy
+
+
+class FakeProtectionVenue:
+    """A ``ProtectionPort`` double for the guard loop (Phase 5).
+
+    ``positions=None`` means the broker read FAILED, distinct from an empty
+    tuple -- the same convention ``FakeDeals`` uses above, for the same
+    reason. ``closing_price_result`` is a plain mutable attribute so a test
+    can move the price between cycles (see the MAE/MFE extrema test).
+    """
+
+    def __init__(
+        self,
+        *,
+        positions: Sequence[PositionRecord] | None = (),
+        amend_fails: bool = False,
+        closing_price_result: Decimal | None = None,
+    ) -> None:
+        self._positions = positions
+        self._amend_fails = amend_fails
+        self.closing_price_result = closing_price_result
+        self.amended: list[AmendCall] = []
+
+    def positions_now(self) -> Sequence[PositionRecord] | None:
+        return self._positions
+
+    def amend_protection(
+        self, ref: VenueRef, stop_loss: Decimal, take_profit: Decimal | None
+    ) -> ExecutionOutcome:
+        self.amended.append(AmendCall(ref=ref, stop_loss=stop_loss, take_profit=take_profit))
+        if self._amend_fails:
+            return ExecutionOutcome(
+                accepted=False,
+                venue_ref=ref,
+                filled_quantity=None,
+                fill_price=None,
+                reject_reason=RejectReason.UNKNOWN,
+            )
+        return ExecutionOutcome(
+            accepted=True, venue_ref=ref, filled_quantity=None, fill_price=None, reject_reason=None
+        )
+
+    def closing_price(self, server_symbol: str, is_buy: bool) -> Decimal | None:
+        return self.closing_price_result
+
+
+@dataclass(frozen=True, slots=True)
+class AmendCall:
+    ref: VenueRef
+    stop_loss: Decimal
+    take_profit: Decimal | None
+
+
+class RecordingPositionStore:
+    """An in-memory ``PositionStore`` (Phase 5's structural Protocol).
+
+    ``appended`` holds 3-tuples of ``(position_ticket, lifecycle, payload)``
+    -- deliberately dropping ``event_time``, even though ``append`` takes
+    four arguments, so every index a test uses lands on the payload rather
+    than silently reading the timestamp. Same shape as ``RecordingLedger``
+    above, for the same reason.
+    """
+
+    def __init__(self) -> None:
+        self.appended: list[tuple[int, str, Mapping[str, str]]] = []
+        self._latest: dict[int, dict[str, Any]] = {}
+
+    def append(
+        self,
+        position_ticket: int,
+        lifecycle: str,
+        event_time: datetime,
+        payload: Mapping[str, str],
+    ) -> None:
+        self.appended.append((position_ticket, lifecycle, dict(payload)))
+        merged = dict(payload)
+        merged["lifecycle"] = lifecycle
+        self._latest[position_ticket] = merged
+
+    def latest(self, position_ticket: int) -> Mapping[str, Any] | None:
+        return self._latest.get(position_ticket)
+
+    def open_positions(self) -> Sequence[Mapping[str, Any]]:
+        return tuple(
+            {**payload, "position_ticket": ticket}
+            for ticket, payload in self._latest.items()
+            if payload.get("lifecycle") != "CLOSED"
+        )

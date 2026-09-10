@@ -118,3 +118,16 @@ def decide_tighten(*, is_buy: bool, current: Decimal, candidate: Decimal) -> Gua
     if improves:
         return GuardAction(ActionKind.TIGHTEN_STOP, stop_loss=candidate, reason="stop tightened")
     return GuardAction(ActionKind.NOTHING, reason="candidate would not tighten the stop")
+
+
+def r_multiple(
+    *, is_buy: bool, open_price: Decimal, current: Decimal, initial_risk_distance: Decimal
+) -> float:
+    """The signed R-multiple of ``current`` against the fixed entry-to-stop
+    distance established at open (Section 8.2). ``float`` is deliberate --
+    analytics, not money, unlike every price and distance here, which stay
+    ``Decimal`` all the way through this computation.
+    """
+
+    excursion = (current - open_price) if is_buy else (open_price - current)
+    return float(excursion / initial_risk_distance)
