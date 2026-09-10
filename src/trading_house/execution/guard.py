@@ -34,15 +34,24 @@ class ActionKind(str, Enum):  # noqa: UP042
     RECORD_ONLY = "record_only"  # the broker disagrees; believe the broker
     RESTORE_STOP = "restore_stop"  # sl is missing; put it back
     TIGHTEN_STOP = "tighten_stop"
-    ADOPT_ORPHAN = "adopt_orphan"
+    ADOPT_ORPHAN = "adopt_orphan"  # a position this system has no record of at all
     RECORD_CLOSED = "record_closed"
     ESCALATE = "escalate"
 
 
 @dataclass(frozen=True, slots=True)
 class GuardAction:
+    """``escalate`` is a signal, not an action: when True, ``kind`` is still
+    executed FIRST and spec 5.2's escalation (``mark_stale()`` + an audit
+    append + the position event + no further modification attempts) follows
+    AFTER, never before. Both ``ADOPT_ORPHAN`` returns set ``escalate=True``:
+    writing the adopted stop is itself a modification, so escalating first
+    would leave the orphan naked in the gap, the opposite of D-5's intent.
+    ``decide()`` only emits the signal -- it performs no I/O itself."""
+
     kind: ActionKind
     stop_loss: Decimal | None = None  # the stop to write, for the three that write one
+    escalate: bool = False  # execute `kind`, THEN escalate per spec 5.2
     reason: str = ""
 
 
@@ -66,14 +75,20 @@ def decide(
             return GuardAction(
                 ActionKind.ADOPT_ORPHAN,
                 stop_loss=observed.stop_loss,
-                reason="orphan retains its broker stop",
+                escalate=True,
+                reason="orphan retains its broker stop; adopted, then escalate per D-5",
             )
         if default_stop_distance is None:
             return GuardAction(ActionKind.ESCALATE, reason="orphan has no stop and no distance")
         distance = max(default_stop_distance, min_stop_distance)
-        stop = observed.open_price - distance if is_buy else observed.open_price + distance
+        # An orphan has no record, so is_buy is only ever a caller's guess --
+        # observed.is_buy is the broker's own answer and is already in hand.
+        stop = observed.open_price - distance if observed.is_buy else observed.open_price + distance
         return GuardAction(
-            ActionKind.ADOPT_ORPHAN, stop_loss=stop, reason="orphan adopted at supplied distance"
+            ActionKind.ADOPT_ORPHAN,
+            stop_loss=stop,
+            escalate=True,
+            reason="orphan adopted at supplied distance; adopted, then escalate per D-5",
         )
 
     if observed.stop_loss is None:

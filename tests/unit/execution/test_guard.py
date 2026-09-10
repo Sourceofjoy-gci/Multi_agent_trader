@@ -53,7 +53,10 @@ def test_a_matching_stop_does_nothing_and_writes_nothing() -> None:
     """The overwhelmingly common cycle. If this wrote a row, the table would
     grow by 86,400 rows per position per day and bury every real event."""
 
-    assert _decide().kind is ActionKind.NOTHING
+    action = _decide()
+
+    assert action.kind is ActionKind.NOTHING
+    assert action.escalate is False
 
 
 def test_a_missing_stop_is_restored_to_the_recorded_one() -> None:
@@ -109,20 +112,41 @@ def test_a_broker_stop_that_is_wider_than_the_record_is_also_just_recorded() -> 
 
 
 def test_an_orphan_with_a_stop_is_adopted_at_that_stop() -> None:
-    action = _decide(is_recorded=False, recorded_stop=None)
+    """D-5's first clause, and an I-8 guard. The broker's stop is kept as-is,
+    never recomputed -- an orphan whose stop has already trailed to 1.09900
+    would otherwise be "adopted" at the recomputed 1.09700, which is the guard
+    itself moving a live stop away from profit. The value here is deliberately
+    NOT open_price - default_stop_distance: when it was, this test passed with
+    the whole branch deleted."""
+
+    action = _decide(
+        observed=_observed(stop_loss=Decimal("1.09900")),
+        is_recorded=False,
+        recorded_stop=None,
+    )
 
     assert action.kind is ActionKind.ADOPT_ORPHAN
-    assert action.stop_loss == STOP
+    assert action.stop_loss == Decimal("1.09900")
+    assert action.escalate is True
 
 
 def test_an_orphan_without_a_stop_is_adopted_at_the_supplied_distance() -> None:
     """The distance comes from the book's signed k_sigma against current ATR,
-    computed by the caller. decide() never invents one."""
+    computed by the caller. decide() never invents one. The distance here is
+    deliberately not the default 0.00300 used elsewhere: 1.10000 - 0.00300
+    equals STOP, which would let this test pass even if the code returned the
+    broker's already-present stop instead of recomputing one."""
 
-    action = _decide(observed=_observed(stop_loss=None), is_recorded=False, recorded_stop=None)
+    action = _decide(
+        observed=_observed(stop_loss=None),
+        is_recorded=False,
+        recorded_stop=None,
+        default_stop_distance=Decimal("0.00250"),
+    )
 
     assert action.kind is ActionKind.ADOPT_ORPHAN
-    assert action.stop_loss == Decimal("1.09700")  # 1.10000 - 0.00300
+    assert action.stop_loss == Decimal("1.09750")  # 1.10000 - 0.00250
+    assert action.escalate is True
 
 
 def test_an_orphan_sell_is_adopted_at_a_stop_above_its_entry() -> None:
@@ -141,6 +165,22 @@ def test_an_orphan_sell_is_adopted_at_a_stop_above_its_entry() -> None:
     assert action.stop_loss == Decimal("1.10300")  # 1.10000 + 0.00300
 
 
+def test_the_orphan_stop_follows_the_brokers_side_not_the_callers() -> None:
+    """An orphan has no record, so a caller's is_buy can only be a guess --
+    observed.is_buy is the broker's own answer. Reading the parameter here
+    would put a sell's stop below its entry, already breached when written,
+    and no test that sets both together can tell the two apart."""
+
+    action = _decide(
+        observed=_observed(stop_loss=None, is_buy=False),
+        is_buy=True,
+        is_recorded=False,
+        recorded_stop=None,
+    )
+
+    assert action.stop_loss == Decimal("1.10300")
+
+
 def test_the_orphan_stop_is_floored_by_the_broker_minimum() -> None:
     """Spec D-5. A distance tighter than the broker will accept is not a
     tighter stop, it is a rejected request -- and the position stays naked
@@ -154,6 +194,7 @@ def test_the_orphan_stop_is_floored_by_the_broker_minimum() -> None:
         min_stop_distance=Decimal("0.00250"),
     )
 
+    assert action.kind is ActionKind.ADOPT_ORPHAN
     assert action.stop_loss == Decimal("1.09750")  # floored, not 1.09900
 
 
@@ -182,6 +223,18 @@ def test_a_recorded_position_with_no_stop_anywhere_escalates() -> None:
     assert action.kind is ActionKind.ESCALATE
 
 
+def test_a_recorded_position_with_no_recorded_stop_but_a_broker_stop_is_recorded() -> None:
+    """The recorded-but-stopless case's complement: our record has no stop but
+    the broker does. There is nothing missing to restore -- the broker's value
+    is simply not yet in our record, so it is just recorded, like any other
+    disagreement. Correct today by fall-through; previously untested."""
+
+    action = _decide(recorded_stop=None)
+
+    assert action.kind is ActionKind.RECORD_ONLY
+    assert action.stop_loss == STOP
+
+
 def test_a_vanished_position_is_recorded_closed() -> None:
     assert _decide(observed=None).kind is ActionKind.RECORD_CLOSED
 
@@ -197,8 +250,10 @@ def test_a_vanished_position_with_no_record_does_nothing() -> None:
     [
         (True, "1.09700", "1.09800", ActionKind.TIGHTEN_STOP),  # rises: allowed
         (True, "1.09700", "1.09600", ActionKind.NOTHING),  # falls: refused
+        (True, "1.09700", "1.09700", ActionKind.NOTHING),  # unchanged: refused
         (False, "1.10300", "1.10200", ActionKind.TIGHTEN_STOP),  # falls: allowed
         (False, "1.10300", "1.10400", ActionKind.NOTHING),  # rises: refused
+        (False, "1.10300", "1.10300", ActionKind.NOTHING),  # unchanged: refused
     ],
 )
 def test_a_stop_only_ever_moves_toward_profit(
