@@ -13,10 +13,14 @@ Ownership (Addition 5): a broker-reported position whose ``magic`` falls
 outside every range in ``owned_magic_ranges`` is not the guard's business --
 a manually-opened trade, or another book's -- and is filtered out before
 anything else runs: not amended, not recorded, not counted in
-``CycleReport.checked``, not escalated over. See
-``brokers/mt5/adapter.py``'s ``reconcile()`` for the same reasoning against
-MT5's untagged-magic-is-0 default (not imported from here -- see the module
-boundary note below).
+``CycleReport.checked``, not escalated over. That holds however we came to
+learn about the ticket -- a disowned ticket we also hold a RECORD of must be
+excluded from the union of tickets to process too, or it reads as vanished
+(the recorded side still has it, the observed side no longer does) and gets
+declared CLOSED, the dangerous direction: a live position the guard stops
+guarding. See ``brokers/mt5/adapter.py``'s ``reconcile()`` for the same
+reasoning against MT5's untagged-magic-is-0 default (not imported from here
+-- see the module boundary note below).
 
 Escalation (Addition 6, spec 5.2): the decided action is always executed
 FIRST -- an ``ADOPT_ORPHAN``'s stop write must land before anything else, or
@@ -28,6 +32,33 @@ the first two are bundled behind the single ``Escalator.escalate()`` call,
 which the composition root (Task 6) wires to ``Gateway.mark_stale`` and the
 audit ledger. There is no fourth step, no alerting subsystem and no safe-mode
 state machine here.
+
+When ``decide()`` itself returns ``ActionKind.ESCALATE`` (D-7: two failed
+restores, or an orphan with no stop and no distance), that position event
+also carries ``escalated="true"`` and ``escalation_reason``. Spec 5.2's "then
+stop attempting modifications" is a TERMINAL state, not a per-cycle mood: any
+later cycle whose latest record carries ``escalated`` returns immediately
+from ``_process`` -- no ``decide()``, no amend, no row, no escalate call --
+so the true diagnosis is not buried under thousands of repetitions of itself,
+each one wrong because the record no longer holds what made the first one
+possible. There is deliberately no sixth ``PositionState.lifecycle`` value
+for this (``core/schemas.py:238`` closes that ``Literal`` at five); it lives
+in the payload instead. Nothing in this module clears it -- that is an
+operator action via a successful reconcile, which is what
+``mark_stale()``/``mark_reconciled()`` already gate. This loop implements no
+clearing path.
+
+Error containment (I-6): the real ``ProtectionPort`` RAISES rather than
+returning ``None`` on a broken call -- ``brokers/mt5/adapter.py``'s
+``amend_protection`` raises ``ConfigurationError``, ``BrokerUnavailableError``
+and ``BrokerError`` (the last whenever MT5's ``send_order`` returns ``None``,
+which it does on any error). ``run()`` therefore wraps each ``cycle()`` in
+``try/except Exception`` -- no narrower, because the point is that the guard
+outlives anything one cycle can do -- and escalates with the exception's
+*type name* only. Never its message: a broker's own text can be inside it,
+and no credential, DSN, account number or raw broker message may reach any
+payload. The shutdown row is written from a ``try/finally`` around the whole
+loop so it lands even on an exit nothing here anticipated.
 
 MAE/MFE storage: there is no in-memory cache of the running extrema on
 ``PositionGuard``. Every cycle re-reads the last-written ``mae_r``/``mfe_r``
@@ -89,6 +120,13 @@ class PositionStore(Protocol):
     is not ``CLOSED`` -- what we *recorded*. Do not confuse it with
     ``ProtectionPort.positions_now()``, which is what the broker *has*; the
     guard's whole job is comparing the two.
+
+    ``position_events.lifecycle`` (the column this store persists) is
+    deliberately a SUPERSET of ``PositionState.lifecycle``
+    (``core/schemas.py:238``, a closed five-value ``Literal``): this store
+    also carries daemon-only rows this system writes under ``SYSTEM_TICKET``
+    (``"GUARD_STOPPED"``) that no position state machine ever needs. Task 2's
+    migration must not constrain this column to the five.
     """
 
     def append(
@@ -127,7 +165,7 @@ class Escalator(Protocol):
 @dataclass(frozen=True, slots=True)
 class CycleReport:
     checked: int
-    acted: int
+    acted: int  # amend ATTEMPTS, not successes -- see test_a_failed_amend_still_counts_as_an_action
     escalated: int
 
 
@@ -143,17 +181,29 @@ def _current_stop_str(
     action: GuardAction,
     observed: PositionRecord | None,
     recorded_stop: Decimal | None,
-    amend_succeeded: bool,
 ) -> str | None:
-    """What the guard now believes the broker-side stop to be. An acting kind
-    reports its target only when the venue actually accepted it -- a failed
-    attempt must report the broker's real, unimproved stop, or the record
-    would claim a protection that was never applied."""
+    """What the guard now believes the broker-side stop to be, to overlay
+    onto the carried-forward record (see ``_maybe_record``).
 
-    if action.kind is ActionKind.RECORD_ONLY:
-        return str(action.stop_loss)  # decide() already set this to observed.stop_loss
-    if action.kind in _ACTING_KINDS and amend_succeeded:
-        return str(action.stop_loss)
+    ``RECORD_ONLY`` and an acting kind (``RESTORE_STOP``, ``ADOPT_ORPHAN``)
+    both report their target verbatim -- whether or not the venue accepted
+    it. For ``RESTORE_STOP`` the target IS the already-recorded stop, so a
+    refusal changes nothing either way. For ``ADOPT_ORPHAN`` the target is
+    brand new: a fresh orphan has no prior record to fall back on, so
+    withholding it on a refusal would lose the computed value entirely and
+    leave the next cycle believing there is no stop anywhere, escalating with
+    the wrong diagnosis having just computed the right one (see
+    ``test_a_refused_adoption_still_records_the_stop_it_tried``).
+
+    Whether the target actually landed at the broker is a separate question,
+    answered by whether the *risk basis* gets established -- ``_risk_basis``
+    is the one that stays gated on ``amend_succeeded``, because it is never
+    recomputed once set (Section 8.2), so anchoring it to a refused stop
+    would be permanent.
+    """
+
+    if action.kind is ActionKind.RECORD_ONLY or action.kind in _ACTING_KINDS:
+        return str(action.stop_loss) if action.stop_loss is not None else None
     if observed is not None:
         return str(observed.stop_loss) if observed.stop_loss is not None else None
     return str(recorded_stop) if recorded_stop is not None else None
@@ -190,15 +240,29 @@ class PositionGuard:
             self._escalator.escalate("could not read the broker's open positions", {})
             return CycleReport(checked=0, acted=0, escalated=1)
 
-        observed_by_ticket = {
-            p.position_ticket: p for p in observed_all if _owned(p.magic, self._owned_magic_ranges)
+        observed_all_by_ticket = {p.position_ticket: p for p in observed_all}
+        owned_tickets = {
+            ticket
+            for ticket, p in observed_all_by_ticket.items()
+            if _owned(p.magic, self._owned_magic_ranges)
         }
+        # A ticket the broker reports under an out-of-range magic is not
+        # ours (Addition 5), however we came to also hold a record of it --
+        # excluded from the union entirely, not only from the observed side,
+        # or it reads as vanished and gets declared CLOSED.
+        disowned_tickets = set(observed_all_by_ticket) - owned_tickets
+        observed_by_ticket = {t: observed_all_by_ticket[t] for t in owned_tickets}
         recorded_by_ticket = {
             int(row["position_ticket"]): row for row in self._store.open_positions()
         }
 
         checked = acted = escalated = 0
-        for ticket in sorted(set(observed_by_ticket) | set(recorded_by_ticket)):
+        tickets = (set(observed_by_ticket) | set(recorded_by_ticket)) - disowned_tickets
+        # SYSTEM_TICKET is the daemon's own reserved row, never a real
+        # position -- skipped here defensively even though the store's own
+        # open_positions() is expected to exclude it already (M3): this loop
+        # must not depend on that.
+        for ticket in sorted(tickets - {SYSTEM_TICKET}):
             checked += 1
             did_act, did_escalate = self._process(
                 ticket, observed_by_ticket.get(ticket), recorded_by_ticket.get(ticket)
@@ -209,10 +273,24 @@ class PositionGuard:
         return CycleReport(checked=checked, acted=acted, escalated=escalated)
 
     def run(self, stop: threading.Event, interval_seconds: float = 1.0) -> None:
-        while not stop.is_set():
-            self.cycle()
-            stop.wait(interval_seconds)
-        self._store.append(SYSTEM_TICKET, "GUARD_STOPPED", self._clock.now(), {})
+        try:
+            while not stop.is_set():
+                try:
+                    self.cycle()
+                except Exception as exc:
+                    # The real port RAISES (adapter.py's BrokerError etc.)
+                    # rather than returning None, so one flaky broker call
+                    # must not kill the daemon -- every position would go
+                    # unguarded with no record of why. The exception's TYPE
+                    # name is the diagnostic; its message never reaches a
+                    # payload -- a broker's own text can be inside it.
+                    self._escalator.escalate(
+                        f"a cycle raised {type(exc).__name__}",
+                        {"error_type": type(exc).__name__},
+                    )
+                stop.wait(interval_seconds)
+        finally:
+            self._store.append(SYSTEM_TICKET, "GUARD_STOPPED", self._clock.now(), {})
 
     def _process(
         self,
@@ -220,13 +298,20 @@ class PositionGuard:
         observed: PositionRecord | None,
         record: Mapping[str, Any] | None,
     ) -> tuple[bool, bool]:
+        if record is not None and record.get("escalated") == "true":
+            # Terminal (spec 5.2's "stop attempting modifications"): forms no
+            # new opinion, attempts no amend, writes no row, escalates again
+            # never. Only a successful operator-triggered reconcile clears
+            # this -- mark_stale()/mark_reconciled() already gate that; this
+            # loop implements no clearing path of its own.
+            return False, False
+
         is_recorded = record is not None
         recorded_stop = _decimal_or_none(record.get("stop_loss")) if record else None
 
         action = decide(
             observed=observed,
             is_recorded=is_recorded,
-            is_buy=observed.is_buy if observed is not None else True,
             recorded_stop=recorded_stop,
             min_stop_distance=self._min_stop_distance,
             default_stop_distance=self._default_stop_distance,
@@ -308,17 +393,25 @@ class PositionGuard:
         return str(current_r), str(mae), str(mfe), (mae != prev_mae or mfe != prev_mfe)
 
     def _risk_basis(
-        self, action: GuardAction, observed: PositionRecord | None, record: Mapping[str, Any] | None
+        self,
+        action: GuardAction,
+        observed: PositionRecord | None,
+        record: Mapping[str, Any] | None,
+        amend_succeeded: bool,
     ) -> tuple[str | None, str | None]:
         """(open_price, initial_risk_distance) as the exact strings to
         persist -- never recomputed once set (Section 8.2). An already
         recorded distance is copied forward verbatim; only a freshly adopted
-        orphan establishes one, from the stop it was just given."""
+        orphan establishes one, from the stop it was just given -- and only
+        when the venue actually accepted that stop. An ``ADOPT_ORPHAN`` the
+        venue refused must not anchor every future R-multiple this position
+        ever reports to protection that was never applied."""
 
         if record is not None and "open_price" in record and "initial_risk_distance" in record:
             return str(record["open_price"]), str(record["initial_risk_distance"])
         if (
             action.kind is ActionKind.ADOPT_ORPHAN
+            and amend_succeeded
             and observed is not None
             and action.stop_loss is not None
         ):
@@ -341,7 +434,18 @@ class PositionGuard:
     ) -> bool:
         """D-2: write a row only on material change -- a moved stop, a newly
         adopted or closed position, an escalation, or a moved MAE/MFE
-        extremum. A matching stop with nothing else moving writes nothing."""
+        extremum. A matching stop with nothing else moving writes nothing.
+
+        The store's latest event is a full-replacement snapshot, not a merge
+        (Task 2) -- so every row this writes must be a COMPLETE picture of
+        the position, not just what this cycle changed, or every key this
+        cycle does not independently re-emit is a key that gets DELETED. The
+        payload starts as the prior record's own fields and only overlays
+        what actually moved this cycle; six field-by-field patches would
+        still miss every key a later schema adds (Task 2's server_symbol,
+        magic, volume, intent_id, opened_at) -- carrying the whole snapshot
+        forward does not.
+        """
 
         materially_changed = (
             action.kind
@@ -357,12 +461,17 @@ class PositionGuard:
         if not materially_changed:
             return False
 
-        payload: dict[str, str] = {}
-        stop = _current_stop_str(action, observed, recorded_stop, amend_succeeded)
+        payload: dict[str, str] = {
+            key: str(value)
+            for key, value in (record or {}).items()
+            if key not in ("position_ticket", "lifecycle") and value is not None
+        }
+
+        stop = _current_stop_str(action, observed, recorded_stop)
         if stop is not None:
             payload["stop_loss"] = stop
 
-        open_price, distance = self._risk_basis(action, observed, record)
+        open_price, distance = self._risk_basis(action, observed, record, amend_succeeded)
         if open_price is not None:
             payload["open_price"] = open_price
         if distance is not None:
@@ -372,12 +481,20 @@ class PositionGuard:
             payload["mae_r"] = mae
             payload["mfe_r"] = mfe
 
-        lifecycle = (
-            "CLOSED"
-            if action.kind is ActionKind.RECORD_CLOSED
-            else str(record.get("lifecycle", DEFAULT_LIFECYCLE))
-            if record
-            else DEFAULT_LIFECYCLE
-        )
+        if action.kind is ActionKind.ESCALATE:
+            # Spec 5.2's terminal marker (C2): _process short-circuits for
+            # any ticket whose latest record carries this. Deliberately a
+            # payload field, not a sixth PositionState.lifecycle value --
+            # core/schemas.py:238 closes that Literal at five.
+            payload["escalated"] = "true"
+            payload["escalation_reason"] = action.reason
+
+        if action.kind is ActionKind.RECORD_CLOSED:
+            lifecycle = "CLOSED"
+        elif record is not None:
+            lifecycle = str(record.get("lifecycle", DEFAULT_LIFECYCLE))
+        else:
+            lifecycle = DEFAULT_LIFECYCLE
+
         self._store.append(ticket, lifecycle, self._clock.now(), payload)
         return True
