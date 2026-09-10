@@ -16,7 +16,6 @@ from tests.unit.execution.conftest import NOW
 from trading_house.core.venue import PositionRecord
 from trading_house.execution.guard import ActionKind, GuardAction, decide, decide_tighten
 
-BUY = True
 STOP = Decimal("1.09700")
 
 
@@ -39,7 +38,6 @@ def _decide(**overrides: object) -> GuardAction:
     args: dict[str, object] = {
         "observed": _observed(),
         "is_recorded": True,
-        "is_buy": BUY,
         "recorded_stop": STOP,
         "min_stop_distance": Decimal("0.00001"),
         "default_stop_distance": Decimal("0.00300"),
@@ -156,7 +154,6 @@ def test_an_orphan_sell_is_adopted_at_a_stop_above_its_entry() -> None:
 
     action = _decide(
         observed=_observed(stop_loss=None, is_buy=False),
-        is_buy=False,
         is_recorded=False,
         recorded_stop=None,
     )
@@ -165,15 +162,13 @@ def test_an_orphan_sell_is_adopted_at_a_stop_above_its_entry() -> None:
     assert action.stop_loss == Decimal("1.10300")  # 1.10000 + 0.00300
 
 
-def test_the_orphan_stop_follows_the_brokers_side_not_the_callers() -> None:
-    """An orphan has no record, so a caller's is_buy can only be a guess --
-    observed.is_buy is the broker's own answer. Reading the parameter here
-    would put a sell's stop below its entry, already breached when written,
-    and no test that sets both together can tell the two apart."""
+def test_the_orphan_stop_follows_the_brokers_side() -> None:
+    """decide() takes no is_buy of its own (M1: the parameter was dead --
+    guard.py never read it) -- observed.is_buy, the broker's own answer, is
+    the only side an orphan's stop can follow."""
 
     action = _decide(
         observed=_observed(stop_loss=None, is_buy=False),
-        is_buy=True,
         is_recorded=False,
         recorded_stop=None,
     )

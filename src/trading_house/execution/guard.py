@@ -59,7 +59,6 @@ def decide(
     *,
     observed: PositionRecord | None,
     is_recorded: bool,
-    is_buy: bool,
     recorded_stop: Decimal | None,
     min_stop_distance: Decimal,
     default_stop_distance: Decimal | None,
