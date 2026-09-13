@@ -141,6 +141,8 @@ def _guard(
     store: RecordingPositionStore,
     *,
     escalator: RecordingEscalator | None = None,
+    min_stop_distances: Mapping[str, Decimal] | None = None,
+    default_stop_distances: Mapping[str, Decimal | None] | None = None,
 ) -> PositionGuard:
     """``store`` is deliberately required: a shared default seed hid the very
     record-shape bugs this file exists to pin, so every test whose subject is
@@ -152,8 +154,14 @@ def _guard(
         escalator=escalator if escalator is not None else RecordingEscalator(),
         clock=FixedClock(NOW),
         owned_magic_ranges=OWNED_RANGES,
-        min_stop_distance=Decimal("0.00001"),
-        default_stop_distance=Decimal("0.00300"),
+        min_stop_distances=(
+            {"EURUSD": Decimal("0.00001")} if min_stop_distances is None else min_stop_distances
+        ),
+        default_stop_distances=(
+            {"EURUSD": Decimal("0.00300")}
+            if default_stop_distances is None
+            else default_stop_distances
+        ),
     )
 
 
@@ -500,6 +508,67 @@ def test_a_refused_adoption_does_not_fix_the_risk_basis_to_a_refused_stop() -> N
     assert venue.amended[0].stop_loss == Decimal("1.09700")  # it did try
     assert "initial_risk_distance" not in row
     assert "open_price" not in row
+
+
+# --- Both stop distances are per-instrument, never one number for the book ---
+
+
+def test_an_orphan_is_adopted_at_its_own_symbols_distance() -> None:
+    """The stops level is a contract property and the default distance is
+    this instrument's own volatility, so both are keyed by server symbol.
+    Two symbols are configured with different distances precisely so that
+    "reads the only entry there is" cannot pass for "reads its own"."""
+
+    store = RecordingPositionStore()  # empty: ticket 7 is unrecorded, an orphan
+    venue = FakeProtectionVenue(positions=[_observed(stop_loss=None)])
+    guard = _guard(
+        venue,
+        store,
+        min_stop_distances={"EURUSD": Decimal("0.00001"), "GBPUSD": Decimal("0.00001")},
+        default_stop_distances={"EURUSD": Decimal("0.00500"), "GBPUSD": Decimal("0.00300")},
+    )
+
+    guard.cycle()
+
+    assert venue.amended[0].stop_loss == Decimal("1.09500")  # 1.10000 - EURUSD's 0.00500
+
+
+def test_an_orphan_on_an_unconfigured_symbol_escalates_rather_than_borrowing_a_distance() -> None:
+    """D-5's fabricated number arriving through the back door: adopting a
+    live position at a distance derived from a DIFFERENT instrument's
+    volatility. No entry means no distance, and decide() escalates on that --
+    refusing to invent, leaving whatever the broker holds in place."""
+
+    store = RecordingPositionStore()  # empty: an orphan, on an unconfigured symbol
+    venue = FakeProtectionVenue(positions=[_observed(server_symbol="GBPUSD", stop_loss=None)])
+    escalator = RecordingEscalator()
+    guard = _guard(
+        venue,
+        store,
+        escalator=escalator,
+        min_stop_distances={"EURUSD": Decimal("0.00001")},
+        default_stop_distances={"EURUSD": Decimal("0.00300")},
+    )
+
+    report = guard.cycle()
+
+    assert venue.amended == []  # nothing was adopted at EURUSD's distance
+    assert report.escalated == 1
+    assert [reason for reason, _ in escalator.calls] == ["orphan has no stop and no distance"]
+
+
+def test_a_restore_is_unaffected_by_either_distance_mapping() -> None:
+    """The restore path re-sends the stop we already recorded, so neither
+    mapping is read -- a position whose symbol appears in neither is still
+    restored, not escalated."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    venue = FakeProtectionVenue(positions=[_observed(server_symbol="GBPUSD", stop_loss=None)])
+
+    report = _guard(venue, store, min_stop_distances={}, default_stop_distances={}).cycle()
+
+    assert venue.amended[0].stop_loss == Decimal("1.09700")
+    assert report.escalated == 0
 
 
 # --- The latest event is a full snapshot: one test per field it used to drop ---

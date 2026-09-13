@@ -233,16 +233,24 @@ class PositionGuard:
         clock: Clock,
         *,
         owned_magic_ranges: Sequence[tuple[int, int]],
-        min_stop_distance: Decimal,
-        default_stop_distance: Decimal | None = None,
+        min_stop_distances: Mapping[str, Decimal],
+        default_stop_distances: Mapping[str, Decimal | None],
     ) -> None:
         self._store = store
         self._venue = venue
         self._escalator = escalator
         self._clock = clock
         self._owned_magic_ranges = tuple(owned_magic_ranges)
-        self._min_stop_distance = min_stop_distance
-        self._default_stop_distance = default_stop_distance
+        # Both distances are per-INSTRUMENT quantities, keyed by server
+        # symbol: the minimum is that contract's stops level, and the default
+        # is the book's signed k_sigma against that instrument's own ATR. One
+        # scalar for the whole book would adopt a live position at a distance
+        # derived from a different instrument's volatility -- exactly the
+        # fabricated number D-5 forbids, arriving through the back door.
+        # Scoping the daemon to one instrument instead would leave every
+        # position outside that scope silently unguarded, which I-21 forbids.
+        self._min_stop_distances = dict(min_stop_distances)
+        self._default_stop_distances = dict(default_stop_distances)
         # In-memory only, and deliberately not persisted: a restart forgets a
         # streak of failed restores and simply starts counting again, which
         # only delays an eventual escalation -- unlike the MAE/MFE extrema
@@ -352,12 +360,24 @@ class PositionGuard:
         is_recorded = record is not None
         recorded_stop = _decimal_or_none(record.get("stop_loss")) if record else None
 
+        # The distances belong to the instrument, so they are resolved from
+        # the broker's own symbol for THIS position. A symbol with no
+        # configured default yields None, which decide() escalates on ("orphan
+        # has no stop and no distance") -- refusing to invent is the point:
+        # the alternative is adopting at another instrument's volatility.
+        # A symbol with no configured minimum is treated as a floor of zero,
+        # which simply does not bind; that is a decision, and it is safe only
+        # because the number that must never be borrowed is the default above,
+        # which escalates instead of defaulting. `observed is None` means the
+        # position is gone -- decide()'s vanished branch returns before it
+        # reads either distance, so the empty key never reaches a decision.
+        server_symbol = observed.server_symbol if observed is not None else ""
         action = decide(
             observed=observed,
             is_recorded=is_recorded,
             recorded_stop=recorded_stop,
-            min_stop_distance=self._min_stop_distance,
-            default_stop_distance=self._default_stop_distance,
+            min_stop_distance=self._min_stop_distances.get(server_symbol, Decimal(0)),
+            default_stop_distance=self._default_stop_distances.get(server_symbol),
             failed_restores=self._failed_restores.get(ticket, 0),
         )
 
