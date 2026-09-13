@@ -12,7 +12,9 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import tempfile
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -76,12 +78,15 @@ from trading_house.execution.ledger import (
     PostgresIntentLedger,
     submission_lock,
 )
+from trading_house.execution.loop import PositionGuard
 from trading_house.execution.manager import OrderManager
+from trading_house.execution.positions import PostgresPositionStore
 from trading_house.execution.reconciler import reconcile_all, require_clean_ledger
 from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
+from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.settings import RuntimeSettings
 
@@ -125,11 +130,13 @@ db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 audit_app = typer.Typer(no_args_is_help=True, help="Audit-ledger commands.")
 data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
 order_app = typer.Typer(no_args_is_help=True, help="Order commands.")
+guard_app = typer.Typer(no_args_is_help=True, help="Position-guard commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
 app.add_typer(data_app, name="data")
 app.add_typer(order_app, name="order")
+app.add_typer(guard_app, name="guard")
 
 
 @app.callback()
@@ -865,5 +872,114 @@ def order_status(
                 ],
             ),
         }
+
+    _run(operation)
+
+
+def _stop_event() -> threading.Event:
+    """The daemon's shutdown flag.
+
+    A function rather than a literal so a test can hand ``run`` an event that
+    sets itself after the first cycle. The alternative -- a ``--cycles`` cap
+    on the command -- would be a second loop nothing in production ever
+    takes, running outside the error containment ``PositionGuard.run`` owns.
+    """
+
+    return threading.Event()
+
+
+@guard_app.command("run")
+def guard_run(
+    interval_seconds: Annotated[float, typer.Option("--interval-seconds")] = 1.0,
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Keep every open position carrying the stop the ledger says it carries.
+
+    Runs until interrupted. SIGINT sets the stop event rather than killing
+    the process, so the daemon leaves a recorded shutdown behind instead of a
+    gap nobody can date.
+
+    Deliberately NOT gated by ``require_clean_ledger`` (D-6). Running the gate
+    everywhere is the plausible-looking mistake: this command opens nothing,
+    and a guard that stopped protecting live positions because an unrelated
+    intent was stuck would abandon money at the worst possible moment.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        stop = _stop_event()
+        factory = _connection_factory()
+        with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
+            adapter,
+            gateway,
+            binding,
+            clock,
+        ):
+            guard = PositionGuard(
+                store=PostgresPositionStore(factory),
+                venue=Mt5ProtectionPort(adapter, binding),
+                escalator=LedgerEscalator(PostgresAuditLedger(factory), gateway.mark_stale, clock),
+                clock=clock,
+                owned_magic_ranges=[book.magic_range for book in binding.books.values()],
+                # The stops level is a property of the contract, so it is read
+                # per instrument from the venue itself. A bound symbol the
+                # terminal does not know raises here, at startup, rather than
+                # silently becoming a position with no floor days later.
+                min_stop_distances={
+                    bound.server_symbol: adapter.describe_instrument(
+                        instrument_id
+                    ).min_stop_distance
+                    for instrument_id, bound in binding.instruments.items()
+                },
+                # Empty on purpose. The default distance is the book's signed
+                # k_sigma against the instrument's CURRENT ATR, and nothing
+                # feeds an ATR to this daemon; one computed at startup and
+                # reused for days would be as invented as another symbol's.
+                # So an orphan with no broker stop escalates instead of being
+                # adopted at a fabricated distance (D-5), which is the outcome
+                # this system prefers. Fill this in when the risk engine's
+                # volatility read reaches the guard.
+                default_stop_distances={},
+            )
+            previous = signal.signal(signal.SIGINT, lambda *_: stop.set())
+            try:
+                guard.run(stop, interval_seconds)
+            finally:
+                signal.signal(signal.SIGINT, previous)
+        return {"stopped": True}
+
+    _run(operation)
+
+
+@guard_app.command("status")
+def guard_status() -> None:
+    """Report what the guard believes about every position it still watches.
+
+    Reads the position store and nothing else: no terminal, no gate. This is
+    the command an operator reaches for when the guard has escalated, and an
+    escalation is exactly when the broker may be the thing that is broken.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        rows = PostgresPositionStore(_connection_factory()).open_positions()
+        positions: list[JsonValue] = [
+            {
+                "position_ticket": int(row["position_ticket"]),
+                "lifecycle": str(row["lifecycle"]),
+                "stop_loss": None if row.get("stop_loss") is None else str(row["stop_loss"]),
+                "escalated": row.get("escalated") == "true",
+                "escalation_reason": (
+                    None if row.get("escalation_reason") is None else str(row["escalation_reason"])
+                ),
+            }
+            for row in sorted(rows, key=lambda row: int(row["position_ticket"]))
+        ]
+        escalated = sum(1 for row in rows if row.get("escalated") == "true")
+        return {"open_positions": len(positions), "escalated": escalated, "positions": positions}
 
     _run(operation)

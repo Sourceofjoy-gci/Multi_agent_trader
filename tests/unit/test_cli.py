@@ -99,7 +99,7 @@ def test_app_help_lists_every_command_group() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
-    for group in ("constitution", "db", "audit", "health"):
+    for group in ("constitution", "db", "audit", "data", "order", "guard", "health"):
         assert group in result.stdout
 
 
