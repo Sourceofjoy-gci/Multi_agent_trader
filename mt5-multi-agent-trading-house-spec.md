@@ -41,6 +41,7 @@ These are assertions the codebase must satisfy at all times. A pull request that
 | I-18 | A feature is computed over a fixed lookback, so the same instrument, timeframe, period and `as_of` always yield the same value. | `tests/unit/features/test_engine.py` |
 | I-19 | An approved decision's `risk_money` never exceeds the book's budgeted risk, and — unless the lot cap bound it — falls short by less than one lot step's worth. | `tests/property/test_risk.py` |
 | I-20 | No order is sent while any earlier intent is unresolved. | `execution/reconciler.py` (`require_clean_ledger`) |
+| I-21 | Every open position is verified against its recorded protection at least once per cycle, and a missing stop is restored or escalated within two cycles. | `execution/loop.py` (`PositionGuard.cycle`), `tests/unit/execution/test_loop.py` |
 
 ### 0.3 Definition of done for the whole system
 

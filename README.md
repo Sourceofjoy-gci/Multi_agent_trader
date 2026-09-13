@@ -375,6 +375,68 @@ uv run trading-house order status --intent-id ...
   read-only, and it is the command an operator needs most at exactly the
   moment an intent is stuck.
 
+## Phase 5 — the position guard
+
+Phase 5 makes one promise: **every position this system opened is, at every
+moment, carrying the stop the ledger says it carries — and if it is not, the
+guard notices within a second and puts it back.** That is I-21: every open
+position is verified against its recorded protection at least once per cycle,
+and a missing stop is restored or escalated within two cycles.
+
+**The guard is deliberately not gated by the unresolved-intent check.** Every
+order-*placing* command runs `require_clean_ledger` (I-20) first. `guard run`
+does not, and must not. It opens nothing, so there is nothing for that gate to
+protect against — and a guard that stopped protecting live positions because
+an unrelated intent was stuck would abandon money at the worst possible
+moment. "Run the gate everywhere" is the plausible-looking mistake here.
+
+**It never closes a position.** There is no close path in the guard at all.
+It restores a stop, it adopts an orphan at a distance it was given, it
+records, and it escalates — nothing else. Closing is a decision the guard has
+no standing to make.
+
+**Escalation is three things and no more:** gateway state is marked stale, one
+row goes into the hash-chained audit ledger, and one position event is
+written. There is no alerting subsystem and no safe-mode state machine in this
+codebase; an operator learns of an escalation by reading the audit ledger or
+running `guard status`. After escalating, the guard stops attempting
+modifications on that position — terminally, until an operator's successful
+reconcile clears it — so the first, true diagnosis is not buried under a day's
+worth of repetitions of itself.
+
+Two failed restores escalate, not one (D-7). The stop is never moved away from
+profit (I-8), enforced independently in `decide_tighten()` and again in
+`amend_protection()` before anything reaches the broker.
+
+**MAE/MFE are sampled at cycle resolution, not true extrema.** The `mae_r` and
+`mfe_r` on a position event are the worst and best R-multiples the guard
+*observed*, once per cycle, at whatever the closing price was when it looked —
+the bid for a long, the ask for a short. A spike between two cycles did not
+happen as far as these numbers are concerned. They are analytics, deliberately
+`float`, and they are not a substitute for tick data.
+
+### Commands
+
+```bash
+uv run trading-house guard run --interval-seconds 1
+uv run trading-house guard status
+```
+
+- **`guard run`** starts the daemon and runs until interrupted. SIGINT sets
+  the stop event rather than killing the process, so a shutdown leaves a dated
+  row behind instead of a gap nobody can explain. Both stop distances it needs
+  are per instrument: the minimum is read from each bound contract's stops
+  level at startup, and the default adoption distance — the book's `k_sigma`
+  against that instrument's current ATR — is **not supplied yet**, because
+  nothing feeds an ATR to this daemon and a distance computed once at startup
+  would be as invented as another symbol's. An orphan with no broker-side stop
+  therefore escalates rather than being adopted at a fabricated distance (D-5);
+  an orphan that already carries its own stop is adopted at it, as before.
+- **`guard status`** reports every position the guard still watches, its
+  recorded stop, and whether it has escalated. It reads the position store and
+  nothing else — no terminal, no gate — because an escalation is exactly when
+  the broker may be the thing that is broken.
+
 ## Operator commands
 
 ```bash
@@ -388,6 +450,7 @@ uv run trading-house --help
 | `trading-house constitution sign` | Sign exact constitution bytes offline |
 | `trading-house db check` | Confirm the database is reachable and at the expected revision |
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
+| `trading-house guard status` | Report every position the guard watches, and any that escalated |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on
