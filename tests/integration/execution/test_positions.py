@@ -231,8 +231,8 @@ def test_the_real_guard_drives_the_real_store_for_one_cycle(
         escalator=escalator,
         clock=FixedClock(NOW),
         owned_magic_ranges=OWNED_RANGES,
-        min_stop_distance=Decimal("0.00001"),
-        default_stop_distance=Decimal("0.00300"),
+        min_stop_distances={"EURUSD": Decimal("0.00001")},
+        default_stop_distances={"EURUSD": Decimal("0.00300")},
     )
 
     report = guard.cycle()
