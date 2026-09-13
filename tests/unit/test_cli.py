@@ -1007,3 +1007,14 @@ def test_an_unreachable_broker_fails_backfill_rather_than_degrading(
     )
 
     assert result.exit_code == cli.ExitCode.BROKER
+
+
+def test_the_daemon_stop_event_starts_unset() -> None:
+    """The seam a guard-run test replaces. In production it must be a plain,
+    unset event: one that arrived already set would exit the daemon on its
+    first check, and every position would go unguarded with nothing to say
+    why."""
+
+    stop = cli._stop_event()
+
+    assert not stop.is_set()
