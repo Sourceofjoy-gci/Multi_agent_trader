@@ -31,7 +31,12 @@ from typing import Any
 
 import pytest
 
-from tests.unit.execution.conftest import NOW, FakeProtectionVenue, RecordingPositionStore
+from tests.unit.execution.conftest import (
+    NOW,
+    FakeProtectionVenue,
+    RecordingEscalator,
+    RecordingPositionStore,
+)
 from trading_house.core.clock import FixedClock
 from trading_house.core.venue import PositionRecord
 from trading_house.execution.guard import r_multiple
@@ -57,14 +62,6 @@ def _observed(**overrides: object) -> PositionRecord:
     }
     fields.update(overrides)
     return PositionRecord(**fields)  # type: ignore[arg-type]
-
-
-class RecordingEscalator:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, Mapping[str, Any]]] = []
-
-    def escalate(self, reason: str, payload: Mapping[str, Any]) -> None:
-        self.calls.append((reason, payload))
 
 
 class _RaisingEscalator(RecordingEscalator):

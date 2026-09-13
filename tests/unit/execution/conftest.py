@@ -288,6 +288,16 @@ class FakeProtectionVenue:
         return self.closing_price_result
 
 
+class RecordingEscalator:
+    """An in-memory ``EscalationPort`` (Phase 5) that remembers every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    def escalate(self, reason: str, payload: Mapping[str, Any]) -> None:
+        self.calls.append((reason, payload))
+
+
 @dataclass(frozen=True, slots=True)
 class AmendCall:
     ref: VenueRef

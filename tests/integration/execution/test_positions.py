@@ -14,8 +14,7 @@ import pytest
 from alembic import command
 from pydantic import SecretStr
 
-from tests.unit.execution.conftest import FakeProtectionVenue
-from tests.unit.execution.test_loop import RecordingEscalator
+from tests.unit.execution.conftest import FakeProtectionVenue, RecordingEscalator
 from trading_house.core.clock import FixedClock
 from trading_house.core.venue import PositionRecord
 from trading_house.database.connection import open_runtime_connection
@@ -75,7 +74,12 @@ def test_open_positions_excludes_closed_ones(store: PostgresPositionStore) -> No
     store.append(8, "OPEN_PROTECTED", NOW, {})
     store.append(8, "CLOSED", NOW, {})
 
-    assert [row["position_ticket"] for row in store.open_positions()] == [7]
+    rows = store.open_positions()
+    assert [row["position_ticket"] for row in rows] == [7]
+    # Exact-dict, not just the ticket: the supplement's named hazard was a
+    # `DISTINCT ON` returning an extra column (e.g. a leaked `seq`), which an
+    # index-only assertion would never see.
+    assert rows[0] == {"position_ticket": 7, "lifecycle": "OPEN_PROTECTED"}
 
 
 def test_open_positions_excludes_the_daemon_ticket(store: PostgresPositionStore) -> None:
@@ -95,12 +99,28 @@ def test_append_stores_a_decimal_price_as_a_string_not_a_float(
     """Every price is a Decimal in memory and must round-trip as a JSON
     string -- never a bare JSON number, which would silently become a float."""
 
-    store.append(7, "OPEN_PROTECTED", NOW, {"stop_loss": str(Decimal("1.09700"))})
+    # A raw Decimal, not a pre-stringified one: `append`'s `Mapping[str, str]`
+    # annotation is a mypy-only constraint (mypy's `packages` config covers
+    # only `src/trading_house`, never this test tree), so this is legal at
+    # runtime, and it is the point -- only a raw Decimal can exercise
+    # `_payload_dumps`'s `default=str` net (positions.py:90-94). A
+    # pre-stringified value would stay green even with that net removed.
+    store.append(7, "OPEN_PROTECTED", NOW, {"stop_loss": Decimal("1.09700")})
 
     stored = store.latest(7)
     assert stored is not None
     assert stored["stop_loss"] == "1.09700"
     assert isinstance(stored["stop_loss"], str)
+
+
+def test_the_lifecycle_check_rejects_an_unknown_value(store: PostgresPositionStore) -> None:
+    """Supplement Override 2: an unconstrained TEXT column in an append-only
+    table lets one typo become a permanent row nothing can ever fix up.
+    `position_lifecycle_known` (migration 0006) is what stops it."""
+
+    with pytest.raises(psycopg.errors.CheckViolation) as exc_info:
+        store.append(7, "OPEN_PROTECTD", NOW, {})
+    assert exc_info.value.sqlstate == "23514"
 
 
 # --- append-only, proved at both layers (grant and trigger) -----------------
