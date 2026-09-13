@@ -97,7 +97,15 @@ def test_append_stores_a_decimal_price_as_a_string_not_a_float(
     store: PostgresPositionStore,
 ) -> None:
     """Every price is a Decimal in memory and must round-trip as a JSON
-    string -- never a bare JSON number, which would silently become a float."""
+    string, so no float ever reaches a stored price.
+
+    The mutation that proves this test bites also corrected how: dropping
+    `_payload_dumps` raises `TypeError: Object of type Decimal is not JSON
+    serializable` at write time, because psycopg3's Jsonb has no fallback
+    `default=`. So the failure mode guarded here is a refused write, not the
+    silent float coercion this docstring used to claim -- a hard stop is the
+    better of the two, and saying which one actually happens is the point.
+    """
 
     # A raw Decimal, not a pre-stringified one: `append`'s `Mapping[str, str]`
     # annotation is a mypy-only constraint (mypy's `packages` config covers
