@@ -51,11 +51,20 @@ RISK_FORBIDDEN = frozenset(
 )
 EXECUTION_ROOT = SOURCE_ROOT / "execution"
 # execution/ may reach core/ and database/, nothing else this project owns:
-# it declares the venue port (VenueSubmitPort/DealSource) it needs and the
-# MT5 adapter satisfies it structurally, so the ledger and order manager
-# stay testable without MetaTrader5 installed.
+# it declares the venue port (VenueSubmitPort/DealSource/ProtectionPort) it
+# needs and the MT5 adapter satisfies it structurally, so the ledger, order
+# manager and position guard stay testable without MetaTrader5 installed.
+# constitution/ joined the list with Phase 5: the guard's ProtectionPort needs
+# the signed binding to turn a server symbol back into an instrument, and the
+# obvious place to put that -- inside the daemon -- would have made the guard
+# unconstructible without a signed file on disk. It lives in ops/ instead.
 EXECUTION_FORBIDDEN = frozenset(
-    {"trading_house.brokers", "trading_house.risk", "trading_house.marketdata"}
+    {
+        "trading_house.brokers",
+        "trading_house.risk",
+        "trading_house.marketdata",
+        "trading_house.constitution",
+    }
 )
 # The reverse of CREDENTIAL_BEARING: no process holding broker credentials may
 # execute agent-authored code (I-11's other direction). These are exactly the
@@ -288,6 +297,7 @@ def test_the_execution_package_is_not_empty() -> None:
         "from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter",
         "import trading_house.risk",
         "from trading_house.marketdata.store import PostgresBarStore",
+        "from trading_house.constitution.binding import VenueBinding",
     ],
 )
 def test_the_execution_import_guard_can_still_fail(statement: str) -> None:
