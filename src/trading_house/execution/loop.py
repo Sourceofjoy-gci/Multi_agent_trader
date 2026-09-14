@@ -312,8 +312,13 @@ class PositionGuard:
         # D-2 for the daemon's own escalations: the reason last reported, so an
         # unchanged condition is reported once rather than once a second.
         self._last_system_reason: str | None = None
+        # Per-ticket, unlike _last_system_reason: a raise inside one position's
+        # check says nothing about the others (see cycle()).
+        self._ticket_errors: dict[int, str] = {}
 
-    def _escalate_system(self, reason: str, payload: Mapping[str, str]) -> bool:
+    def _escalate_system(
+        self, reason: str, payload: Mapping[str, str], *, remember: bool = True
+    ) -> bool:
         """Escalate a condition that is the daemon's, not one position's, and
         say whether it was actually reported.
 
@@ -332,13 +337,22 @@ class PositionGuard:
 
         Both calls are suppressed together (M3): Task 6 wires each to a
         database write, and a guard that cannot report a problem must still
-        keep protecting positions (I-6). The memory is set BEFORE either, so a
-        persistently raising escalator is also attempted only once.
+        keep protecting positions (I-6).
+
+        The memory is set only AFTER both land. Setting it first meant one
+        failed report -- an audit-database blip -- turned a persistent outage
+        into permanent silence, because the condition never changed and so was
+        never re-reported. Retrying costs a duplicate audit row if escalate()
+        succeeds and the append does not; that is an honest record of a
+        repeated attempt, and the better failure of the two.
+
+        ``remember=False`` is for callers holding their own per-ticket memory
+        (see ``cycle()``), which must not collapse into the cycle-wide one.
         """
 
-        if reason == self._last_system_reason:
+        if remember and reason == self._last_system_reason:
             return False
-        self._last_system_reason = reason
+        recorded = False
         with contextlib.suppress(Exception):
             self._escalator.escalate(reason, payload)
             self._store.append(
@@ -347,6 +361,9 @@ class PositionGuard:
                 self._clock.now(),
                 {"reason": reason, **payload},
             )
+            recorded = True
+        if remember and recorded:
+            self._last_system_reason = reason
         return True
 
     def cycle(self) -> CycleReport:
@@ -399,15 +416,25 @@ class PositionGuard:
                 # says where the stop belongs.
                 system_condition = True
                 error_type = type(exc).__name__
-                escalated += int(
-                    self._escalate_system(
-                        f"a position check raised {error_type}",
-                        {"ticket": str(ticket), "error_type": error_type},
+                # Remembered per TICKET, not cycle-wide. Sharing
+                # _last_system_reason would mean N tickets failing with the
+                # same exception type write one row ever, naming the first --
+                # so fixing ticket 7 would leave ticket 9 failing in permanent
+                # silence. Keyed this way, each ticket reports once per
+                # unbroken run of the same failure, which is still D-2.
+                if self._ticket_errors.get(ticket) != error_type:
+                    self._ticket_errors[ticket] = error_type
+                    escalated += int(
+                        self._escalate_system(
+                            f"a position check raised {error_type}",
+                            {"ticket": str(ticket), "error_type": error_type},
+                            remember=False,
+                        )
                     )
-                )
                 continue
             acted += did_act
             escalated += did_escalate
+            self._ticket_errors.pop(ticket, None)
 
         if not system_condition:
             self._last_system_reason = None
@@ -453,6 +480,20 @@ class PositionGuard:
 
         is_recorded = record is not None
         recorded_stop = _decimal_or_none(record.get("stop_loss")) if record else None
+
+        if observed is not None and observed.stop_loss is not None:
+            # The stop is there NOW, so whatever happened on earlier cycles is
+            # spent. Without this the counter is cleared only by an ACCEPTED
+            # amend -- and BrokerError means "outcome unknown", not "rejected"
+            # (core/errors.py), so an amend that raised but actually landed
+            # left a permanent +1. Two of those on one ticket and the next
+            # genuine stop loss escalates at D-7's threshold without ever
+            # attempting the restore that would probably have worked, which
+            # exempts a live position from I-21 permanently. Clearing here
+            # keeps D-7 reachable genuinely while stopping it being reached
+            # spuriously.
+            self._failed_restores.pop(ticket, None)
+            self._amend_errors.pop(ticket, None)
 
         # The distances belong to the instrument, so they are resolved from
         # the broker's own symbol for THIS position. A symbol with no

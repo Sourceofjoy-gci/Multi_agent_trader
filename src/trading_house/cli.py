@@ -970,7 +970,8 @@ def guard_run(
 
 @guard_app.command("status")
 def guard_status() -> None:
-    """Report what the guard believes about every position it still watches.
+    """Report what the guard believes about every position it has a record
+    of, flagging any that escalated.
 
     Reads the position store and nothing else: no terminal, no gate. This is
     the command an operator reaches for when the guard has escalated, and an

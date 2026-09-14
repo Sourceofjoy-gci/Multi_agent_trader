@@ -130,6 +130,18 @@ class _ScriptedVenue(FakeProtectionVenue):
         return super().positions_now()
 
 
+class _VenueRaisingOnEveryTicket(FakeProtectionVenue):
+    """Every ticket's amend blows up the same untyped way, so each one lands in
+    cycle()'s containment with an identical reason -- which is exactly the case
+    a cycle-wide suppression memory collapses into a single row."""
+
+    def amend_protection(
+        self, ref: VenueRef, stop_loss: Decimal, take_profit: Decimal | None
+    ) -> ExecutionOutcome:
+        self.amended.append(AmendCall(ref=ref, stop_loss=stop_loss, take_profit=take_profit))
+        raise _BrokerBlewUp(BROKER_TEXT)
+
+
 class _VenueRaisingOnOneTicket(FakeProtectionVenue):
     """Ticket 7's amend blows up in a way no typed broker error covers -- a
     bug, not a refusal -- so it escapes the amend site's own catch and has to
@@ -319,6 +331,56 @@ def test_a_restore_the_venue_raises_on_still_escalates_by_the_third_cycle() -> N
     assert BrokerError.public_message not in repr(store.appended)
 
 
+def test_a_stop_that_is_back_clears_the_restore_counter() -> None:
+    """F1. The counter used to be cleared only by an ACCEPTED amend, and
+    ``BrokerError`` means "outcome unknown", not "rejected" -- so an amend that
+    raised but actually landed left a permanent +1. Two of those and the next
+    genuine stop loss escalates at D-7's threshold having never attempted the
+    restore that would probably have worked, which exempts a live position from
+    I-21 for good. D-7 must still be reachable genuinely; it must not be
+    reachable spuriously."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    venue = FakeProtectionVenue(positions=[_observed(stop_loss=None)], amend_raises=BrokerError())
+    guard = _guard(venue, store)
+
+    guard.cycle()
+    guard.cycle()  # two raised amends: the counter is now at D-7's threshold
+
+    venue.positions = (_observed(stop_loss=Decimal("1.09700")),)
+    guard.cycle()  # the stop is back -- whatever happened before is spent
+
+    venue.positions = (_observed(stop_loss=None),)
+    venue.amend_raises = None
+    report = guard.cycle()
+
+    assert report.escalated == 0  # it attempts the restore instead of escalating
+    assert venue.amended[-1].stop_loss == Decimal("1.09700")
+
+
+def test_two_tickets_failing_the_same_way_are_both_reported() -> None:
+    """F2. The per-ticket raise path used to share the cycle-wide suppression
+    memory, so N tickets failing with the same exception type wrote ONE row,
+    ever, naming the first -- and fixing ticket 7 would leave ticket 9 failing
+    in permanent silence. Each ticket reports once per unbroken run of the same
+    failure, which is still D-2."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    store.append(9, "OPEN_PROTECTED", NOW, {"stop_loss": "1.20500"})
+    venue = _VenueRaisingOnEveryTicket(
+        positions=[
+            _observed(stop_loss=None),
+            _observed(position_ticket=9, server_symbol="GBPUSD", stop_loss=None),
+        ]
+    )
+    escalator = RecordingEscalator()
+
+    report = _guard(venue, store, escalator=escalator).cycle()
+
+    assert report.escalated == 2
+    assert sorted(call[1]["ticket"] for call in escalator.calls) == ["7", "9"]
+
+
 def test_a_ticket_whose_check_blows_up_does_not_cost_the_next_ticket_its_check() -> None:
     """C1, half two. I-21 is *every* open position, *every* cycle. Ticket 7
     sorts before ticket 9, so an uncontained failure on 7 means 9 is never
@@ -345,7 +407,11 @@ def test_a_ticket_whose_check_blows_up_does_not_cost_the_next_ticket_its_check()
     assert [call.ref.position_ticket for call in venue.amended] == [7, 9]
     assert report.checked == 2
     ticket_9_rows = [row for row in store.appended if row[0] == 9]
-    assert ticket_9_rows[-1][2]["stop_loss"] == "1.20500"  # 9 was genuinely restored
+    # Both halves: the row count is what makes "genuinely restored" mean
+    # anything. The value alone is the seed's, so asserting it without the
+    # count passes even if the restore wrote nothing -- M1's exact defect.
+    assert len(ticket_9_rows) == 2
+    assert ticket_9_rows[-1][2]["stop_loss"] == "1.20500"
     assert escalator.calls == [
         (
             "a position check raised _BrokerBlewUp",
