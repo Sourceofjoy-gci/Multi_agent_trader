@@ -13,6 +13,7 @@ deliberately is not (D-6).
 from __future__ import annotations
 
 import json
+import signal
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
@@ -35,7 +36,7 @@ from trading_house.brokers.mt5.boundary import (
 from trading_house.core.values import IntentState
 from trading_house.database.connection import open_runtime_connection
 from trading_house.execution.ledger import PostgresIntentLedger
-from trading_house.execution.loop import SYSTEM_TICKET
+from trading_house.execution.loop import SYSTEM_TICKET, PositionGuard
 from trading_house.execution.positions import PostgresPositionStore
 
 if TYPE_CHECKING:
@@ -114,6 +115,17 @@ class _GuardTerminal(FakeTerminal):
         )
 
 
+class _PartiallyBlindTerminal(_GuardTerminal):
+    """XAUUSD's contract cannot be read -- ``symbol_info`` returns ``None``
+    for it, the same as a real terminal that does not know the symbol --
+    while EURUSD's still can. Both are bound in ``config/venue_binding.mt5.yaml``."""
+
+    def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None:
+        if server_symbol == "XAUUSD":
+            return None
+        return super().symbol_info(server_symbol)
+
+
 class _SelfSettingStop(threading.Event):
     """An event that sets itself the first time the daemon waits on it, so
     ``run()`` performs exactly one cycle and then exits through its own
@@ -186,14 +198,63 @@ def test_guard_run_puts_the_recorded_stop_back_on_a_live_position(
 
 @pytest.mark.usefixtures("_isolated_position_events")
 def test_guard_run_records_its_own_shutdown(database: DatabaseHarness) -> None:
-    """SIGINT sets the stop event rather than killing the process, so the
-    daemon leaves a dated row behind instead of a gap nobody can explain."""
+    """``PositionGuard.run``'s ``finally`` writes a dated ``GUARD_STOPPED`` row
+    on any exit from the loop -- this test reaches it through the
+    ``_SelfSettingStop`` seam, not a raised SIGINT. The SIGINT wiring itself
+    (the handler is installed, restores the prior one, and sets the stop
+    event when invoked) is
+    ``test_sigint_handler_sets_the_stop_event_and_is_restored_afterward``
+    below."""
 
     runner.invoke(cli.app, RUN_ARGS)
 
     row = _store(database).latest(SYSTEM_TICKET)
     assert row is not None
     assert row["lifecycle"] == "GUARD_STOPPED"
+
+
+def test_sigint_handler_sets_the_stop_event_and_is_restored_afterward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``guard run`` installs a SIGINT handler around its loop and restores
+    the prior one in a ``finally`` (``cli.py``'s ``guard_run``). Proved here
+    without raising a real signal -- this suite raises none -- by spying on
+    ``signal.signal`` to capture the exact handler object installed, then:
+
+    1. calling it directly and checking it sets the daemon's stop event, and
+    2. confirming ``signal.getsignal(SIGINT)`` is back to what it was before
+       the command ran.
+
+    ``PositionGuard.run`` is stubbed to a no-op so the stop event is touched
+    by nothing except the handler under test -- otherwise ``run()``'s own
+    shutdown path (or the self-setting seam other tests use) would set it
+    first, and the assertion would pass for the wrong reason."""
+
+    installed: list[Callable[[int, object], None]] = []
+    real_signal = signal.signal
+
+    def _spy(
+        signalnum: int, handler: Callable[[int, object], None]
+    ) -> Callable[[int, object], None]:
+        if signalnum == signal.SIGINT and not installed:
+            installed.append(handler)
+        return real_signal(signalnum, handler)
+
+    monkeypatch.setattr(signal, "signal", _spy)
+    monkeypatch.setattr(PositionGuard, "run", lambda self, stop, interval_seconds=1.0: None)
+    stop_event = threading.Event()
+    monkeypatch.setattr(cli, "_stop_event", lambda: stop_event)
+
+    before = signal.getsignal(signal.SIGINT)
+    result = runner.invoke(cli.app, RUN_ARGS)
+
+    assert result.exit_code == cli.ExitCode.OK
+    assert signal.getsignal(signal.SIGINT) is before
+
+    assert len(installed) == 1
+    assert not stop_event.is_set()  # the no-op run() never touched it
+    installed[0](signal.SIGINT, None)
+    assert stop_event.is_set()
 
 
 @pytest.mark.usefixtures("_isolated_position_events")
@@ -218,21 +279,52 @@ def test_guard_run_is_not_gated_by_an_unresolved_intent(
 
 
 @pytest.mark.usefixtures("_isolated_position_events")
+def test_guard_run_skips_an_unreadable_instrument_instead_of_refusing_to_start(
+    database: DatabaseHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 8: XAUUSD's contract can't be read at startup, but that must
+    not take every OTHER bound instrument's guarding down with it -- the
+    daemon skips XAUUSD, says so in its own output, and still restores
+    EURUSD's stop in the same cycle."""
+
+    blind_terminal = _PartiallyBlindTerminal()
+
+    def _factory() -> Callable[[str], TerminalPort]:
+        return lambda _probe: blind_terminal  # type: ignore[return-value]
+
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", _factory)
+    _record(database, stop_loss="1.09500")
+
+    result = runner.invoke(cli.app, RUN_ARGS)
+
+    assert result.exit_code == cli.ExitCode.OK
+    payload = json.loads(result.stdout)
+    assert payload["skipped_instruments"] == ["XAUUSD"]
+    assert [request["sl"] for request in _sltp_requests(blind_terminal)] == [1.095]
+
+
+@pytest.mark.usefixtures("_isolated_position_events")
 def test_guard_status_shows_an_escalated_position_and_needs_no_terminal(
     database: DatabaseHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The command an operator reaches for after an escalation -- which is
     exactly when the broker may be the thing that is broken, so it must not
-    need one."""
+    need one.
 
-    _record(
-        database,
-        stop_loss="1.09500",
-        escalated="true",
-        escalation_reason="restore already failed twice",
-    )
+    The escalated row comes from a real cycle, not a hand-seeded payload: the
+    record has no stop and the broker has none either (``_GuardTerminal``'s
+    default ``sl=0.0``), which is ``decide()``'s "no stop anywhere to
+    restore". Writer (``loop.py``) and reader (``cli.py``) of the
+    ``escalated``/``escalation_reason`` payload keys are both real production
+    code paths here, so a rename on either side breaks this test instead of
+    leaving ``guard status`` silently reporting ``escalated: 0`` forever with
+    every test green (Finding 4)."""
+
+    _record(database)  # no recorded stop, and the broker has none either
+    run_result = runner.invoke(cli.app, RUN_ARGS)
+    assert run_result.exit_code == cli.ExitCode.OK
+
     monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: None)
-
     result = runner.invoke(cli.app, ["guard", "status"])
 
     assert result.exit_code == cli.ExitCode.OK
@@ -243,9 +335,9 @@ def test_guard_status_shows_an_escalated_position_and_needs_no_terminal(
         {
             "position_ticket": TICKET,
             "lifecycle": "OPEN_PROTECTED",
-            "stop_loss": "1.09500",
+            "stop_loss": None,
             "escalated": True,
-            "escalation_reason": "restore already failed twice",
+            "escalation_reason": "no stop anywhere to restore",
         }
     ]
 
