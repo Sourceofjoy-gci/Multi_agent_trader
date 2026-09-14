@@ -3,7 +3,7 @@
 ``PositionGuard.cycle()`` joins Task 3's pure ``decide()`` to a broker and a
 store: read the broker, read what we recorded, decide, act, record. The
 property this whole task exists to guarantee -- I-21, a missing stop is
-restored or escalated within two cycles -- is
+restored, or escalated after two failed restore attempts -- is
 ``test_a_restore_that_keeps_failing_escalates_by_the_third_cycle``.
 
 Two families of test here exist because of the store's shape rather than the
@@ -271,10 +271,13 @@ def test_a_missing_stop_is_restored_and_recorded() -> None:
 
 
 def test_a_restore_that_keeps_failing_escalates_by_the_third_cycle() -> None:
-    """I-21: restored or escalated within two cycles -- which is an upper AND
-    a lower bound. Discarding the first two reports passes a guard that
-    escalated on cycle two, and that is how D-7's "two failed attempts, not
-    one" stops being tested at all."""
+    """I-21: restored, or escalated after two failed restore attempts -- which
+    is an upper AND a lower bound. Discarding the first two reports passes a
+    guard that escalated on cycle two, and that is how D-7's "two failed
+    attempts, not one" stops being tested at all.
+
+    The test's name is the accurate statement of the timing: attempts on cycles
+    one and two, escalation on cycle three."""
 
     store = _protected(RecordingPositionStore(), stop_loss="1.09700")
     venue = FakeProtectionVenue(positions=[_observed(stop_loss=None)], amend_fails=True)

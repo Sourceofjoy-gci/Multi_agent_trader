@@ -381,7 +381,8 @@ Phase 5 makes one promise: **every position this system opened is, at every
 moment, carrying the stop the ledger says it carries — and if it is not, the
 guard notices within a second and puts it back.** That is I-21: every open
 position is verified against its recorded protection at least once per cycle,
-and a missing stop is restored or escalated within two cycles.
+and a missing stop is restored, or escalated after two failed restore
+attempts.
 
 **The guard is deliberately not gated by the unresolved-intent check.** Every
 order-*placing* command runs `require_clean_ledger` (I-20) first. `guard run`
