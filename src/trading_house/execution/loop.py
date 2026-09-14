@@ -43,10 +43,16 @@ so the true diagnosis is not buried under thousands of repetitions of itself,
 each one wrong because the record no longer holds what made the first one
 possible. There is deliberately no sixth ``PositionState.lifecycle`` value
 for this (``core/schemas.py:238`` closes that ``Literal`` at five); it lives
-in the payload instead. Nothing in this module clears it -- that is an
-operator action via a successful reconcile, which is what
-``mark_stale()``/``mark_reconciled()`` already gate. This loop implements no
-clearing path.
+in the payload instead.
+
+**Nothing clears it -- not this module and not anything else in this system.**
+The flag is carried forward by every later write (see ``_maybe_record``) and
+the store is append-only, so it is terminal for the life of that position's
+record, and an escalated position is therefore exempt from I-21 until a human
+intervenes. ``mark_stale()``/``mark_reconciled()`` govern whether *gateway*
+state is trusted and never touch a position record, so a successful reconcile
+does not clear this despite looking like it should. Whether escalation ought to
+be clearable is an open design question, deliberately not answered here.
 
 Error containment (I-6): the real ``ProtectionPort`` RAISES rather than
 returning ``None`` on a broken call -- ``brokers/mt5/adapter.py``'s
@@ -352,9 +358,11 @@ class PositionGuard:
         if record is not None and record.get("escalated") == "true":
             # Terminal (spec 5.2's "stop attempting modifications"): forms no
             # new opinion, attempts no amend, writes no row, escalates again
-            # never. Only a successful operator-triggered reconcile clears
-            # this -- mark_stale()/mark_reconciled() already gate that; this
-            # loop implements no clearing path of its own.
+            # never. Nothing clears this -- not here and not elsewhere; the
+            # flag is carried forward by every later write into an append-only
+            # store. mark_reconciled() clears GATEWAY staleness, not a position
+            # record, so a reconcile does not un-escalate this despite reading
+            # as though it would.
             return False, False
 
         is_recorded = record is not None
