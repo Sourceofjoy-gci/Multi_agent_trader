@@ -117,6 +117,25 @@ def _imported_modules(tree: ast.Module) -> set[str]:
     return modules
 
 
+def _relative_imports(tree: ast.Module) -> set[str]:
+    """Every ``from .foo import bar`` in one module -- the ``level > 0`` form
+    this module's own ``_imported_modules`` and ``test_phase5.py``'s
+    ``_project_imports`` are both blind to, since each requires
+    ``node.level == 0`` (fix round 1, Finding 7). A relative import inside
+    execution/ would clear ``EXECUTION_FORBIDDEN`` unseen by either. The repo
+    uses none today; ``test_no_module_uses_a_relative_import`` below keeps
+    that true instead of teaching both detectors to resolve one, which would
+    be two independent resolutions that could drift out of sync with each
+    other -- exactly the "less independent than they look" shape the finding
+    describes."""
+
+    return {
+        f"{'.' * node.level}{node.module or ''}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level > 0
+    }
+
+
 def _reaches(tree: ast.Module, forbidden: frozenset[str]) -> set[str]:
     """Modules imported that are, or live under, a forbidden path."""
 
@@ -135,6 +154,29 @@ def test_source_tree_is_not_empty() -> None:
     """A silent glob failure must not make every other guard vacuous."""
 
     assert len(_source_files()) >= 10
+
+
+def test_no_module_uses_a_relative_import() -> None:
+    """Closes the blind spot ``_relative_imports`` documents: neither this
+    file's own import-boundary checks nor ``test_phase5.py``'s see a
+    ``from .foo import bar``. Repo-wide, not just ``execution/``, because
+    ``_project_imports`` in ``test_phase5.py`` shares the same gap and this
+    is a strictly stronger guarantee that covers it too."""
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        found = sorted(_relative_imports(tree))
+        if found:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = found
+
+    assert offenders == {}
+
+
+def test_the_relative_import_guard_can_still_fail() -> None:
+    """Guard the guard: prove the detector flags a real relative import
+    rather than a check that stopped looking."""
+
+    assert _relative_imports(ast.parse("from ..brokers.mt5 import adapter\n")) == {"..brokers.mt5"}
 
 
 def test_no_module_imports_a_broker_or_agent_framework() -> None:

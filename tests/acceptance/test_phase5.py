@@ -8,9 +8,21 @@ does:
   is the positive form of ``test_architecture.py``'s denylist -- it fails on
   a package nobody thought to forbid, which is how the guard's own
   ``ProtectionPort`` shim came to live outside this tree.
-* ``amend_protection`` -- the one call in this system that moves a live
-  position's stop -- is called from exactly one place, and no retry loop
-  surrounds it.
+* ``amend_protection`` moves a live position's stop. In this system it is
+  called from exactly two places -- ``execution/loop.py`` and the
+  ``ProtectionPort`` shim in ``ops/guard.py``, which only delegates to the
+  real adapter -- and no retry loop surrounds either call (fix round 1,
+  Finding 6: the shim is scanned too now, not just ``execution/``, because a
+  retry added there would violate D-7 exactly as invisibly as one in
+  ``loop.py`` itself).
+
+``_project_imports`` below shares a blind spot with ``test_architecture.py``'s
+``_imported_modules``: both require ``node.level == 0``, so a relative import
+would clear either check unseen (fix round 1, Finding 7). Closed by asserting
+the repo has none at all --
+``test_architecture.py::test_no_module_uses_a_relative_import`` -- rather than
+teaching both detectors to resolve one, which is more code duplicating a
+property already held here as a fact about the whole tree.
 """
 
 from __future__ import annotations
@@ -24,17 +36,28 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = PROJECT_ROOT / "src" / "trading_house"
 EXECUTION_ROOT = SOURCE_ROOT / "execution"
+# The guard's ProtectionPort shim (Mt5ProtectionPort) lives in ops/, outside
+# execution/ -- see test_no_execution_module_reaches_outside_core_database_and_itself
+# -- but it is the other of the two places in this system that calls
+# amend_protection, so it must be scanned alongside execution/ wherever that
+# call is being counted (Finding 6).
+OPS_ROOT = SOURCE_ROOT / "ops"
 # execution/ owns the ports it needs and lets the composition root satisfy
 # them, so this is the whole of what it may reach inside this project.
 EXECUTION_ALLOWED = ("trading_house.core", "trading_house.database", "trading_house.execution")
 AMEND = "amend_protection"
-LOOPS = (ast.For, ast.AsyncFor, ast.While)
+# ListComp/GeneratorExp/SetComp count as loops too (Finding 5): an AST Call
+# that is the elt of a comprehension is exactly as much a retry as one in a
+# `for` or `while` body -- `any(amend(...) for _ in range(3))` is a loop with
+# different punctuation, and the detector must not be blind to it.
+LOOPS = (ast.For, ast.AsyncFor, ast.While, ast.ListComp, ast.GeneratorExp, ast.SetComp)
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
-def _parsed(root: Path) -> Iterator[tuple[Path, ast.Module]]:
-    for path in sorted(root.rglob("*.py")):
-        yield path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+def _parsed(*roots: Path) -> Iterator[tuple[Path, ast.Module]]:
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            yield path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
 def _project_imports(tree: ast.Module) -> set[str]:
@@ -105,26 +128,32 @@ def test_no_execution_module_reaches_outside_core_database_and_itself() -> None:
 
 
 def test_a_live_stop_is_moved_from_exactly_one_place_in_execution() -> None:
-    """One call site is what makes "the guard attempts an amend at most once
-    per position per cycle" a property of the code rather than of a reviewer's
-    attention. A second caller elsewhere in the daemon could resend a stop the
-    first one already sent, and no behavioural test of either caller would
-    notice."""
+    """One call site per module is what makes "the guard attempts an amend at
+    most once per position per cycle" a property of the code rather than of a
+    reviewer's attention. A second caller elsewhere in the daemon or its
+    composition shim could resend a stop the first one already sent, and no
+    behavioural test of either caller would notice. Both places that call
+    ``amend_protection`` in this system are scanned: ``execution/`` and the
+    ``ProtectionPort`` shim in ``ops/`` (Finding 6)."""
 
     call_sites = {
         path.relative_to(PROJECT_ROOT).as_posix(): len(_amend_calls(tree))
-        for path, tree in _parsed(EXECUTION_ROOT)
+        for path, tree in _parsed(EXECUTION_ROOT, OPS_ROOT)
         if _amend_calls(tree)
     }
 
-    assert call_sites == {"src/trading_house/execution/loop.py": 1}
+    assert call_sites == {
+        "src/trading_house/execution/loop.py": 1,
+        "src/trading_house/ops/guard.py": 1,
+    }
 
 
 def test_no_retry_loop_surrounds_the_amend() -> None:
     """See ``_loops_between_the_call_and_its_function``: the per-position loop
-    in ``cycle()`` is legitimate, a loop inside ``_process`` would not be."""
+    in ``cycle()`` is legitimate, a loop inside ``_process`` would not be --
+    and the same goes for the shim's single-line delegation in ``ops/``."""
 
-    for path, tree in _parsed(EXECUTION_ROOT):
+    for path, tree in _parsed(EXECUTION_ROOT, OPS_ROOT):
         for call in _amend_calls(tree):
             assert _loops_between_the_call_and_its_function(tree, call) == [], (
                 f"{path.relative_to(PROJECT_ROOT).as_posix()}:{call.lineno} "
@@ -159,6 +188,13 @@ def test_no_retry_loop_surrounds_the_amend() -> None:
             1,
             [],
             id="loop-in-the-caller-is-legitimate",
+        ),
+        pytest.param(
+            "def _process(self):\n"
+            "    any(self._venue.amend_protection(a, b, c) for _ in range(3))\n",
+            1,
+            ["GeneratorExp"],
+            id="retry-generator-expression",
         ),
         pytest.param(
             "def f(self):\n"
