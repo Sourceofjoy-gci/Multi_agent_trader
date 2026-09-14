@@ -249,6 +249,14 @@ class FakeProtectionVenue:
     that names the unavailable-price branch cannot tell "the branch ran and
     the price was None" from "the branch was never reached", and the second
     one passes identically.
+
+    ``amend_fails`` and ``amend_raises`` are the two DIFFERENT ways a broker
+    refuses, and the difference is the whole of C1. ``amend_fails`` returns a
+    rejected ``ExecutionOutcome``; the production port does not do that. It
+    RAISES -- ``brokers/mt5/adapter.py`` raises ``BrokerError`` whenever MT5's
+    ``send_order`` returns ``None``, which it does on any error. Only
+    ``amend_raises`` stages what production actually does, and it still
+    records the attempt in ``amended`` first: the call was made.
     """
 
     def __init__(
@@ -256,10 +264,12 @@ class FakeProtectionVenue:
         *,
         positions: Sequence[PositionRecord] | None = (),
         amend_fails: bool = False,
+        amend_raises: Exception | None = None,
         closing_price_result: Decimal | None = None,
     ) -> None:
         self._positions = positions
         self._amend_fails = amend_fails
+        self._amend_raises = amend_raises
         self.closing_price_result = closing_price_result
         self.amended: list[AmendCall] = []
         self.price_reads: list[tuple[str, bool]] = []
@@ -271,6 +281,8 @@ class FakeProtectionVenue:
         self, ref: VenueRef, stop_loss: Decimal, take_profit: Decimal | None
     ) -> ExecutionOutcome:
         self.amended.append(AmendCall(ref=ref, stop_loss=stop_loss, take_profit=take_profit))
+        if self._amend_raises is not None:
+            raise self._amend_raises
         if self._amend_fails:
             return ExecutionOutcome(
                 accepted=False,

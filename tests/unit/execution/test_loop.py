@@ -33,13 +33,16 @@ import pytest
 
 from tests.unit.execution.conftest import (
     NOW,
+    AmendCall,
     FakeProtectionVenue,
     RecordingEscalator,
     RecordingPositionStore,
 )
 from trading_house.core.clock import FixedClock
-from trading_house.core.venue import PositionRecord
-from trading_house.execution.guard import r_multiple
+from trading_house.core.errors import BrokerError
+from trading_house.core.venue import ExecutionOutcome, PositionRecord, VenueRef
+from trading_house.execution import loop as loop_module
+from trading_house.execution.guard import ActionKind, GuardAction, r_multiple
 from trading_house.execution.loop import SYSTEM_TICKET, PositionGuard
 
 OWNED_RANGES = ((110000, 110100),)
@@ -125,6 +128,21 @@ class _ScriptedVenue(FakeProtectionVenue):
         if self.reads in self._raise_on:
             raise _BrokerBlewUp(BROKER_TEXT)
         return super().positions_now()
+
+
+class _VenueRaisingOnOneTicket(FakeProtectionVenue):
+    """Ticket 7's amend blows up in a way no typed broker error covers -- a
+    bug, not a refusal -- so it escapes the amend site's own catch and has to
+    be held by ``cycle()``'s per-ticket containment instead. Ticket 9 is
+    healthy and must still be restored in that same cycle (I-21)."""
+
+    def amend_protection(
+        self, ref: VenueRef, stop_loss: Decimal, take_profit: Decimal | None
+    ) -> ExecutionOutcome:
+        if ref.position_ticket == 7:
+            self.amended.append(AmendCall(ref=ref, stop_loss=stop_loss, take_profit=take_profit))
+            raise _BrokerBlewUp(BROKER_TEXT)
+        return super().amend_protection(ref, stop_loss, take_profit)
 
 
 class _StoreLeakingTheDaemonRow(RecordingPositionStore):
@@ -265,6 +283,126 @@ def test_a_restore_that_keeps_failing_escalates_by_the_third_cycle() -> None:
     reports = [guard.cycle(), guard.cycle(), guard.cycle()]
 
     assert tuple(report.escalated for report in reports) == (0, 0, 1)
+
+
+def test_a_restore_the_venue_raises_on_still_escalates_by_the_third_cycle() -> None:
+    """C1, half one. ``amend_fails`` is not what production does: the real
+    port RAISES -- ``adapter.py`` raises ``BrokerError`` whenever MT5's
+    ``send_order`` returns None, which is any error. A raise that does not
+    advance ``_failed_restores`` makes D-7 unreachable through the only path
+    production takes: the guard re-amends the same naked position every
+    second, forever, and never escalates.
+
+    The escalation payload carries the exception's TYPE name and nothing
+    else -- "restore already failed twice" on its own says nothing about what
+    the broker did, and the message may carry the broker's own text."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    venue = FakeProtectionVenue(positions=[_observed(stop_loss=None)], amend_raises=BrokerError())
+    escalator = RecordingEscalator()
+    guard = _guard(venue, store, escalator=escalator)
+
+    reports = [guard.cycle(), guard.cycle(), guard.cycle()]
+
+    assert tuple(report.escalated for report in reports) == (0, 0, 1)
+    assert len(venue.amended) == 2  # it tried twice, then stopped attempting
+    assert escalator.calls == [
+        (
+            "restore already failed twice",
+            {"position_ticket": 7, "action": "escalate", "amend_error": "BrokerError"},
+        )
+    ]
+    assert BrokerError.public_message not in repr(escalator.calls)
+    assert BrokerError.public_message not in repr(store.appended)
+
+
+def test_a_ticket_whose_check_blows_up_does_not_cost_the_next_ticket_its_check() -> None:
+    """C1, half two. I-21 is *every* open position, *every* cycle. Ticket 7
+    sorts before ticket 9, so an uncontained failure on 7 means 9 is never
+    looked at -- this cycle and, since the condition recurs, every cycle
+    after: a naked position nobody is checking, and no row saying so."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    store.append(9, "OPEN_PROTECTED", NOW, {"stop_loss": "1.20500"})
+    venue = _VenueRaisingOnOneTicket(
+        positions=[
+            _observed(stop_loss=None),
+            _observed(
+                position_ticket=9,
+                server_symbol="GBPUSD",
+                stop_loss=None,
+                open_price=Decimal("1.21000"),
+            ),
+        ]
+    )
+    escalator = RecordingEscalator()
+
+    report = _guard(venue, store, escalator=escalator).cycle()
+
+    assert [call.ref.position_ticket for call in venue.amended] == [7, 9]
+    assert report.checked == 2
+    ticket_9_rows = [row for row in store.appended if row[0] == 9]
+    assert ticket_9_rows[-1][2]["stop_loss"] == "1.20500"  # 9 was genuinely restored
+    assert escalator.calls == [
+        (
+            "a position check raised _BrokerBlewUp",
+            {"ticket": "7", "error_type": "_BrokerBlewUp"},
+        )
+    ]
+    assert BROKER_TEXT not in repr(escalator.calls)
+    assert BROKER_TEXT not in repr(store.appended)
+
+
+def test_an_action_kind_this_cycle_cannot_handle_is_not_dropped_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2: ``TIGHTEN_STOP`` is excluded from two separate sets, and the next
+    phase's trailing caller has to remember both. Forgetting either dropped a
+    tighten with no error at all; now it raises, and containment turns that
+    into an escalation rather than a dead daemon."""
+
+    monkeypatch.setattr(
+        loop_module,
+        "decide",
+        lambda **_: GuardAction(ActionKind.TIGHTEN_STOP, stop_loss=Decimal("1.09800")),
+    )
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    venue = FakeProtectionVenue(positions=[_observed(stop_loss=Decimal("1.09700"))])
+    escalator = RecordingEscalator()
+
+    report = _guard(venue, store, escalator=escalator).cycle()
+
+    assert report.escalated == 1
+    assert [reason for reason, _ in escalator.calls] == [
+        "a position check raised NotImplementedError"
+    ]
+    assert venue.amended == []
+
+
+def test_a_persistently_unreadable_broker_escalates_once_not_once_a_second() -> None:
+    """I3, D-2: an MT5 terminal shut down overnight is an ordinary state, and
+    it is unreadable on all ~86,400 cycles of the next day. One audit row and
+    one position event per cycle is D-2's stated failure exactly. The
+    condition changing is what earns a second row."""
+
+    venue = FakeProtectionVenue(positions=None)
+    escalator = RecordingEscalator()
+    store = RecordingPositionStore()
+    guard = _guard(venue, store, escalator=escalator)
+
+    reports = [guard.cycle() for _ in range(5)]
+
+    assert tuple(report.escalated for report in reports) == (1, 0, 0, 0, 0)
+    assert len(escalator.calls) == 1
+    assert len(store.appended) == 1
+
+    venue._positions = ()  # the terminal comes back, with an empty book
+    guard.cycle()
+    venue._positions = None  # and goes away again
+    guard.cycle()
+
+    assert len(escalator.calls) == 2
+    assert len(store.appended) == 2
 
 
 def test_a_failed_amend_still_counts_as_an_action() -> None:
@@ -493,6 +631,36 @@ def test_an_orphan_retaining_its_own_stop_is_adopted_without_a_redundant_amend()
     assert row["mfe_r"] == "0.5"
 
 
+def test_an_orphan_stopped_at_its_own_entry_carries_no_risk_basis() -> None:
+    """C2: a broker stop sitting AT the entry -- a stop moved to breakeven, an
+    ordinary state -- makes ``initial_risk_distance`` zero. Written once, it
+    is divided by on every later cycle and never recomputed (Section 8.2), so
+    that ticket raises every second for the rest of its life. R-multiples are
+    analytics; a position with none is still fully guarded, which is the
+    trade this makes."""
+
+    store = RecordingPositionStore()  # empty: an orphan, stopped at its entry
+    venue = FakeProtectionVenue(
+        positions=[_observed(stop_loss=Decimal("1.10000"))],  # == open_price
+        closing_price_result=Decimal("1.10150"),  # a price, so R would be computed
+    )
+    escalator = RecordingEscalator()
+    guard = _guard(venue, store, escalator=escalator)
+
+    guard.cycle()  # adopts at its own stop; escalates per D-5
+    second = guard.cycle()
+
+    row = store.latest(7)
+    assert row is not None
+    assert "initial_risk_distance" not in row
+    assert "open_price" not in row
+    # The second cycle neither raised nor escalated: still checked, still ours.
+    assert (second.checked, second.escalated) == (1, 0)
+    assert [reason for reason, _ in escalator.calls] == [
+        "orphan retains its broker stop; adopted, then escalate per D-5"
+    ]
+
+
 def test_a_refused_adoption_does_not_fix_the_risk_basis_to_a_refused_stop() -> None:
     """Section 8.2 fixes ``initial_risk_distance`` at entry and never
     recomputes it. Deriving it from a stop the venue REJECTED would anchor
@@ -588,6 +756,10 @@ def test_an_escalation_keeps_the_recorded_stop() -> None:
     guard.cycle()
     guard.cycle()
 
+    # M1: the seed already carries this stop, so the assertion below is
+    # satisfied whether the escalation row was written or not. Counting the
+    # rows is what makes it about the escalation.
+    assert len(store.appended) == 2  # the seed plus the escalation row
     assert store.appended[-1][2]["stop_loss"] == "1.09700"
 
 
@@ -677,6 +849,9 @@ def test_a_record_holding_only_an_open_price_keeps_it() -> None:
 
     _guard(venue, store).cycle()
 
+    # M1: same shape as above -- the seed already carries open_price, so only
+    # the row count says a new row was written at all.
+    assert len(store.appended) == 2  # the seed plus the RECORD_ONLY row
     assert store.appended[-1][2]["open_price"] == "1.10000"
 
 

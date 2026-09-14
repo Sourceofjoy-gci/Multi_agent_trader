@@ -54,17 +54,41 @@ state is trusted and never touch a position record, so a successful reconcile
 does not clear this despite looking like it should. Whether escalation ought to
 be clearable is an open design question, deliberately not answered here.
 
-Error containment (I-6): the real ``ProtectionPort`` RAISES rather than
-returning ``None`` on a broken call -- ``brokers/mt5/adapter.py``'s
+Error containment (I-6), in three layers, because each one lets a different
+promise through. The real ``ProtectionPort`` RAISES rather than returning
+``None`` on a broken call -- ``brokers/mt5/adapter.py``'s
 ``amend_protection`` raises ``ConfigurationError``, ``BrokerUnavailableError``
 and ``BrokerError`` (the last whenever MT5's ``send_order`` returns ``None``,
-which it does on any error). ``run()`` therefore wraps each ``cycle()`` in
-``try/except Exception`` -- no narrower, because the point is that the guard
-outlives anything one cycle can do -- and escalates with the exception's
-*type name* only. Never its message: a broker's own text can be inside it,
-and no credential, DSN, account number or raw broker message may reach any
-payload. The shutdown row is written from a ``try/finally`` around the whole
-loop so it lands even on an exit nothing here anticipated.
+which it does on any error), and the gateway behind it raises
+``BrokerUnavailableError`` and ``NonDemoAccountError``. All five are
+``core.errors.TradingHouseError``.
+
+1. **At the amend site**, that one base class is caught and the raise is
+   treated as a failed write -- the same as a rejected ``ExecutionOutcome``,
+   because a refusal that arrives as an exception is no less a refusal. If
+   the raise did not advance ``_failed_restores``, D-7's "two failed restores
+   escalate" would be unreachable through the path production actually takes:
+   the guard would retry the same naked position every second forever. The
+   exception's *type name* is remembered per ticket and travels with that
+   ticket's eventual escalation payload, so the escalation says which kind of
+   broker failure produced it. Anything not a ``TradingHouseError`` is a bug,
+   not a broker refusal, and is deliberately left to fall through to (2).
+2. **Around each ticket's ``_process``**, ``cycle()`` catches ``Exception``
+   and moves on to the next ticket. I-21 is *every* open position, *every*
+   cycle: without this, one ticket's failure costs every ticket sorted after
+   it its check, for as long as the condition recurs.
+3. **Around each ``cycle()``**, ``run()`` catches ``Exception`` -- no
+   narrower, because the point is that the guard outlives anything one cycle
+   can do.
+
+(2) and (3) escalate with the exception's *type name* only. Never its
+message: a broker's own text can be inside it, and no credential, DSN,
+account number or raw broker message may reach any payload. Both go through
+``_escalate_system``, which writes one row per unbroken run of the same
+condition (D-2) rather than ~86,400 copies a day of an MT5 terminal that is
+simply switched off, and writes again the moment the condition changes. The
+shutdown row is written from a ``try/finally`` around the whole loop so it
+lands even on an exit nothing here anticipated.
 
 MAE/MFE storage: there is no in-memory cache of the running extrema on
 ``PositionGuard``. Every cycle re-reads the last-written ``mae_r``/``mfe_r``
@@ -99,6 +123,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from trading_house.core.clock import Clock
+from trading_house.core.errors import TradingHouseError
 from trading_house.core.venue import (
     ExecutionOutcome,
     Mt5VenueRef,
@@ -121,6 +146,24 @@ SYSTEM_ESCALATED_LIFECYCLE = "GUARD_ESCALATED"
 # decide() only ever returns these two kinds with a venue-side write to make;
 # TIGHTEN_STOP comes from decide_tighten(), which this cycle never calls.
 _ACTING_KINDS = frozenset({ActionKind.RESTORE_STOP, ActionKind.ADOPT_ORPHAN})
+# The kinds that are a material change on their own (D-2). RESTORE_STOP is
+# deliberately absent: it is material only when the venue accepted the write,
+# which is a runtime fact, not a property of the kind -- see _maybe_record.
+_RECORDING_KINDS = frozenset(
+    {
+        ActionKind.RECORD_ONLY,
+        ActionKind.RECORD_CLOSED,
+        ActionKind.ESCALATE,
+        ActionKind.ADOPT_ORPHAN,
+    }
+)
+# Every kind this cycle knows what to do with. TIGHTEN_STOP is the one that is
+# not here: decide() never returns it and this cycle never calls
+# decide_tighten(), so a tighten arriving here means the next phase's trailing
+# caller routed one through without teaching either set above about it. Raising
+# is what stops that being dropped in silence (M2); containment turns it into
+# an escalation rather than a dead daemon.
+_HANDLED_KINDS = _ACTING_KINDS | _RECORDING_KINDS | frozenset({ActionKind.NOTHING})
 
 
 class PositionStore(Protocol):
@@ -262,20 +305,59 @@ class PositionGuard:
         # only delays an eventual escalation -- unlike the MAE/MFE extrema
         # above, losing this counter never understates anything on record.
         self._failed_restores: dict[int, int] = {}
+        # The type name of the last amend that RAISED for this ticket, so the
+        # escalation D-7 eventually fires can say which kind of broker failure
+        # produced it. Type names only -- never a message.
+        self._amend_errors: dict[int, str] = {}
+        # D-2 for the daemon's own escalations: the reason last reported, so an
+        # unchanged condition is reported once rather than once a second.
+        self._last_system_reason: str | None = None
+
+    def _escalate_system(self, reason: str, payload: Mapping[str, str]) -> bool:
+        """Escalate a condition that is the daemon's, not one position's, and
+        say whether it was actually reported.
+
+        Escalation is exactly ``escalate()`` (Task 6 wires it to
+        ``mark_stale()`` plus an audit append) and the position event this
+        module writes itself, filed under ``SYSTEM_TICKET`` -- the same three
+        things everywhere, no fourth step.
+
+        D-2: an unreadable terminal is an ordinary overnight state, and
+        reporting it every cycle is ~86,400 audit rows and ~86,400 position
+        events a day, all identical, which is exactly how the one row that
+        matters gets buried. So the reason is reported once per unbroken run
+        of it and again the moment it changes -- including back to it after a
+        clean cycle (unreadable -> readable -> unreadable). ``cycle()`` clears
+        the memory on any cycle that had nothing system-level to say.
+
+        Both calls are suppressed together (M3): Task 6 wires each to a
+        database write, and a guard that cannot report a problem must still
+        keep protecting positions (I-6). The memory is set BEFORE either, so a
+        persistently raising escalator is also attempted only once.
+        """
+
+        if reason == self._last_system_reason:
+            return False
+        self._last_system_reason = reason
+        with contextlib.suppress(Exception):
+            self._escalator.escalate(reason, payload)
+            self._store.append(
+                SYSTEM_TICKET,
+                SYSTEM_ESCALATED_LIFECYCLE,
+                self._clock.now(),
+                {"reason": reason, **payload},
+            )
+        return True
 
     def cycle(self) -> CycleReport:
         observed_all = self._venue.positions_now()
         if observed_all is None:
-            reason = "could not read the broker's open positions"
-            self._escalator.escalate(reason, {})
             # N5: the module docstring promises this module writes the
             # position event directly for every escalation, system-level
             # ones included -- an unreadable read is exactly the kind most
             # worth finding later, filed under SYSTEM_TICKET (loop.py:104-107).
-            self._store.append(
-                SYSTEM_TICKET, SYSTEM_ESCALATED_LIFECYCLE, self._clock.now(), {"reason": reason}
-            )
-            return CycleReport(checked=0, acted=0, escalated=1)
+            reported = self._escalate_system("could not read the broker's open positions", {})
+            return CycleReport(checked=0, acted=0, escalated=int(reported))
 
         observed_all_by_ticket = {p.position_ticket: p for p in observed_all}
         owned_tickets = {
@@ -299,14 +381,36 @@ class PositionGuard:
         # position -- skipped here defensively even though the store's own
         # open_positions() is expected to exclude it already (M3): this loop
         # must not depend on that.
+        system_condition = False
         for ticket in sorted(tickets - {SYSTEM_TICKET}):
             checked += 1
-            did_act, did_escalate = self._process(
-                ticket, observed_by_ticket.get(ticket), recorded_by_ticket.get(ticket)
-            )
+            try:
+                did_act, did_escalate = self._process(
+                    ticket, observed_by_ticket.get(ticket), recorded_by_ticket.get(ticket)
+                )
+            except Exception as exc:
+                # I-21 is every open position, every cycle. Letting this out
+                # would cost every ticket sorted after this one its check --
+                # that cycle and, since the condition recurs, every cycle
+                # after. Type name only: a broker's own text can be in the
+                # message. Filed under SYSTEM_TICKET rather than the position's
+                # own, because the store's latest event is a full-replacement
+                # snapshot and a row this thin would DELETE the record that
+                # says where the stop belongs.
+                system_condition = True
+                error_type = type(exc).__name__
+                escalated += int(
+                    self._escalate_system(
+                        f"a position check raised {error_type}",
+                        {"ticket": str(ticket), "error_type": error_type},
+                    )
+                )
+                continue
             acted += did_act
             escalated += did_escalate
 
+        if not system_condition:
+            self._last_system_reason = None
         return CycleReport(checked=checked, acted=acted, escalated=escalated)
 
     def run(self, stop: threading.Event, interval_seconds: float = 1.0) -> None:
@@ -315,36 +419,18 @@ class PositionGuard:
                 try:
                     self.cycle()
                 except Exception as exc:
-                    # The real port RAISES (adapter.py's BrokerError etc.)
-                    # rather than returning None, so one flaky broker call
-                    # must not kill the daemon -- every position would go
-                    # unguarded with no record of why. The exception's TYPE
-                    # name is the diagnostic; its message never reaches a
-                    # payload -- a broker's own text can be inside it.
-                    with contextlib.suppress(Exception):
-                        # N3: Task 6 wires escalate() to mark_stale() plus an
-                        # audit-ledger append -- both database writes. A
-                        # raising escalator must not do what the raising
-                        # cycle itself could not (I-6): a guard that cannot
-                        # report a problem must still keep protecting
-                        # positions. No retry, no backoff -- `finally` below
-                        # still explains any eventual exit.
-                        error_type = type(exc).__name__
-                        reason = f"a cycle raised {error_type}"
-                        self._escalator.escalate(reason, {"error_type": error_type})
-                        # N5: this module owns the position-event write for
-                        # every escalation directly, system-level ones
-                        # included -- a raised cycle is exactly the kind most
-                        # worth finding later, filed under SYSTEM_TICKET. In
-                        # the same suppressed block as escalate() above: this
-                        # write must not do what the raising cycle could not
-                        # either.
-                        self._store.append(
-                            SYSTEM_TICKET,
-                            SYSTEM_ESCALATED_LIFECYCLE,
-                            self._clock.now(),
-                            {"reason": reason, "error_type": error_type},
-                        )
+                    # The outermost of the three containment layers (see the
+                    # module docstring): whatever the two inner ones did not
+                    # hold must still not kill the daemon -- every position
+                    # would go unguarded with no record of why. The
+                    # exception's TYPE name is the diagnostic; its message
+                    # never reaches a payload -- a broker's own text can be
+                    # inside it. No retry, no backoff -- `finally` below still
+                    # explains any eventual exit.
+                    error_type = type(exc).__name__
+                    self._escalate_system(
+                        f"a cycle raised {error_type}", {"error_type": error_type}
+                    )
                 stop.wait(interval_seconds)
         finally:
             self._store.append(SYSTEM_TICKET, "GUARD_STOPPED", self._clock.now(), {})
@@ -388,6 +474,11 @@ class PositionGuard:
             default_stop_distance=self._default_stop_distances.get(server_symbol),
             failed_restores=self._failed_restores.get(ticket, 0),
         )
+        if action.kind not in _HANDLED_KINDS:
+            # M2: the one kind this is, TIGHTEN_STOP, is not silently dropped
+            # by the two sets above disagreeing about it. cycle()'s per-ticket
+            # containment turns this into an escalation, not a dead daemon.
+            raise NotImplementedError(f"the guard cycle does not handle {action.kind.value}")
 
         acted = False
         amend_succeeded = False
@@ -419,8 +510,29 @@ class PositionGuard:
                     position_ticket=ticket,
                 )
                 take_profit = _decimal_or_none(record.get("take_profit")) if record else None
-                outcome = self._venue.amend_protection(ref, action.stop_loss, take_profit)
-                amend_succeeded = outcome.accepted
+                try:
+                    outcome = self._venue.amend_protection(ref, action.stop_loss, take_profit)
+                except TradingHouseError as exc:
+                    # C1: the production port RAISES where this fake-friendly
+                    # signature returns -- adapter.py raises BrokerError
+                    # whenever MT5's send_order returns None, which is any
+                    # error, plus BrokerUnavailableError and
+                    # ConfigurationError, and the gateway behind it adds
+                    # BrokerUnavailableError and NonDemoAccountError. All are
+                    # TradingHouseError. A raise is a failed write, exactly
+                    # like a rejected outcome: counted, so D-7's two-strikes
+                    # escalation is reachable through the path production
+                    # actually takes. Type name only -- a broker's own text
+                    # can be in the message, and no raw broker message may
+                    # reach a payload. Anything NOT a TradingHouseError is a
+                    # bug rather than a broker refusal and is left to
+                    # cycle()'s containment.
+                    amend_succeeded = False
+                    self._amend_errors[ticket] = type(exc).__name__
+                else:
+                    amend_succeeded = outcome.accepted
+                    if amend_succeeded:
+                        self._amend_errors.pop(ticket, None)
                 if action.kind is ActionKind.RESTORE_STOP:
                     failed = self._failed_restores.get(ticket, 0)
                     self._failed_restores[ticket] = 0 if amend_succeeded else failed + 1
@@ -442,9 +554,16 @@ class PositionGuard:
 
         escalate_now = action.escalate or action.kind is ActionKind.ESCALATE
         if escalate_now:
-            self._escalator.escalate(
-                action.reason, {"position_ticket": ticket, "action": action.kind.value}
-            )
+            payload: dict[str, Any] = {"position_ticket": ticket, "action": action.kind.value}
+            # C1: "restore already failed twice" says nothing about WHY. When
+            # the failures arrived as exceptions, the last one's type name --
+            # never its message -- names the kind of broker failure behind it,
+            # which is the difference between a diagnosable escalation and a
+            # shrug.
+            amend_error = self._amend_errors.get(ticket)
+            if amend_error is not None:
+                payload["amend_error"] = amend_error
+            self._escalator.escalate(action.reason, payload)
 
         return acted, escalate_now
 
@@ -491,7 +610,19 @@ class PositionGuard:
         orphan establishes one, from the stop it was just given -- and only
         when the venue actually accepted that stop. An ``ADOPT_ORPHAN`` the
         venue refused must not anchor every future R-multiple this position
-        ever reports to protection that was never applied."""
+        ever reports to protection that was never applied.
+
+        C2: an orphan whose broker stop sits AT its entry -- a stop moved to
+        breakeven, an ordinary state -- yields a distance of zero. Zero is
+        written once and then divided by on every later cycle
+        (``r_multiple``), forever, since Section 8.2 never recomputes it: that
+        ticket raises every second and, before ``cycle()``'s per-ticket
+        containment, took every other position's check down with it. The guard
+        belongs here rather than at the division because here is where the
+        poison would be PERSISTED; guarding only the consumer would leave a
+        meaningless basis on the record that nothing is allowed to correct.
+        The position simply carries no R figures -- those are analytics, and
+        the stop is the job."""
 
         if record is not None and "open_price" in record and "initial_risk_distance" in record:
             return str(record["open_price"]), str(record["initial_risk_distance"])
@@ -502,7 +633,8 @@ class PositionGuard:
             and action.stop_loss is not None
         ):
             distance = abs(observed.open_price - action.stop_loss)
-            return str(observed.open_price), str(distance)
+            if distance != 0:
+                return str(observed.open_price), str(distance)
         return None, None
 
     def _maybe_record(
@@ -534,13 +666,7 @@ class PositionGuard:
         """
 
         materially_changed = (
-            action.kind
-            in (
-                ActionKind.RECORD_ONLY,
-                ActionKind.RECORD_CLOSED,
-                ActionKind.ESCALATE,
-                ActionKind.ADOPT_ORPHAN,
-            )
+            action.kind in _RECORDING_KINDS
             or (action.kind is ActionKind.RESTORE_STOP and amend_succeeded)
             or extrema_changed
         )
