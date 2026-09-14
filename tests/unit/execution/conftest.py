@@ -8,7 +8,8 @@ the primary instrument and not a convenience.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -22,8 +23,10 @@ from trading_house.core.venue import (
     PositionRecord,
     RejectReason,
     Venue,
+    VenueRef,
 )
 from trading_house.execution.ledger import NON_TERMINAL_STATES, IntentEvent
+from trading_house.execution.loop import SYSTEM_TICKET
 
 NOW = datetime(2026, 8, 25, tzinfo=UTC)
 BASE = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
@@ -232,3 +235,136 @@ class FakeDeals:
 
     def terminal_healthy(self) -> bool:
         return self.healthy
+
+
+class FakeProtectionVenue:
+    """A ``ProtectionPort`` double for the guard loop (Phase 5).
+
+    ``positions=None`` means the broker read FAILED, distinct from an empty
+    tuple -- the same convention ``FakeDeals`` uses above, for the same
+    reason. ``closing_price_result`` is a plain mutable attribute so a test
+    can move the price between cycles (see the MAE/MFE extrema test).
+
+    ``price_reads`` records every ``closing_price`` call. Without it a test
+    that names the unavailable-price branch cannot tell "the branch ran and
+    the price was None" from "the branch was never reached", and the second
+    one passes identically.
+
+    ``amend_fails`` and ``amend_raises`` are the two DIFFERENT ways a broker
+    refuses, and the difference is the whole of C1. ``amend_fails`` returns a
+    rejected ``ExecutionOutcome``; the production port does not do that. It
+    RAISES -- ``brokers/mt5/adapter.py`` raises ``BrokerError`` whenever MT5's
+    ``send_order`` returns ``None``, which it does on any error. Only
+    ``amend_raises`` stages what production actually does, and it still
+    records the attempt in ``amended`` first: the call was made.
+    """
+
+    def __init__(
+        self,
+        *,
+        positions: Sequence[PositionRecord] | None = (),
+        amend_fails: bool = False,
+        amend_raises: Exception | None = None,
+        closing_price_result: Decimal | None = None,
+    ) -> None:
+        # positions and amend_raises are PUBLIC because a test that stages a
+        # broker changing its mind across cycles must be able to change them,
+        # and a private name silently accepts the assignment while the fake
+        # goes on returning the old value -- a test that passes for a reason
+        # unrelated to what it checks, which is the defect this suite exists
+        # to catch.
+        self.positions = positions
+        self.amend_raises = amend_raises
+        self._amend_fails = amend_fails
+        self.closing_price_result = closing_price_result
+        self.amended: list[AmendCall] = []
+        self.price_reads: list[tuple[str, bool]] = []
+
+    def positions_now(self) -> Sequence[PositionRecord] | None:
+        return self.positions
+
+    def amend_protection(
+        self, ref: VenueRef, stop_loss: Decimal, take_profit: Decimal | None
+    ) -> ExecutionOutcome:
+        self.amended.append(AmendCall(ref=ref, stop_loss=stop_loss, take_profit=take_profit))
+        if self.amend_raises is not None:
+            raise self.amend_raises
+        if self._amend_fails:
+            return ExecutionOutcome(
+                accepted=False,
+                venue_ref=ref,
+                filled_quantity=None,
+                fill_price=None,
+                reject_reason=RejectReason.UNKNOWN,
+            )
+        return ExecutionOutcome(
+            accepted=True, venue_ref=ref, filled_quantity=None, fill_price=None, reject_reason=None
+        )
+
+    def closing_price(self, server_symbol: str, is_buy: bool) -> Decimal | None:
+        self.price_reads.append((server_symbol, is_buy))
+        return self.closing_price_result
+
+
+class RecordingEscalator:
+    """An in-memory ``EscalationPort`` (Phase 5) that remembers every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Mapping[str, Any]]] = []
+
+    def escalate(self, reason: str, payload: Mapping[str, Any]) -> None:
+        self.calls.append((reason, payload))
+
+
+@dataclass(frozen=True, slots=True)
+class AmendCall:
+    ref: VenueRef
+    stop_loss: Decimal
+    take_profit: Decimal | None
+
+
+class RecordingPositionStore:
+    """An in-memory ``PositionStore`` (Phase 5's structural Protocol).
+
+    ``appended`` holds 3-tuples of ``(position_ticket, lifecycle, payload)``
+    -- deliberately dropping ``event_time``, even though ``append`` takes
+    four arguments, so every index a test uses lands on the payload rather
+    than silently reading the timestamp. Same shape as ``RecordingLedger``
+    above, for the same reason.
+    """
+
+    def __init__(self) -> None:
+        self.appended: list[tuple[int, str, Mapping[str, str]]] = []
+        self._latest: dict[int, dict[str, Any]] = {}
+
+    def append(
+        self,
+        position_ticket: int,
+        lifecycle: str,
+        event_time: datetime,
+        payload: Mapping[str, str],
+    ) -> None:
+        self.appended.append((position_ticket, lifecycle, dict(payload)))
+        merged = dict(payload)
+        merged["lifecycle"] = lifecycle
+        self._latest[position_ticket] = merged
+
+    def latest(self, position_ticket: int) -> Mapping[str, Any] | None:
+        return self._latest.get(position_ticket)
+
+    def open_positions(self) -> Sequence[Mapping[str, Any]]:
+        """Every non-CLOSED ticket's latest event, flattened the way a SQL
+        ``DISTINCT ON`` row arrives: the payload's keys plus the event's own
+        structural columns.
+
+        ``SYSTEM_TICKET`` is excluded because it is the daemon's own reserved
+        row, not a position -- Task 2's query must exclude it for the same
+        reason. The loop skips it anyway (see
+        ``test_the_daemon_ticket_is_skipped_even_if_the_store_hands_it_back``).
+        """
+
+        return tuple(
+            {**payload, "position_ticket": ticket}
+            for ticket, payload in self._latest.items()
+            if payload.get("lifecycle") != "CLOSED" and ticket != SYSTEM_TICKET
+        )

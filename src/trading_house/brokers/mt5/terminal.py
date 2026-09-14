@@ -206,6 +206,7 @@ class Mt5Terminal:
                 price=float(d.price),
                 is_buy=int(d.type) == 0,
                 dealt_at=self._to_utc(d.time),
+                entry=int(d.entry),
             )
             for d in raw
         )

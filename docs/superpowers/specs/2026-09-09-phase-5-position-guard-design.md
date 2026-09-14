@@ -48,7 +48,7 @@ needed whatever any future strategy decides.
 | **D-2** | **Position state is append-only, written only on material change.** | Every table in this database is append-only by grant. Writing every cycle would be 86,400 rows per position per day and would bury the events that matter; writing on change keeps the trail readable — an incident review wants to see when the stop moved, not that it was checked 86,000 times. |
 | **D-3** | **The monotonic guarantee is enforced twice, and each layer gets a test that reaches it.** `decide()` cannot emit a widening; `amend_protection` refuses one. | They stop different things: the first stops the policy asking, the second stops anything succeeding. Written naively the outer check masks the inner, and only one is ever exercised — which is exactly how Phase 4's ledger came to claim enforcement by grant *and* trigger while proving only the grant. |
 | **D-4** | **`decide()` is pure** over `(observed, recorded, contract, default_stop_distance, now)` and returns one of a closed set of actions. | A vanished position, a stop the broker moved underneath us, a retraced price, an orphan with and without a stop — all become table-driven tests with no broker and no clock. The shape that worked for Phase 4's `verdict()`. |
-| **D-5** | **An orphan is adopted, never invented around and never liquidated.** Keep its broker stop if it has one; otherwise compute one by the book's signed `k_sigma` against current ATR, floored by the broker minimum, then escalate per §5.2. | A stop computed by the system's own signed rules is not a fabricated number — it is the distance those rules would have chosen. Closing instead would have a machine make a money decision about a position it does not understand, and if the cause is a restored backup it liquidates good positions the ledger merely forgot. |
+| **D-5** | **An orphan is adopted, never invented around and never liquidated.** Keep its broker stop if it has one; otherwise compute one from an adoption distance supplied by the composition root — the book's signed `k_sigma` against current ATR, floored by the broker minimum — then escalate per §5.2. **Where no distance is supplied for that instrument, the orphan escalates rather than being adopted at a fabricated one, and Phase 5 ships with none wired:** nothing feeds an ATR to the daemon, and a distance computed once at startup and reused for days would be exactly the invented number this decision forbids. | A stop computed by the system's own signed rules is not a fabricated number — it is the distance those rules would have chosen. Closing instead would have a machine make a money decision about a position it does not understand, and if the cause is a restored backup it liquidates good positions the ledger merely forgot. |
 | **D-6** | **The guard is NOT gated by the unresolved-intent check.** | `require_clean_ledger` refuses to *open* while something is unresolved. A guard that stopped protecting existing positions for an unrelated stuck intent would abandon real money at the worst possible moment. The guard never opens anything. |
 | **D-7** | **Two failed restore attempts escalate; they do not auto-close.** | §13.3 says "consider market-closing". A machine liquidating because it could not write a stop is worse than the exposure it removes — and a broker that will not accept an SLTP will most likely not accept a close either. |
 | **D-8** | **MAE and MFE are sampled, and the spec says so.** | The guard reads the tick once per cycle, so a spike between cycles is invisible to it. Adequate for deciding whether to act now; research-grade excursion figures must be recomputed from bar data rather than trusted from this stream. |
@@ -109,7 +109,8 @@ The action set is closed, which is what makes the loop testable:
 | stop missing (`sl == 0`) | restore immediately to the recorded stop |
 | restore failed twice | escalate; stop trying |
 | orphan carrying a stop | adopt at that stop, escalate (§5.2) |
-| orphan with no stop | adopt at `k_sigma × ATR` floored by the broker minimum, escalate (§5.2) |
+| orphan with no stop, adoption distance supplied | adopt at `k_sigma × ATR` floored by the broker minimum, escalate (§5.2) |
+| orphan with no stop, no distance supplied (Phase 5's shipped state) | escalate; adopt nothing (D-5) |
 | position gone from the broker | it closed — record CLOSED against its closing deal |
 | a better stop is available | tighten to it |
 | candidate worse than current | **nothing — this is normal, not an error** |
@@ -141,9 +142,26 @@ ledger (`audit.repository.append`) and the gateway's optional `_on_event` hook.
 So "escalate" means exactly this, and nothing more: call `mark_stale()`, append
 a canonical event to the audit ledger, append the position event, and **stop
 attempting modifications** — per §9.2's "broker or data failure → rely on
-broker-native SL; do not attempt modifications". The broker-side stop is what
-protects the position while the system is blind. That is the design, not a
-fallback.
+broker-native SL; do not attempt modifications".
+
+**§9.2's reasoning does not transfer to the escalations that stop the guard
+working, and the first draft of this section wrongly assumed it did.** Every
+`ActionKind.ESCALATE` `decide()` can emit — "orphan has no stop and no
+distance", "no stop anywhere to restore", "restore already failed twice" —
+requires `observed.stop_loss is None`. (`ADOPT_ORPHAN` also escalates, from two
+branches: one where the broker's own stop is what gets adopted, and one where
+it has none and a distance is computed. §9.2's reasoning holds for the first
+and not the second — and the second escalates even when the venue refuses the
+write, so that orphan may also be carrying nothing. Neither is terminal: the
+guard keeps working both positions, which is the difference that matters here.) There is
+no broker-native SL to rely on: that is *why* we escalated. So after escalating,
+the position may be carrying **no stop at all**, and a human is the only
+remaining protection.
+
+D-7's refusal to auto-close still stands, but on its own terms — a machine
+liquidating because it could not write a stop is worse than the exposure it
+removes, and a broker that will not accept an SLTP will most likely not accept a
+close either. It does not stand on a broker-side stop that is not there.
 
 **An operator learns about it by reading the audit ledger or running
 `guard status`.** Wiring a real notification channel is out of scope here, and
@@ -177,8 +195,12 @@ final fix wave.
 ## 8. New invariant
 
 **I-21** — *Every open position is verified against its recorded protection at
-least once per cycle, and a missing stop is restored or escalated within two
-cycles.*
+least once per cycle, and a missing stop is restored, or escalated after two
+failed restore attempts.*
+
+(The earlier wording said "escalated within two cycles", which is off by one
+against D-7's own rule: the guard attempts a restore on cycles 1 and 2 and
+escalates on cycle 3. D-7 is right and the invariant's wording was wrong.)
 
 I-8's stop-widening prohibition is not new. Like I-6 in Phase 4, this phase is
 its enforcement.

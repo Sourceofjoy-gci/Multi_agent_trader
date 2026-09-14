@@ -26,7 +26,7 @@ from tests.unit.execution.conftest import (
 from trading_house.core.clock import FixedClock
 from trading_house.core.errors import UnresolvedIntentsError
 from trading_house.core.values import IntentState
-from trading_house.core.venue import DealRecord, PositionRecord
+from trading_house.core.venue import DealEntry, DealRecord, PositionRecord
 from trading_house.execution.ledger import NON_TERMINAL_STATES
 from trading_house.execution.manager import OrderManager
 from trading_house.execution.reconciler import (
@@ -48,6 +48,7 @@ def _deal(**overrides: object) -> DealRecord:
         "volume": Decimal("0.25"),
         "position_ticket": 7,
         "dealt_at": BASE,
+        "entry": DealEntry.IN,
     }
     fields.update(overrides)
     return DealRecord(**fields)  # type: ignore[arg-type]
@@ -59,6 +60,10 @@ def _position(**overrides: object) -> PositionRecord:
         "server_symbol": "EURUSD",
         "volume": Decimal("0.25"),
         "position_ticket": 7,
+        "stop_loss": Decimal("1.09500"),
+        "open_price": Decimal("1.10000"),
+        "is_buy": True,
+        "opened_at": BASE,
     }
     fields.update(overrides)
     return PositionRecord(**fields)  # type: ignore[arg-type]
@@ -443,6 +448,19 @@ def test_several_deals_against_one_position_confirm_at_their_total() -> None:
 
     assert resolution.verdict is Verdict.CONFIRMED
     assert resolution.filled_quantity == Decimal("0.15")
+
+
+def test_a_position_opened_and_closed_inside_the_lookback_confirms_at_what_it_filled() -> None:
+    """``MATCH_LOOKBACK`` is 60s and a scalper's position can open and close
+    well inside it, which puts both its IN deal and its OUT deal in the
+    window. Summing every deal on the ticket confirms the intent at twice the
+    volume actually filled -- on the money path, with nothing downstream that
+    would ever notice."""
+
+    resolution = _resolve(deals=(_deal(), _deal(entry=DealEntry.OUT)))
+
+    assert resolution.verdict is Verdict.CONFIRMED
+    assert resolution.filled_quantity == Decimal("0.25")
 
 
 def test_the_sweep_records_a_partial_fill_as_partial() -> None:

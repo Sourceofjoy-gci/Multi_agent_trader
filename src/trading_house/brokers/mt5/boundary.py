@@ -11,9 +11,11 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
+from trading_house.core.venue import DealEntry
 
 SYMBOL_TRADE_MODE_DISABLED = 0
 SYMBOL_TRADE_MODE_LONGONLY = 1
@@ -32,6 +34,13 @@ SYMBOL_TRADE_EXECUTION_EXCHANGE = 3
 ACCOUNT_TRADE_MODE_DEMO = 0
 ACCOUNT_TRADE_MODE_CONTEST = 1
 ACCOUNT_TRADE_MODE_REAL = 2
+
+# The position guard's one action: modify a live position's SL/TP in place.
+# Mirrored here, not in adapter.py, so the request it builds -- position
+# ticket required, sl/tp coerced to float -- lives next to the position
+# shape it reads, per the same reasoning as every other constant in this
+# module (see the module docstring).
+TRADE_ACTION_SLTP = 6  # MetaTrader5.TRADE_ACTION_SLTP
 
 
 MAX_PLAUSIBLE_OFFSET_SECONDS = 14 * 3600
@@ -206,6 +215,34 @@ class Mt5Position:
     opened_at: datetime
 
 
+def sltp_request(
+    server_symbol: str, position_ticket: int, stop_loss: Decimal, take_profit: Decimal | None
+) -> dict[str, object]:
+    """Build a ``TRADE_ACTION_SLTP`` request to move a live position's stop.
+
+    Three documented MT5 traps, all encoded here rather than left for a
+    caller to rediscover: ``position`` is required -- ``TRADE_ACTION_SLTP``
+    without it modifies nothing at all, silently; ``sl``/``tp`` must be
+    genuine floats, since MT5 returns ``None`` with no useful error when
+    either arrives as an int; and ``tp=0.0`` means *remove the take-profit*,
+    not *no take-profit given* -- there is no third value that means "leave
+    it alone". ``take_profit=None`` here therefore always resolves to the
+    erase value. It is the caller's job (``Mt5BrokerAdapter.amend_protection``)
+    to have already substituted the position's current TP before calling
+    this, when that is what "leave it alone" actually requires -- this
+    function does not read the position and cannot make that distinction
+    itself.
+    """
+
+    return {
+        "action": TRADE_ACTION_SLTP,
+        "symbol": server_symbol,
+        "position": int(position_ticket),
+        "sl": float(stop_loss),
+        "tp": float(take_profit) if take_profit is not None else 0.0,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class Mt5CheckResult:
     retcode: int
@@ -234,6 +271,23 @@ class Mt5Deal:
     price: float
     is_buy: bool
     dealt_at: datetime
+    entry: int
+
+
+# MetaTrader 5's own DEAL_ENTRY_* constants, mirrored so this module never
+# needs to import MetaTrader5. DEAL_ENTRY_OUT_BY (a close against an opposing
+# position) maps to OUT: it is still a close, and treating it as an open
+# would leave a closed position on the books forever.
+_DEAL_ENTRY = {0: DealEntry.IN, 1: DealEntry.OUT, 2: DealEntry.INOUT, 3: DealEntry.OUT}
+
+
+def deal_entry_of(raw: int) -> DealEntry:
+    """Map MT5's entry code. An unknown code raises rather than defaulting."""
+
+    entry = _DEAL_ENTRY.get(raw)
+    if entry is None:
+        raise ConfigurationError()
+    return entry
 
 
 @runtime_checkable

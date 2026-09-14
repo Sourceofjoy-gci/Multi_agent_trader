@@ -9,6 +9,7 @@ from tests.unit.brokers.mt5.conftest import FakeTerminal
 from trading_house.brokers.base import BrokerAdapter
 from trading_house.brokers.mt5.adapter import ConfirmedIntentSource, Mt5BrokerAdapter
 from trading_house.brokers.mt5.boundary import (
+    TRADE_ACTION_SLTP,
     Mt5CheckResult,
     Mt5Deal,
     Mt5Position,
@@ -37,8 +38,6 @@ instruments:
   fx.eurusd: {server_symbol: "EURUSD"}
 """
 )
-
-REF = Mt5VenueRef(venue=Venue.MT5, magic=110042, server_symbol="EURUSD")
 
 _INTENT_KWARGS = {
     "intent_id": "intent-1",
@@ -88,19 +87,6 @@ def test_adapter_satisfies_the_broker_protocol(symbol_terminal: FakeTerminal) ->
     adapter, gateway = _adapter(symbol_terminal)
     try:
         assert isinstance(adapter, BrokerAdapter)
-    finally:
-        gateway.stop()
-
-
-def test_amend_protection_still_refuses_in_this_phase(symbol_terminal: FakeTerminal) -> None:
-    """submit() and close() arrived in Phase 4. Amending a protective stop is
-    the position guard and belongs to the next phase -- this one must never
-    touch a stop or take-profit on a position already open."""
-
-    adapter, gateway = _adapter(symbol_terminal)
-    try:
-        with pytest.raises(NotImplementedError, match="next phase"):
-            adapter.amend_protection(REF, Decimal("1.0900"), None)
     finally:
         gateway.stop()
 
@@ -705,6 +691,203 @@ def test_close_refuses_a_quantity_that_is_not_in_lots() -> None:
         gateway.stop()
 
 
+# --- amend_protection(): the outer of the two layers enforcing I-8 (D-3) ----
+
+
+def _ref(*, position_ticket: int) -> Mt5VenueRef:
+    return Mt5VenueRef(
+        venue=Venue.MT5, magic=110042, server_symbol="EURUSD", position_ticket=position_ticket
+    )
+
+
+def _position(*, ticket: int, sl: float, is_buy: bool, tp: float | None = None) -> Mt5Position:
+    return Mt5Position(
+        ticket=ticket,
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=0.1,
+        price_open=1.10000,
+        sl=sl,
+        tp=tp,
+        is_buy=is_buy,
+        opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+    )
+
+
+def test_a_widening_stop_is_refused_at_the_boundary() -> None:
+    """The SECOND enforcement layer. decide() cannot emit a widening, but this
+    must refuse one handed to it directly -- otherwise a future caller, or a
+    bug, could widen a live stop with nothing objecting. The layers must be
+    tested separately: an earlier phase claimed enforcement by grant AND
+    trigger while only ever exercising the grant.
+
+    The fake is given a SUCCESSFUL send_result deliberately, not the
+    default None: if the widening check were ever deleted, the request
+    would still be built and sent, and a None result would raise
+    BrokerError -- making this test fail for an unrelated reason instead of
+    on its own assertions below. A successful result closes that inference
+    gap: were the check removed, ``outcome.accepted`` would be True and
+    ``terminal.sent`` non-empty, so this test can only pass because the
+    check refused the widen before anything was sent."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=_send_result()
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09600"), None)
+    finally:
+        gateway.stop()
+
+    assert not outcome.accepted
+    assert terminal.sent == []  # nothing was even attempted
+
+
+def test_a_tightening_stop_is_sent() -> None:
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=_send_result()
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert outcome.accepted
+    assert terminal.sent[0]["position"] == 7
+
+
+def test_the_request_carries_float_prices_and_the_position_ticket() -> None:
+    """MT5 returns None with no useful error when sl or tp is an int, and
+    TRADE_ACTION_SLTP without a `position` modifies nothing at all. Both are
+    documented traps."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=_send_result()
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    request = terminal.sent[0]
+    assert isinstance(request["sl"], float)
+    assert isinstance(request["tp"], float)
+    assert request["position"] == 7
+    assert request["action"] == TRADE_ACTION_SLTP
+
+
+def test_a_none_result_raises_rather_than_reporting_a_rejection() -> None:
+    """Same rule as submit: a None result may mean the modification landed, so
+    reporting a rejection would record a stop as unchanged when it moved."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)], send_result=None
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        with pytest.raises(BrokerError):
+            adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+
+def test_a_position_the_broker_does_not_have_is_refused() -> None:
+    """Amending a ticket that no longer exists must not be reported as done."""
+
+    adapter, gateway = _adapter(FakeTerminal(positions=[]))
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert not outcome.accepted
+
+
+def test_take_profit_none_preserves_the_positions_existing_take_profit() -> None:
+    """The guard does not manage take-profits at all, so ``take_profit=None``
+    means *leave it alone* -- it must never resolve to MT5's erase value
+    (``tp=0.0`` on a ``TRADE_ACTION_SLTP`` request removes the take-profit,
+    the same convention this codebase already relies on for ``sl`` at
+    ``adapter.py:137`` and ``terminal.py:156``). Every routine stop tighten
+    passes ``take_profit=None``, so getting this wrong destroys a live
+    position's take-profit on every call."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True, tp=1.10500)],
+        send_result=_send_result(),
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert terminal.sent[0]["tp"] == 1.10500
+
+
+def test_an_explicit_take_profit_is_sent_as_the_new_value() -> None:
+    """Passing an explicit ``take_profit`` still overrides the position's
+    current one, and still crosses the boundary as a float (MT5 returns
+    ``None`` with no useful error when ``tp`` arrives as an int)."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True, tp=1.10500)],
+        send_result=_send_result(),
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), Decimal("1.11000"))
+    finally:
+        gateway.stop()
+
+    request = terminal.sent[0]
+    assert isinstance(request["tp"], float)
+    assert request["tp"] == 1.11000
+
+
+def test_take_profit_none_with_no_existing_take_profit_sends_the_erase_value() -> None:
+    """When the position already has no take-profit, ``take_profit=None``
+    still resolves to MT5's erase value -- there is nothing to preserve, so
+    the erasure convention stays correct in the one case where it is not
+    actually erasing anything."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True, tp=None)],
+        send_result=_send_result(),
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert terminal.sent[0]["tp"] == 0.0
+
+
+def test_a_broker_rejection_carries_its_retcode_in_the_venue_ref() -> None:
+    """Per spec 5.2 there is no alerting -- the audit ledger's ``venue_ref``
+    is the only channel by which an operator learns why a restore failed.
+    Every other rejection path in this adapter preserves the retcode
+    (``_send``'s ``result_ref``); this one must too."""
+
+    terminal = FakeTerminal(
+        positions=[_position(ticket=7, sl=1.09700, is_buy=True)],
+        send_result=_send_result(retcode=10018, volume=0.0, price=0.0),  # MARKET_CLOSED
+    )
+    adapter, gateway = _adapter(terminal)
+    try:
+        outcome = adapter.amend_protection(_ref(position_ticket=7), Decimal("1.09800"), None)
+    finally:
+        gateway.stop()
+
+    assert not outcome.accepted
+    assert outcome.venue_ref is not None
+    assert outcome.venue_ref.retcode == 10018
+    assert outcome.venue_ref.position_ticket == 7
+
+
 # --- reads that failed are not reads that found nothing (C-2) ----------------
 
 
@@ -750,7 +933,14 @@ def test_positions_now_maps_open_positions_to_neutral_records(
 
     assert records is not None
     assert records[0] == PositionRecord(
-        magic=110042, server_symbol="EURUSD", volume=Decimal("0.1"), position_ticket=1001
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=Decimal("0.1"),
+        position_ticket=1001,
+        stop_loss=Decimal("1.095"),
+        open_price=Decimal("1.1"),
+        is_buy=True,
+        opened_at=datetime(2026, 8, 25, tzinfo=UTC),
     )
 
 

@@ -51,11 +51,20 @@ RISK_FORBIDDEN = frozenset(
 )
 EXECUTION_ROOT = SOURCE_ROOT / "execution"
 # execution/ may reach core/ and database/, nothing else this project owns:
-# it declares the venue port (VenueSubmitPort/DealSource) it needs and the
-# MT5 adapter satisfies it structurally, so the ledger and order manager
-# stay testable without MetaTrader5 installed.
+# it declares the venue port (VenueSubmitPort/DealSource/ProtectionPort) it
+# needs and the MT5 adapter satisfies it structurally, so the ledger, order
+# manager and position guard stay testable without MetaTrader5 installed.
+# constitution/ joined the list with Phase 5: the guard's ProtectionPort needs
+# the signed binding to turn a server symbol back into an instrument, and the
+# obvious place to put that -- inside the daemon -- would have made the guard
+# unconstructible without a signed file on disk. It lives in ops/ instead.
 EXECUTION_FORBIDDEN = frozenset(
-    {"trading_house.brokers", "trading_house.risk", "trading_house.marketdata"}
+    {
+        "trading_house.brokers",
+        "trading_house.risk",
+        "trading_house.marketdata",
+        "trading_house.constitution",
+    }
 )
 # The reverse of CREDENTIAL_BEARING: no process holding broker credentials may
 # execute agent-authored code (I-11's other direction). These are exactly the
@@ -108,6 +117,25 @@ def _imported_modules(tree: ast.Module) -> set[str]:
     return modules
 
 
+def _relative_imports(tree: ast.Module) -> set[str]:
+    """Every ``from .foo import bar`` in one module -- the ``level > 0`` form
+    this module's own ``_imported_modules`` and ``test_phase5.py``'s
+    ``_project_imports`` are both blind to, since each requires
+    ``node.level == 0`` (fix round 1, Finding 7). A relative import inside
+    execution/ would clear ``EXECUTION_FORBIDDEN`` unseen by either. The repo
+    uses none today; ``test_no_module_uses_a_relative_import`` below keeps
+    that true instead of teaching both detectors to resolve one, which would
+    be two independent resolutions that could drift out of sync with each
+    other -- exactly the "less independent than they look" shape the finding
+    describes."""
+
+    return {
+        f"{'.' * node.level}{node.module or ''}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level > 0
+    }
+
+
 def _reaches(tree: ast.Module, forbidden: frozenset[str]) -> set[str]:
     """Modules imported that are, or live under, a forbidden path."""
 
@@ -126,6 +154,29 @@ def test_source_tree_is_not_empty() -> None:
     """A silent glob failure must not make every other guard vacuous."""
 
     assert len(_source_files()) >= 10
+
+
+def test_no_module_uses_a_relative_import() -> None:
+    """Closes the blind spot ``_relative_imports`` documents: neither this
+    file's own import-boundary checks nor ``test_phase5.py``'s see a
+    ``from .foo import bar``. Repo-wide, not just ``execution/``, because
+    ``_project_imports`` in ``test_phase5.py`` shares the same gap and this
+    is a strictly stronger guarantee that covers it too."""
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        found = sorted(_relative_imports(tree))
+        if found:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = found
+
+    assert offenders == {}
+
+
+def test_the_relative_import_guard_can_still_fail() -> None:
+    """Guard the guard: prove the detector flags a real relative import
+    rather than a check that stopped looking."""
+
+    assert _relative_imports(ast.parse("from ..brokers.mt5 import adapter\n")) == {"..brokers.mt5"}
 
 
 def test_no_module_imports_a_broker_or_agent_framework() -> None:
@@ -288,6 +339,7 @@ def test_the_execution_package_is_not_empty() -> None:
         "from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter",
         "import trading_house.risk",
         "from trading_house.marketdata.store import PostgresBarStore",
+        "from trading_house.constitution.binding import VenueBinding",
     ],
 )
 def test_the_execution_import_guard_can_still_fail(statement: str) -> None:

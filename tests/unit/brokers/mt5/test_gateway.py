@@ -1,3 +1,4 @@
+import contextlib
 import threading
 import time
 from collections.abc import Mapping
@@ -308,10 +309,16 @@ def test_a_wedged_actor_is_never_shut_down_underneath_and_blocks_restart() -> No
     gateway.start()
     terminal.gate.clear()
 
-    wedged = threading.Thread(
-        target=lambda: gateway.call(Priority.MARKET_DATA, lambda t: t.symbol_info("X")),
-        daemon=True,
-    )
+    def _call_while_wedged() -> None:
+        # gateway.stop() below tears the queue down under this still-queued
+        # call, which is the point of the test -- it must raise
+        # BrokerUnavailableError, not hang. Caught here, not left to
+        # propagate off this daemon thread: an uncaught exception there is
+        # only ever pytest noise, since the assertions below never see it.
+        with contextlib.suppress(BrokerUnavailableError):
+            gateway.call(Priority.MARKET_DATA, lambda t: t.symbol_info("X"))
+
+    wedged = threading.Thread(target=_call_while_wedged, daemon=True)
     wedged.start()
     threading.Event().wait(0.2)
 

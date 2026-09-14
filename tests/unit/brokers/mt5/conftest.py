@@ -39,6 +39,7 @@ class FakeTerminal:
         initialises: bool = True,
         send_result: Mt5SendResult | None = None,
         deals: Sequence[Mt5Deal] = (),
+        positions: Sequence[Mt5Position] = (),
     ) -> None:
         self.trade_mode = trade_mode
         self.initialises = initialises
@@ -52,6 +53,7 @@ class FakeTerminal:
         # subclassing just to thread one value through __init__.
         self.send_result = send_result
         self.deals = tuple(deals)
+        self._positions = tuple(positions)
         self.sent: list[Mapping[str, object]] = []
 
     def initialize(self) -> bool:
@@ -83,7 +85,7 @@ class FakeTerminal:
         return ()
 
     def positions(self) -> Sequence[Mt5Position]:
-        return ()
+        return self._positions
 
     def order_check(self, request: Mapping[str, object]) -> Mt5CheckResult | None:
         return Mt5CheckResult(retcode=0, comment="Done")

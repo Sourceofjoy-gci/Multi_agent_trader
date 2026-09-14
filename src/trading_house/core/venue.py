@@ -123,6 +123,19 @@ class PrecheckResult(CanonicalModel):
         return self
 
 
+class DealEntry(str, Enum):  # noqa: UP042
+    """Which side of a position a deal touched.
+
+    ``OUT_BY`` (a close against an opposing position) maps to ``OUT`` at the
+    boundary -- it is still a close, and the guard only needs to tell opens
+    from closes, not how a close was executed.
+    """
+
+    IN = "in"  # opened or added to a position
+    OUT = "out"  # closed or reduced a position
+    INOUT = "inout"  # reversal: closed one side and opened the other
+
+
 @dataclass(frozen=True, slots=True)
 class DealRecord:
     """A neutral, execution-owned shape for one broker deal.
@@ -138,6 +151,7 @@ class DealRecord:
     volume: Decimal
     position_ticket: int
     dealt_at: datetime
+    entry: DealEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +168,10 @@ class PositionRecord:
     server_symbol: str
     volume: Decimal
     position_ticket: int
+    stop_loss: Decimal | None  # None when the broker reports 0 -- NO stop
+    open_price: Decimal
+    is_buy: bool
+    opened_at: datetime
 
 
 class RecoveryAction(str, Enum):  # noqa: UP042
