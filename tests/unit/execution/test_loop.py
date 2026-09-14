@@ -358,6 +358,32 @@ def test_a_stop_that_is_back_clears_the_restore_counter() -> None:
     assert venue.amended[-1].stop_loss == Decimal("1.09700")
 
 
+def test_a_ticket_bug_between_two_outages_does_not_swallow_the_second() -> None:
+    """The cycle-wide memory must not be held stale by an unrelated per-ticket
+    failure. D-2 promises a condition is reported again "the moment it
+    changes -- including back to it after a clean cycle". Gating the reset on
+    *any* system-level event meant a one-ticket bug in between counted as the
+    broker still being unreadable, so the second outage was silently
+    suppressed -- an audit trail that stops mentioning an outage that is still
+    happening."""
+
+    store = _protected(RecordingPositionStore(), stop_loss="1.09700")
+    venue = _VenueRaisingOnEveryTicket(positions=None)
+    escalator = RecordingEscalator()
+    guard = _guard(venue, store, escalator=escalator)
+
+    guard.cycle()  # the broker is unreadable: reported
+    venue.positions = (_observed(stop_loss=None),)
+    guard.cycle()  # readable, but this ticket's check raises: unrelated
+    venue.positions = None
+    guard.cycle()  # unreadable again -- a new occurrence, and it must be said
+
+    unreadable = [
+        c for c in escalator.calls if c[0] == "could not read the broker's open positions"
+    ]
+    assert len(unreadable) == 2
+
+
 def test_two_tickets_failing_the_same_way_are_both_reported() -> None:
     """F2. The per-ticket raise path used to share the cycle-wide suppression
     memory, so N tickets failing with the same exception type wrote ONE row,

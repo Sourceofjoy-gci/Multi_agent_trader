@@ -398,7 +398,6 @@ class PositionGuard:
         # position -- skipped here defensively even though the store's own
         # open_positions() is expected to exclude it already (M3): this loop
         # must not depend on that.
-        system_condition = False
         for ticket in sorted(tickets - {SYSTEM_TICKET}):
             checked += 1
             try:
@@ -414,7 +413,6 @@ class PositionGuard:
                 # own, because the store's latest event is a full-replacement
                 # snapshot and a row this thin would DELETE the record that
                 # says where the stop belongs.
-                system_condition = True
                 error_type = type(exc).__name__
                 # Remembered per TICKET, not cycle-wide. Sharing
                 # _last_system_reason would mean N tickets failing with the
@@ -436,8 +434,15 @@ class PositionGuard:
             escalated += did_escalate
             self._ticket_errors.pop(ticket, None)
 
-        if not system_condition:
-            self._last_system_reason = None
+        # Reaching here means positions_now() succeeded, so the one condition
+        # _last_system_reason ever holds -- an unreadable broker -- is over,
+        # and the next occurrence must be reported again (D-2: "and again the
+        # moment it changes"). Deliberately NOT gated on whether some ticket
+        # raised: per-ticket failures keep their own memory (_ticket_errors)
+        # and say nothing about the broker read. Gating on them left this
+        # stale, so an unreadable -> one-ticket-bug -> unreadable sequence
+        # silently swallowed the second report.
+        self._last_system_reason = None
         return CycleReport(checked=checked, acted=acted, escalated=escalated)
 
     def run(self, stop: threading.Event, interval_seconds: float = 1.0) -> None:
