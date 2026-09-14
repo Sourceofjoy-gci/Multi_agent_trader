@@ -15,6 +15,13 @@ How many examples actually reach the per-transition assertion is visible in
 ``pytest --hypothesis-show-statistics`` via the ``event()`` below: a generative
 test that never reaches its assertion is the most convincing hollow test there
 is, and this file is worthless without that number.
+
+``decide_tighten()`` has no caller in ``src/`` yet -- trailing is deliberately
+out of scope this phase (spec Section 10) until a strategy can A/B it. This
+test is not dead weight for that: it pre-proves I-8 for the trailing path
+ahead of the caller that will use it, the same way the rest of I-8 is already
+enforced today by ``decide()``'s structure and ``amend_protection()`` (see
+``README.md``'s Phase 5 section).
 """
 
 from decimal import Decimal

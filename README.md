@@ -400,13 +400,23 @@ row goes into the hash-chained audit ledger, and one position event is
 written. There is no alerting subsystem and no safe-mode state machine in this
 codebase; an operator learns of an escalation by reading the audit ledger or
 running `guard status`. After escalating, the guard stops attempting
-modifications on that position — terminally, until an operator's successful
-reconcile clears it — so the first, true diagnosis is not buried under a day's
-worth of repetitions of itself.
+modifications on that position — terminally, for the life of that position's
+record — so the first, true diagnosis is not buried under a day's worth of
+repetitions of itself. Nothing in this phase clears it: `reconcile_all` only
+touches the intent ledger, and `mark_reconciled()` clears gateway staleness,
+not a position record. An operator finds out from `guard status` or the audit
+ledger; making escalation clearable at all is a decision for a later phase,
+not something this one builds.
 
-Two failed restores escalate, not one (D-7). The stop is never moved away from
-profit (I-8), enforced independently in `decide_tighten()` and again in
-`amend_protection()` before anything reaches the broker.
+Two failed restores escalate, not one (D-7). Today, I-8 holds structurally:
+`decide()` can never emit a widening in the first place — every stop it
+returns is the recorded one, the broker's own, or a freshly computed orphan
+distance — and `amend_protection()` independently refuses a widening handed to
+it directly, before anything reaches the broker. `decide_tighten()` is where
+I-8's no-widening rule lives for a *trailing* candidate, but trailing is
+deliberately out of scope this phase (spec §10) until a strategy can A/B it,
+so nothing calls it yet — it, and the generative property test that pins it,
+are pre-built and pre-proven ahead of that caller, not dead code.
 
 **MAE/MFE are sampled at cycle resolution, not true extrema.** The `mae_r` and
 `mfe_r` on a position event are the worst and best R-multiples the guard
