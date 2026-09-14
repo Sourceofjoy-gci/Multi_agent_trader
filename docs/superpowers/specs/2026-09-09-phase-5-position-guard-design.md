@@ -144,10 +144,14 @@ a canonical event to the audit ledger, append the position event, and **stop
 attempting modifications** — per §9.2's "broker or data failure → rely on
 broker-native SL; do not attempt modifications".
 
-**§9.2's reasoning does not transfer to this spec's escalation paths, and the
-first draft of this section wrongly assumed it did.** Every escalation `decide()`
-can emit — "orphan has no stop and no distance", "no stop anywhere to restore",
-"restore already failed twice" — requires `observed.stop_loss is None`. There is
+**§9.2's reasoning does not transfer to the escalations that stop the guard
+working, and the first draft of this section wrongly assumed it did.** Every
+`ActionKind.ESCALATE` `decide()` can emit — "orphan has no stop and no
+distance", "no stop anywhere to restore", "restore already failed twice" —
+requires `observed.stop_loss is None`. (`ADOPT_ORPHAN` also escalates, and
+there §9.2 does hold: that path is reached precisely when the broker has a
+stop, which is the one being adopted. It is not terminal and the guard keeps
+working the position.) There is
 no broker-native SL to rely on: that is *why* we escalated. So after escalating,
 the position may be carrying **no stop at all**, and a human is the only
 remaining protection.
