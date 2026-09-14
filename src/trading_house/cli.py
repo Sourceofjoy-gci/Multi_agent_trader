@@ -677,12 +677,13 @@ def _order_adapter(
     venue_binding_signature: Path,
     venue_binding_public_key: Path,
 ) -> Iterator[tuple[Mt5BrokerAdapter, Mt5Gateway, VenueBinding, SystemClock]]:
-    """Build a live ``Mt5BrokerAdapter`` for one order command.
+    """Build a live ``Mt5BrokerAdapter`` for one order command, or for
+    ``guard run``, which shares it as its own composition root's adapter.
 
     Structured like ``_history_provider``: an absent or unreachable terminal
-    is ``BrokerUnavailableError``, never a silent no-op -- an order command
-    that swallowed this would look like it did nothing when it actually
-    never tried to reach the venue at all.
+    is ``BrokerUnavailableError``, never a silent no-op -- a command that
+    swallowed this would look like it did nothing when it actually never
+    tried to reach the venue at all.
     """
 
     terminal_factory = _mt5_terminal_factory()
@@ -920,22 +921,33 @@ def guard_run(
             binding,
             clock,
         ):
+            # The stops level is a property of the contract, so it is read per
+            # instrument from the venue itself. A symbol whose contract can't
+            # be read is skipped rather than aborting the whole daemon
+            # (Finding 8): the alternative -- letting describe_instrument's
+            # ConfigurationError propagate -- would mean one instrument the
+            # terminal does not know leaves EVERY position unguarded, not
+            # just that symbol's, which is the worse I-21 hazard. A skipped
+            # symbol falls back to loop.py's documented floor of zero for an
+            # unconfigured symbol (it simply does not bind); it is never
+            # silent -- see skipped_instruments in this command's output.
+            min_stop_distances: dict[str, Decimal] = {}
+            skipped_instruments: list[JsonValue] = []
+            for instrument_id, bound in binding.instruments.items():
+                try:
+                    min_stop_distances[bound.server_symbol] = adapter.describe_instrument(
+                        instrument_id
+                    ).min_stop_distance
+                except TradingHouseError:
+                    skipped_instruments.append(bound.server_symbol)
+
             guard = PositionGuard(
                 store=PostgresPositionStore(factory),
                 venue=Mt5ProtectionPort(adapter, binding),
                 escalator=LedgerEscalator(PostgresAuditLedger(factory), gateway.mark_stale, clock),
                 clock=clock,
                 owned_magic_ranges=[book.magic_range for book in binding.books.values()],
-                # The stops level is a property of the contract, so it is read
-                # per instrument from the venue itself. A bound symbol the
-                # terminal does not know raises here, at startup, rather than
-                # silently becoming a position with no floor days later.
-                min_stop_distances={
-                    bound.server_symbol: adapter.describe_instrument(
-                        instrument_id
-                    ).min_stop_distance
-                    for instrument_id, bound in binding.instruments.items()
-                },
+                min_stop_distances=min_stop_distances,
                 # Empty on purpose. The default distance is the book's signed
                 # k_sigma against the instrument's CURRENT ATR, and nothing
                 # feeds an ATR to this daemon; one computed at startup and
@@ -951,7 +963,7 @@ def guard_run(
                 guard.run(stop, interval_seconds)
             finally:
                 signal.signal(signal.SIGINT, previous)
-        return {"stopped": True}
+        return {"stopped": True, "skipped_instruments": skipped_instruments}
 
     _run(operation)
 
