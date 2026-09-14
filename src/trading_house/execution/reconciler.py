@@ -33,7 +33,7 @@ from typing import Any, Protocol
 from trading_house.core.clock import Clock
 from trading_house.core.errors import UnresolvedIntentsError
 from trading_house.core.values import IntentState
-from trading_house.core.venue import DealRecord, PositionRecord
+from trading_house.core.venue import DealEntry, DealRecord, PositionRecord
 from trading_house.execution.ledger import IntentLedger
 
 MATCH_LOOKBACK = timedelta(seconds=60)
@@ -141,7 +141,14 @@ def _confirmed(
     The open position is preferred over the deals when both are present: it
     is the live truth, and it is already the sum of however many deals built
     it. With deals alone, their volumes are summed, because a fill split
-    across price levels is several deals against one position.
+    across price levels is several deals against one position -- but only the
+    deals that OPENED it. A position opened and closed inside
+    ``MATCH_LOOKBACK`` (60s, routine for a scalper) puts both its IN deal and
+    its OUT deal in the window, and summing both confirms the intent at twice
+    the volume actually filled. Matching still considers every deal: an OUT
+    deal is real evidence that the order happened, and dropping it from the
+    window above would let a closed position fall through to FAILED. It is
+    only the arithmetic that is opens-only.
     """
 
     position = next((p for p in positions if p.position_ticket == ticket), None)
@@ -152,7 +159,14 @@ def _confirmed(
             filled_quantity=position.volume,
             matched_on="position",
         )
-    filled = sum((deal.volume for deal in deals if deal.position_ticket == ticket), Decimal(0))
+    filled = sum(
+        (
+            deal.volume
+            for deal in deals
+            if deal.position_ticket == ticket and deal.entry is DealEntry.IN
+        ),
+        Decimal(0),
+    )
     return Resolution(
         Verdict.CONFIRMED,
         position_ticket=ticket,

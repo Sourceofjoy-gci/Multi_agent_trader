@@ -442,8 +442,10 @@ uv run trading-house guard status
   would be as invented as another symbol's. An orphan with no broker-side stop
   therefore escalates rather than being adopted at a fabricated distance (D-5);
   an orphan that already carries its own stop is adopted at it, as before.
-- **`guard status`** reports every position the guard still watches, its
-  recorded stop, and whether it has escalated. It reads the position store and
+- **`guard status`** reports every position the store still holds open, its
+  recorded stop, and whether it has escalated — an escalated position is by
+  design no longer watched, and appears here precisely so a human can see
+  that. It reads the position store and
   nothing else — no terminal, no gate — because an escalation is exactly when
   the broker may be the thing that is broken.
 

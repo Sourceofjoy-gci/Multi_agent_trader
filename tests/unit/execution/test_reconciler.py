@@ -450,6 +450,19 @@ def test_several_deals_against_one_position_confirm_at_their_total() -> None:
     assert resolution.filled_quantity == Decimal("0.15")
 
 
+def test_a_position_opened_and_closed_inside_the_lookback_confirms_at_what_it_filled() -> None:
+    """``MATCH_LOOKBACK`` is 60s and a scalper's position can open and close
+    well inside it, which puts both its IN deal and its OUT deal in the
+    window. Summing every deal on the ticket confirms the intent at twice the
+    volume actually filled -- on the money path, with nothing downstream that
+    would ever notice."""
+
+    resolution = _resolve(deals=(_deal(), _deal(entry=DealEntry.OUT)))
+
+    assert resolution.verdict is Verdict.CONFIRMED
+    assert resolution.filled_quantity == Decimal("0.25")
+
+
 def test_the_sweep_records_a_partial_fill_as_partial() -> None:
     ledger = RecordingLedger()
     ledger.append("i-1", IntentState.UNKNOWN, BASE, _snapshot_payload())
