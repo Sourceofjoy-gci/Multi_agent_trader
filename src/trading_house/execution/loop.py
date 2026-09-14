@@ -434,10 +434,14 @@ class PositionGuard:
             escalated += did_escalate
             self._ticket_errors.pop(ticket, None)
 
-        # Reaching here means positions_now() succeeded, so the one condition
-        # _last_system_reason ever holds -- an unreadable broker -- is over,
-        # and the next occurrence must be reported again (D-2: "and again the
-        # moment it changes"). Deliberately NOT gated on whether some ticket
+        # Reaching here means this cycle raised nothing anywhere -- not the
+        # broker read, not the store read, not a per-ticket step escaping its
+        # own containment. That is D-2's "clean cycle", after which a condition
+        # must be reported again the moment it returns. Note the memory has two
+        # remember=True writers, not one: the unreadable-broker branch above and
+        # run()'s handler, which escalates any exception cycle() failed to
+        # contain. A clean cycle clears either of them, which is what D-2 asks
+        # for in both cases. Deliberately NOT gated on whether some ticket
         # raised: per-ticket failures keep their own memory (_ticket_errors)
         # and say nothing about the broker read. Gating on them left this
         # stale, so an unreadable -> one-ticket-bug -> unreadable sequence
