@@ -267,22 +267,28 @@ class FakeProtectionVenue:
         amend_raises: Exception | None = None,
         closing_price_result: Decimal | None = None,
     ) -> None:
-        self._positions = positions
+        # positions and amend_raises are PUBLIC because a test that stages a
+        # broker changing its mind across cycles must be able to change them,
+        # and a private name silently accepts the assignment while the fake
+        # goes on returning the old value -- a test that passes for a reason
+        # unrelated to what it checks, which is the defect this suite exists
+        # to catch.
+        self.positions = positions
+        self.amend_raises = amend_raises
         self._amend_fails = amend_fails
-        self._amend_raises = amend_raises
         self.closing_price_result = closing_price_result
         self.amended: list[AmendCall] = []
         self.price_reads: list[tuple[str, bool]] = []
 
     def positions_now(self) -> Sequence[PositionRecord] | None:
-        return self._positions
+        return self.positions
 
     def amend_protection(
         self, ref: VenueRef, stop_loss: Decimal, take_profit: Decimal | None
     ) -> ExecutionOutcome:
         self.amended.append(AmendCall(ref=ref, stop_loss=stop_loss, take_profit=take_profit))
-        if self._amend_raises is not None:
-            raise self._amend_raises
+        if self.amend_raises is not None:
+            raise self.amend_raises
         if self._amend_fails:
             return ExecutionOutcome(
                 accepted=False,

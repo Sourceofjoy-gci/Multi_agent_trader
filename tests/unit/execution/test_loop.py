@@ -465,9 +465,9 @@ def test_a_persistently_unreadable_broker_escalates_once_not_once_a_second() -> 
     assert len(escalator.calls) == 1
     assert len(store.appended) == 1
 
-    venue._positions = ()  # the terminal comes back, with an empty book
+    venue.positions = ()  # the terminal comes back, with an empty book
     guard.cycle()
-    venue._positions = None  # and goes away again
+    venue.positions = None  # and goes away again
     guard.cycle()
 
     assert len(escalator.calls) == 2
@@ -948,7 +948,7 @@ def test_an_adopted_orphan_is_still_guarded_after_it_escalates() -> None:
     assert latest is not None
     assert latest.get("escalated") != "true"  # escalated per D-5, not terminal per 5.2
 
-    venue._positions = [_observed(stop_loss=None)]  # the broker's stop vanishes again
+    venue.positions = [_observed(stop_loss=None)]  # the broker's stop vanishes again
     report = guard.cycle()
 
     assert len(venue.amended) == 2  # a second, genuine restore -- not abandoned
