@@ -71,8 +71,10 @@ def _result(**overrides: object) -> BacktestResult:
 
 
 def test_net_pnl_is_gross_less_every_cost_term() -> None:
-    """The headline number. If it is computed anywhere but from the trades'
-    own fields, the result and its trades can disagree and nothing notices."""
+    """The happy path: with two trades whose net_pnl the _result() helper
+    independently sums, the result's net_pnl equals that sum. This checks
+    the arithmetic; it does not by itself prove a disagreement would be
+    caught -- see test_a_result_whose_net_does_not_reconcile_is_refused."""
 
     result = _result(
         trades=(
@@ -104,6 +106,16 @@ def test_a_trade_whose_net_does_not_reconcile_is_refused() -> None:
             swap=Decimal("0"),
             net_pnl=Decimal("100"),  # should be 93; the validator must refuse it
         )
+
+
+def test_a_result_whose_net_does_not_reconcile_is_refused() -> None:
+    """The result-level counterpart to the check above. A BacktestResult's
+    net_pnl is not trusted as given either -- one that claims a net its own
+    trades do not sum to is refused here, before it can reach the trial
+    ledger Phase 8 hashes it into."""
+
+    with pytest.raises(ValidationError):
+        _result(net_pnl=Decimal("999"))
 
 
 def test_the_digest_changes_when_any_cost_input_changes() -> None:

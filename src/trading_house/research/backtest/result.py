@@ -94,7 +94,10 @@ class BacktestResult(CanonicalModel):
     def digest(self) -> str:
         """A hash of every field, including ``cost_model``, so two runs that
         differ in anything they assumed -- costs included -- cannot share a
-        digest. Pydantic serialises fields in declaration order, so
-        ``model_dump_json()`` is stable across equal results without sorting."""
+        digest. Field order in ``model_dump_json()`` comes from each model's
+        declaration order, fixed at class definition rather than from
+        hash-randomised runtime state, so two field-equal results should
+        serialise identically. This module's test covers that within one
+        process; Task 6 verifies it holds across processes."""
 
         return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
