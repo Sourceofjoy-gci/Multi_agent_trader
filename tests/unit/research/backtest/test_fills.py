@@ -193,3 +193,24 @@ def test_the_same_rules_hold_mirrored_for_a_sell() -> None:
     assert exit_ is not None
     assert exit_.kind is ExitKind.STOP
     assert exit_.fill.price == Decimal("1.11000")  # gapped up through a sell's stop
+
+
+def test_a_sell_target_gapped_past_fills_at_the_target_never_better() -> None:
+    """Mirrors case 3 for a SELL. A bar that gaps below a short's take-profit
+    must fill at the target, never at the more favourable bar.open or bar.low
+    -- D-6's "never better" half, unprotected on the short side until now."""
+
+    bar = _bar(open=Decimal("1.10000"), high=Decimal("1.10100"), low=Decimal("1.09900"))
+    exit_ = resolve_exit(
+        bar=bar,
+        side=Side.SELL,
+        stop=Decimal("1.11700"),
+        target=Decimal("1.10500"),
+        contract=_contract(),
+        model=_zero_slip(),
+    )
+
+    assert exit_ is not None
+    assert exit_.kind is ExitKind.TARGET
+    assert exit_.fill.price == Decimal("1.10500")  # the target, NOT 1.10000 or 1.09900
+    assert exit_.fill.at == bar.availability_time
