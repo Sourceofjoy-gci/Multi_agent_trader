@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -16,15 +16,18 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 def _snapshot(
     *,
     spread: int,
+    as_of: datetime | None = None,
+    availability_time: datetime | None = None,
     tick_spread_points: Decimal | None = None,
     tick_time: datetime | None = None,
 ) -> FeatureSnapshot:
     timeframe = Timeframe.M1
+    resolved_availability_time = availability_time if availability_time is not None else NOW
     bar = Bar(
         instrument_id="fx.eurusd",
         timeframe=timeframe,
-        event_time=NOW - duration(timeframe),
-        availability_time=NOW,
+        event_time=resolved_availability_time - duration(timeframe),
+        availability_time=resolved_availability_time,
         open=Decimal("1.10000"),
         high=Decimal("1.10050"),
         low=Decimal("1.09950"),
@@ -35,7 +38,7 @@ def _snapshot(
         quality=BarQuality.OK,
     )
     return FeatureSnapshot(
-        as_of=NOW,
+        as_of=as_of if as_of is not None else NOW,
         instrument_id="fx.eurusd",
         timeframe=timeframe,
         bar=bar,
@@ -67,6 +70,33 @@ def test_a_snapshot_whose_tick_fields_disagree_with_its_bar_is_refused() -> None
 
     with pytest.raises(ValueError, match="tick_spread_points"):
         _snapshot(spread=17, tick_spread_points=Decimal(3))
+
+
+def test_a_snapshot_whose_tick_time_disagrees_with_its_bars_availability_is_refused() -> None:
+    """Pins the branch distinct from as_of: tick_time matches as_of here, so
+    only a tick_time/bar.availability_time mismatch can be firing this error."""
+
+    with pytest.raises(ValueError, match="availability_time"):
+        _snapshot(
+            spread=17,
+            as_of=NOW,
+            availability_time=NOW - timedelta(seconds=1),
+            tick_time=NOW,
+        )
+
+
+def test_a_snapshot_whose_tick_time_disagrees_with_as_of_is_refused() -> None:
+    """Pins the branch distinct from availability_time: tick_time matches the
+    bar's availability_time here, so only a tick_time/as_of mismatch can be
+    firing this error."""
+
+    with pytest.raises(ValueError, match="tick_time must equal as_of"):
+        _snapshot(
+            spread=17,
+            as_of=NOW - timedelta(seconds=1),
+            availability_time=NOW,
+            tick_time=NOW,
+        )
 
 
 @pytest.mark.parametrize(
