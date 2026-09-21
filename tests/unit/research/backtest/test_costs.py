@@ -88,13 +88,48 @@ def test_slippage_always_moves_the_price_against_the_trade() -> None:
 def test_the_stress_multiplier_scales_every_term_together() -> None:
     """Section 11.2's gate is "profitable at 1.5x-2x expected costs". One
     multiplier over the whole model rather than a second code path -- a
-    separate stressed path is one that drifts from the unstressed one."""
+    separate stressed path is one that drifts from the unstressed one. Every
+    term must scale, not just commission: a caller relying on this gate to
+    catch a strategy that only survives at nominal costs needs slippage and
+    swap stressed too, or the gate tests one third of the model."""
 
-    base = _model(commission_per_lot_per_side=Decimal("3.00"))
+    base = _model(
+        commission_per_lot_per_side=Decimal("3.00"),
+        slippage_points_per_side=Decimal("2"),
+        swap_long_points_per_day=Decimal("-1"),
+    )
     stressed = base.model_copy(update={"stress_multiplier": Decimal(2)})
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
 
     assert commission_cost(model=stressed, lots=Decimal(1)) == Decimal("12.00")
     assert commission_cost(model=base, lots=Decimal(1)) == Decimal("6.00")
+
+    assert slippage_price_offset(
+        model=stressed, side=Side.BUY, contract=contract, opening=True
+    ) == Decimal("0.00004")
+    assert slippage_price_offset(
+        model=base, side=Side.BUY, contract=contract, opening=True
+    ) == Decimal("0.00002")
+
+    opened_at = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)  # Monday
+    closed_at = datetime(2026, 9, 22, 9, 0, tzinfo=UTC)  # Tuesday, one crossing
+
+    assert swap_cost(
+        model=stressed,
+        side=Side.BUY,
+        lots=Decimal(1),
+        contract=contract,
+        opened_at=opened_at,
+        closed_at=closed_at,
+    ) == Decimal("-2")
+    assert swap_cost(
+        model=base,
+        side=Side.BUY,
+        lots=Decimal(1),
+        contract=contract,
+        opened_at=opened_at,
+        closed_at=closed_at,
+    ) == Decimal("-1")
 
 
 def test_swap_is_tripled_on_the_rollover_weekday() -> None:
@@ -157,6 +192,48 @@ def test_swap_triple_weekday_matches_the_crossings_destination_not_source() -> N
     )
 
     assert cost == Decimal("-1")
+
+
+def test_swap_converts_points_through_point_size_not_price_increment() -> None:
+    """`slippage_price_offset` turns points into a price distance through
+    `contract.point_size` (costs.py:57); `swap_cost` must convert its points
+    rate the same way rather than assuming one swap point equals one
+    `price_increment`. `InstrumentContract.point_size`'s own docstring warns
+    against exactly that assumption: it is "Equal to price_increment on most
+    FX symbols and NOT the same field". A contract where they differ -- a
+    shape MT5 genuinely produces -- is the only fixture that can catch the
+    two functions disagreeing about what a "point" is; the module's other
+    tests all use `point_size == price_increment`, where the bug is
+    invisible."""
+
+    model = _model(swap_long_points_per_day=Decimal("-1"), triple_swap_weekday=2)
+    contract = _contract(
+        point_size=Decimal("0.00001"),
+        price_increment=Decimal("0.001"),
+        value_per_price_increment=Decimal("1"),
+    )
+
+    cost = swap_cost(
+        model=model,
+        side=Side.BUY,
+        lots=Decimal(1),
+        contract=contract,
+        opened_at=datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # Monday
+        closed_at=datetime(2026, 9, 22, 9, 0, tzinfo=UTC),  # Tuesday, one crossing
+    )
+
+    # -1 point/day * 1 day * 1 lot, converted through point_size/price_increment
+    # (0.00001 / 0.001 = 0.01) rather than taken as one price_increment.
+    assert cost == Decimal("-0.01")
+
+
+@pytest.mark.parametrize("weekday", [-1, 7])
+def test_triple_swap_weekday_rejects_out_of_range_values(weekday: int) -> None:
+    """`Field(ge=0, le=6)` (costs.py:38) only closes the loop on "0=Monday ..
+    6=Sunday" if the two edges just outside it actually raise."""
+
+    with pytest.raises(ValidationError):
+        _model(triple_swap_weekday=weekday)
 
 
 def test_a_position_closed_the_same_day_pays_no_swap() -> None:

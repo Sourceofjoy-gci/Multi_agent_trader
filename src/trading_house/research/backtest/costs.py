@@ -77,6 +77,32 @@ def swap_cost(
     destination day falls on ``triple_swap_weekday`` is charged three days
     instead of one, covering MT5's weekend rollover. A position closed the
     same calendar day it was opened has zero crossings and pays no swap.
+
+    ``swap_long_points_per_day`` / ``swap_short_points_per_day`` are MT5
+    points -- the same unit ``slippage_points_per_side`` is in, and *not* the
+    same unit as ``contract.value_per_price_increment`` (money per
+    ``price_increment``). ``InstrumentContract.point_size``'s own docstring
+    warns that it is "NOT the same field" as ``price_increment``, so swap
+    converts points to money through ``point_size`` exactly as
+    ``slippage_price_offset`` does: one point is worth
+    ``point_size / price_increment`` price increments, so
+    ``point_size * value_per_price_increment / price_increment`` in money.
+    Every exact factor (rate, day count, lots, ``point_size``,
+    ``value_per_price_increment``) is multiplied together first; the division
+    by ``price_increment`` runs last, on that already-exact numerator, so it
+    is the only rounding boundary in the expression.
+
+    That division is not guaranteed to terminate: when ``price_increment``'s
+    reduced-fraction denominator has prime factors other than 2 and 5 (i.e.
+    ``point_size / price_increment`` is not expressible as a power of ten),
+    the quotient repeats and Decimal's default context rounds it to 28
+    significant digits with ROUND_HALF_EVEN. This function does not quantise
+    the result any further, deliberately: ROUND_HALF_EVEN is unbiased across
+    many trades, where ROUND_HALF_UP or ROUND_DOWN would drift every
+    non-terminating contract's simulated cost the same direction on every
+    charge; and no other function in this module rounds its output either --
+    quantising money to the account currency's minor unit is the ledger's
+    job downstream, not this cost model's.
     """
 
     rate = model.swap_long_points_per_day if side is Side.BUY else model.swap_short_points_per_day
@@ -87,7 +113,9 @@ def swap_cost(
         rate
         * Decimal(day_count)
         * lots
+        * contract.point_size
         * contract.value_per_price_increment
+        / contract.price_increment
         * model.stress_multiplier
     )
 
