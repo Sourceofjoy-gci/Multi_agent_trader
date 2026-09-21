@@ -129,7 +129,13 @@ Per bar, in this order, **and the order is the design**:
    `firm_equity`. The execution-time entry point rather than the pure one,
    because the value of driving the real engine is seeing the same vetoes live
    would, §8.1's free-margin headroom included.
-6. **Size through `compute_volume` and `stop_price`.**
+6. **Read the size off the decision — do not compute it.** `RiskEngine.evaluate`
+   already calls `compute_stop_distance`, `stop_price` and `compute_volume`
+   internally and returns `approved_quantity` and `stop_loss_price` on the
+   `ExecutableRiskDecision`. An earlier draft of this section said "size through
+   `compute_volume` and `stop_price`", which would have sized twice. D-3 holds
+   either way — the real sizing is in the path — but it gets there through the
+   engine, and the simulator's job is to use what the engine returned.
 7. **Queue the entry to fill at the next bar's open** — never this bar's close,
    which is §11.1's named violation.
 
