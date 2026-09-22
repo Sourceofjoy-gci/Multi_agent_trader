@@ -29,14 +29,34 @@ class CostModel(CanonicalModel):
     """The declared costs a backtest charges. Every field but
     ``stress_multiplier`` is required -- commission, slippage and both swap
     rates are costs, not defaults, and ``stress_multiplier`` is the only
-    scenario knob among them (section 12's 1.5x-2x sensitivity gate)."""
+    scenario knob among them (section 12's 1.5x-2x sensitivity gate).
+
+    ``stress_multiplier`` is bounded strictly above zero, and that bound is
+    load-bearing rather than tidy. At zero every term in the cost equation
+    vanishes and at a negative value every cost becomes a credit -- which is
+    the zero-commission backtest D-5 forbids, reached through the one field
+    D-5's own guard deliberately exempts.
+
+    **The gate is 1.5x-2x** (section 12): a strategy must stay profitable
+    there. Values below 1 are allowed because "what if costs are lower than
+    assumed" is a legitimate sensitivity probe in the other direction, but a
+    result produced below 1 flatters the strategy and is not evidence it
+    passes anything.
+
+    One consequence of section 7.1's "one multiplier over the whole model",
+    stated rather than coded around: ``swap_*_points_per_day`` is signed, so
+    stressing a *positive* carry increases profit and a positive-carry
+    strategy therefore clears the section 12 gate more easily at 2x than at
+    1x. The spec mandates a single multiplier, so this is documented rather
+    than fixed with a second code path.
+    """
 
     commission_per_lot_per_side: Decimal  # account currency
     slippage_points_per_side: Decimal
     swap_long_points_per_day: Decimal  # signed; negative is a charge
     swap_short_points_per_day: Decimal
     triple_swap_weekday: int = Field(ge=0, le=6)  # 0=Monday .. 6=Sunday
-    stress_multiplier: Decimal = Decimal(1)
+    stress_multiplier: Decimal = Field(default=Decimal(1), gt=0)
 
 
 def commission_cost(*, model: CostModel, lots: Decimal) -> Decimal:
@@ -88,9 +108,16 @@ def swap_cost(
     ``point_size / price_increment`` price increments, so
     ``point_size * value_per_price_increment / price_increment`` in money.
     Every exact factor (rate, day count, lots, ``point_size``,
-    ``value_per_price_increment``) is multiplied together first; the division
-    by ``price_increment`` runs last, on that already-exact numerator, so it
-    is the only rounding boundary in the expression.
+    ``value_per_price_increment`` and ``stress_multiplier``) is multiplied
+    together first; the division by ``price_increment`` runs last, on that
+    already-exact numerator, so it is the only rounding boundary in the
+    expression. ``stress_multiplier`` belongs on that list and is written
+    there: multiplying by it *after* the division rounds a second time, and
+    with ``point_size=0.00001``, ``price_increment=0.00003`` and a stress of
+    3 the two orders differ by one ulp
+    (``-0.9999999999999999999999999999`` against ``-1``). ``digest()`` hashes
+    a ``Decimal``'s string form, so that ulp would reach the digest Phase 8's
+    trial ledger stores.
 
     That division is not guaranteed to terminate: when ``price_increment``'s
     reduced-fraction denominator has prime factors other than 2 and 5 (i.e.
@@ -115,8 +142,8 @@ def swap_cost(
         * lots
         * contract.point_size
         * contract.value_per_price_increment
-        / contract.price_increment
         * model.stress_multiplier
+        / contract.price_increment
     )
 
 

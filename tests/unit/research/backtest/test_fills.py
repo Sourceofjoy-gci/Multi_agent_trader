@@ -214,3 +214,94 @@ def test_a_sell_target_gapped_past_fills_at_the_target_never_better() -> None:
     assert exit_.kind is ExitKind.TARGET
     assert exit_.fill.price == Decimal("1.10500")  # the target, NOT 1.10000 or 1.09900
     assert exit_.fill.at == bar.availability_time
+
+
+_FOUR_POINTS = Decimal(4) * Decimal("0.00001")
+"""What ``slippage_points_per_side=4`` is worth as a price distance, at the
+``point_size`` every contract in this module uses."""
+
+
+def test_an_entry_fill_pays_slippage_on_top_of_the_half_spread() -> None:
+    """``slippage_price_offset``'s four signs are pinned in ``test_costs.py``,
+    but nothing until now put a non-zero slippage through ``entry_fill``
+    itself: every other call in this suite states zero. Delete the offset from
+    this fill site and the half-spread assertions above still pass, because
+    they were computed with slippage at zero.
+
+    Hand-derived: a buy pays half the 20-point spread up (0.00010) and then
+    slips 4 more points up (0.00004); a sell crosses the same half-spread down
+    and slips 4 points further down. Both move against the trade.
+    """
+
+    bar = _bar(open=Decimal("1.10000"), spread=20)
+    slipping = _zero_slip(slippage_points_per_side=Decimal(4))
+    half_spread = Decimal("0.00010")
+
+    buy = entry_fill(bar=bar, side=Side.BUY, contract=_contract(), model=slipping)
+    sell = entry_fill(bar=bar, side=Side.SELL, contract=_contract(), model=slipping)
+
+    assert buy.price == Decimal("1.10000") + half_spread + _FOUR_POINTS  # 1.10014
+    assert sell.price == Decimal("1.10000") - half_spread - _FOUR_POINTS  # 1.09986
+    # Not the zero-slippage prices the rest of this module asserts.
+    assert buy.price != Decimal("1.10010")
+    assert sell.price != Decimal("1.09990")
+
+
+def test_an_exit_fill_pays_slippage_against_the_trade_on_every_exit_kind() -> None:
+    """``resolve_exit``'s own fill site, for the same reason: the exit half of
+    the offset reaches the suite nowhere else.
+
+    On the way out the signs reverse -- a long sells lower than the level it
+    exited at, a short buys back higher -- so an offset added with the entry's
+    sign, or dropped entirely, is worse for the trade in exactly one of these
+    four assertions and better in another. Every price below is the resolved
+    level (a stop, a gapped open, or the target) plus or minus the same
+    0.00004.
+    """
+
+    slipping = _zero_slip(slippage_points_per_side=Decimal(4))
+
+    long_stop = resolve_exit(
+        bar=_bar(open=Decimal("1.10000"), high=Decimal("1.10100"), low=Decimal("1.09650")),
+        side=Side.BUY,
+        stop=Decimal("1.09700"),
+        target=None,
+        contract=_contract(),
+        model=slipping,
+    )
+    long_target = resolve_exit(
+        bar=_bar(open=Decimal("1.10000"), high=Decimal("1.10600"), low=Decimal("1.09900")),
+        side=Side.BUY,
+        stop=Decimal("1.09700"),
+        target=Decimal("1.10500"),
+        contract=_contract(),
+        model=slipping,
+    )
+    short_stop = resolve_exit(
+        bar=_bar(open=Decimal("1.11000"), high=Decimal("1.11100"), low=Decimal("1.10900")),
+        side=Side.SELL,
+        stop=Decimal("1.10300"),
+        target=None,
+        contract=_contract(),
+        model=slipping,
+    )
+    short_target = resolve_exit(
+        bar=_bar(open=Decimal("1.10000"), high=Decimal("1.10100"), low=Decimal("1.09900")),
+        side=Side.SELL,
+        stop=Decimal("1.11700"),
+        target=Decimal("1.10500"),
+        contract=_contract(),
+        model=slipping,
+    )
+
+    assert long_stop is not None
+    assert long_target is not None
+    assert short_stop is not None
+    assert short_target is not None
+    # A long exits by selling: lower is worse.
+    assert long_stop.fill.price == Decimal("1.09700") - _FOUR_POINTS  # 1.09696
+    assert long_target.fill.price == Decimal("1.10500") - _FOUR_POINTS  # 1.10496
+    # A short exits by buying back: higher is worse. 1.11000 is the gapped
+    # open, which is already worse than the 1.10300 stop.
+    assert short_stop.fill.price == Decimal("1.11000") + _FOUR_POINTS  # 1.11004
+    assert short_target.fill.price == Decimal("1.10500") + _FOUR_POINTS  # 1.10504

@@ -252,3 +252,96 @@ def test_a_position_closed_the_same_day_pays_no_swap() -> None:
     )
 
     assert cost == Decimal(0)
+
+
+def test_the_stress_multiplier_is_applied_before_the_only_division() -> None:
+    """One rounding boundary, not two.
+
+    ``swap_cost``'s docstring promises the division by ``price_increment``
+    runs last, "so it is the only rounding boundary in the expression". A
+    ``* stress_multiplier`` written after that division rounds a second time.
+    This fixture makes the two orders disagree: ``point_size /
+    price_increment`` is ``1/3``, which does not terminate, so the quotient is
+    rounded to 28 significant digits and the later multiply by 3 cannot
+    recover the missing ulp.
+
+    Hand-derived, not read off the code. Multiplying first:
+    ``-1 point/day x 1 day x 1 lot x 0.00001 x $1 x 3 = -0.00003``, divided by
+    ``price_increment`` 0.00003 gives exactly ``-1``. Dividing first gives
+    ``-0.3333333333333333333333333333``, and x3 is
+    ``-0.9999999999999999999999999999`` -- a different number, and because
+    ``BacktestResult.digest()`` hashes a ``Decimal``'s string form, a
+    different digest.
+    """
+
+    model = _model(swap_long_points_per_day=Decimal("-1"), stress_multiplier=Decimal(3))
+    contract = _contract(
+        point_size=Decimal("0.00001"),
+        price_increment=Decimal("0.00003"),
+        value_per_price_increment=Decimal("1"),
+    )
+
+    cost = swap_cost(
+        model=model,
+        side=Side.BUY,
+        lots=Decimal(1),
+        contract=contract,
+        opened_at=datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # Monday
+        closed_at=datetime(2026, 9, 22, 9, 0, tzinfo=UTC),  # Tuesday, one crossing
+    )
+
+    assert cost == Decimal(-1)
+    # Equality alone would pass on a value that merely rounds to -1 in some
+    # other scale; the digest hashes the string form, so pin that too.
+    assert str(cost) == "-1"
+
+
+def test_a_sell_is_charged_the_short_swap_rate() -> None:
+    """The branch no other test in this suite reaches.
+
+    Every other ``swap_cost`` call here passes ``Side.BUY``, and the toy
+    strategy that drives the engine and CLI tests is BUY-only, so deleting
+    ``costs.py``'s short-rate branch leaves the whole suite green. Distinct
+    rates are the only fixture that can tell the two apart: with both set to
+    the same number a side mix-up is invisible.
+    """
+
+    model = _model(
+        swap_long_points_per_day=Decimal("-1"),
+        swap_short_points_per_day=Decimal("-7"),
+    )
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
+    held = {
+        "lots": Decimal(1),
+        "contract": contract,
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # Monday
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),  # Tuesday, one crossing
+    }
+
+    assert swap_cost(model=model, side=Side.SELL, **held) == Decimal(-7)  # type: ignore[arg-type]
+    assert swap_cost(model=model, side=Side.BUY, **held) == Decimal(-1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("multiplier", ["0", "-2"])
+def test_a_stress_multiplier_at_or_below_zero_is_refused(multiplier: str) -> None:
+    """D-5's back door.
+
+    ``stress_multiplier`` is the one field the acceptance suite deliberately
+    exempts from "every cost is required", and it scales every term in the
+    cost equation at once. At 0 every cost vanishes -- the zero-commission
+    backtest D-5 exists to forbid -- and below 0 every cost becomes a credit.
+    ``Field(gt=0)`` rather than ``ge=1``: a multiplier under 1 is a legitimate
+    probe in the other direction and the docstring, not the schema, says it
+    flatters the result.
+    """
+
+    with pytest.raises(ValidationError):
+        _model(stress_multiplier=Decimal(multiplier))
+
+
+def test_a_stress_multiplier_below_one_still_constructs() -> None:
+    """The other half of the bound: ``gt=0``, not ``ge=1``. "What if costs are
+    lower than assumed" is a sensitivity probe the gate has no reason to
+    forbid, so a change to ``ge=1`` must fail here rather than pass quietly."""
+
+    assert _model(stress_multiplier=Decimal("0.5")).stress_multiplier == Decimal("0.5")
