@@ -548,7 +548,7 @@ uv run trading-house backtest run --strategy toy --toy-every-n 20 \
   nothing in this repo can produce an `InstrumentContract` without a live
   MetaTrader 5 terminal, and a research command that needs one cannot be
   replayed. The facts come from a vetted file, never from flags.
-- **Bad input leaves by four doors and all four are typed.** A refusal out of
+- **Bad input leaves by five doors and all five are typed.** A refusal out of
   the run prints
   `{"status": "error", "detail": "backtest refused", "refusal": "<kind>"}` on
   stderr. A money option that is not a finite number — `abc`, but also `NaN`
@@ -557,7 +557,9 @@ uv run trading-house backtest run --strategy toy --toy-every-n 20 \
   construction. A `--contract` that cannot be read, cannot be decoded, or is
   not valid JSON is refused at the file; that one matters most, because
   `--contract` is the only input to this command with no producer anywhere in
-  the repository, so every operator hand-writes it. All four exit 2 with
+  the repository, so every operator hand-writes it. And a contract or a cost
+  value that parses but does not satisfy its model is refused by the same
+  schema handler every other command in this system uses. All five exit 2 with
   key-sorted JSON on stderr. None reaches the operator as a correlation id —
   which is what this system prints when *it* is broken, not when the input is —
   and none carries free text a DSN, a path or a broker message could ride out
