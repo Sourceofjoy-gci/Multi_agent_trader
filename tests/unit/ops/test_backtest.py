@@ -15,12 +15,15 @@ import pytest
 
 from tests.unit.research.backtest.conftest import (
     ATR_PERIOD,
+    FIRST_SNAPSHOT_BAR,
+    HALF_SPREAD,
     SPREAD_WINDOW,
     FakeBarReader,
     _constitution,
     _contract,
     _cost_model,
     _ramp,
+    ramp_price,
 )
 from trading_house.core.errors import ConfigurationError
 from trading_house.core.schemas import Side
@@ -32,6 +35,7 @@ from trading_house.ops.backtest import (
     build_strategy,
 )
 from trading_house.research.backtest.engine import BacktestRequest
+from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.snapshot import MIN_HORIZON_BARS
 from trading_house.risk.engine import MARGIN_HEADROOM_MULTIPLE
@@ -74,6 +78,14 @@ def test_the_composed_backtester_shares_its_clock_with_its_risk_engine() -> None
     clock's identity, which a future wiring could satisfy while still handing
     the engine a clock nobody advances. The rejection assertion is what names
     the cause when it does fail.
+
+    The content assertions below are the composed path's own known answer.
+    Counting two trades catches a run that stopped trading; it does not catch a
+    run that trades the WRONG thing, and Task 5's known-answer test wires its
+    own clock and its own strategy, so it never exercises this composition. The
+    prices are derived from the ramp rather than written down: the first
+    snapshot is bar ``FIRST_SNAPSHOT_BAR`` (the ATR window is cold before it),
+    a signal fills at the NEXT bar's open, and a buy pays half the spread.
     """
 
     result = _composed_run()
@@ -81,6 +93,17 @@ def test_the_composed_backtester_shares_its_clock_with_its_risk_engine() -> None
     assert result.rejections == ()
     assert len(result.trades) == 2
     assert result.bars_seen == BARS
+
+    first, second = result.trades
+    assert first.entry_price == ramp_price(FIRST_SNAPSHOT_BAR + 1) + HALF_SPREAD
+    assert second.entry_price == ramp_price(FIRST_SNAPSHOT_BAR + EVERY_N + 1) + HALF_SPREAD
+    # The toy's stop sits 100 points away and the ramp rises one point a bar,
+    # so neither position can be stopped out or take profit: both must run to
+    # the holding deadline. An exit kind that is not TIME means the simulator
+    # resolved something this series cannot produce.
+    assert (first.exit_kind, second.exit_kind) == (ExitKind.TIME, ExitKind.TIME)
+    assert (first.net_pnl, second.net_pnl) == (Decimal("-20.22"), Decimal("-20.22"))
+    assert result.net_pnl == Decimal("-40.44")
 
 
 def test_the_toy_is_the_only_registered_strategy() -> None:

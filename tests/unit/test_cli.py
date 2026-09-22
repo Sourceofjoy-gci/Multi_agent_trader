@@ -1130,13 +1130,102 @@ def test_backtest_surfaces_a_refusal_with_its_kind_and_nothing_else(tmp_path: Pa
 def test_backtest_errors_never_echo_a_path_or_a_credential(tmp_path: Path) -> None:
     """No command in this system prints a path, a credential or a key, and the
     backtest command is handed both a DSN (through the environment) and a file
-    path (through ``--contract``)."""
+    path (through ``--contract``).
 
-    args = _backtest_args(tmp_path, **{"--firm-equity": "0"})
+    A MISSING contract, not a bad equity. ``--firm-equity 0`` cannot leak
+    either string under any single production change: its handler answers with
+    ``ConfigurationError``'s fixed class string, and rewriting that handler to
+    echo ``str(error)`` still yields only "firm_equity must be positive". A
+    missing file is the one error path here that genuinely has something to
+    lose -- ``FileNotFoundError``'s message embeds the path the operator typed,
+    and the fixed string is the only thing between it and stderr. A future "let
+    us give a more helpful error" edit is exactly how that would leak.
+    """
+
+    args = _backtest_args(tmp_path, **{"--contract": str(tmp_path / "absent" / "contract.json")})
 
     result = runner.invoke(cli.app, args)
 
     output = result.stdout + result.stderr
 
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
     assert "super-secret-password" not in output
     assert str(tmp_path) not in output
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_malformed_contract_file_as_a_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
+
+    ``--contract`` is the one input to this command with no producer anywhere
+    in the repo -- every operator hand-writes that file -- so a trailing comma
+    in it is the likeliest mistake the command ever sees. A handler written for
+    the unreadable-file case alone lets it through to the catch-all, where a
+    typo comes back as a correlation id.
+    """
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text('{"instrument_id": "fx.eurusd",}', encoding="utf-8")
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--contract": str(malformed)}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "correlation_id" not in json.loads(result.stderr)
+
+
+@pytest.mark.parametrize("equity", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_non_finite_equity_as_a_configuration_failure(
+    tmp_path: Path, equity: str
+) -> None:
+    """Shape three, which ``Decimal(value)`` alone cannot see.
+
+    All three CONSTRUCT cleanly, so catching the construction is not enough.
+    ``NaN <= 0`` raises ``InvalidOperation`` from inside ``BacktestRequest`` --
+    an ``ArithmeticError``, so it slips past the ``ValueError`` handler wrapping
+    that construction and lands in the catch-all. ``Infinity <= 0`` is worse:
+    it is simply ``False``, so an infinite equity is accepted as a positive one
+    and the run proceeds on it.
+    """
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": equity}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "correlation_id" not in json.loads(result.stderr)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_prints_the_result_its_digest_and_the_margin_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The success path, which otherwise runs only under Docker.
+
+    Every other case here is an error path, so a default ``uv run pytest -q``
+    that deselects ``integration`` never executes the payload assembly at all --
+    and that payload is the one piece of Phase 6 output shaping nothing outside
+    Docker touches, and the shape Phase 8 will hash. The bar store is the only
+    fake: the constitution, the risk engine and the simulator are real.
+
+    The digest is re-derived from the emitted result rather than compared to a
+    literal, so the assertion catches a payload whose digest belongs to some
+    other object without needing an update on every legitimate change.
+    """
+
+    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+    from trading_house.research.backtest.result import BacktestResult
+
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path))
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    # Section 8.1's headroom gate is off in a replay; the JSON has to say so,
+    # because ``BacktestResult`` is frozen and cannot.
+    assert payload["margin_modelled"] is False
+    emitted = BacktestResult.model_validate_json(json.dumps(payload["result"]))
+    assert payload["digest"] == emitted.digest()
+    assert emitted.trades

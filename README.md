@@ -486,7 +486,10 @@ next bar.
   appear nowhere in the cost equation.
 - **Margin is not modelled.** Nothing in this repo can supply a margin
   requirement, so section 8.1's free-margin headroom gate is switched off rather
-  than fed an invented number. A run assumes margin was always available.
+  than fed an invented number. A run assumes margin was always available. The
+  emitted payload says so rather than leaving it to this paragraph: it carries
+  `"margin_modelled": false` beside the digest, so a reader of the JSON — Phase
+  8's trial ledger included — sees the assumption without reading the README.
 - **Compounding does not happen.** `--firm-equity` is constant for the whole run
   (D-4), so a measured edge cannot be an artefact of position sizes growing with
   the strategy's own luck.
@@ -522,26 +525,37 @@ hash differently. That question is open.
 ### Commands
 
 ```bash
-uv run trading-house backtest run   --strategy toy --toy-every-n 20   --instrument fx.eurusd --timeframe M1   --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00   --firm-equity 100000 --contract contract.json   --atr-period 14 --spread-window 20   --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4   --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30   --triple-swap-weekday 2
+uv run trading-house backtest run --strategy toy --toy-every-n 20   --instrument fx.eurusd --timeframe M1   --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00   --firm-equity 100000 --contract contract.json   --atr-period 14 --spread-window 20   --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4   --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30   --triple-swap-weekday 2
 ```
 
 - **Every cost is required and none is defaulted** (D-5). The repo has no
   `commission` field anywhere and `FinancingModel` is an enum tag with no rate
   table, so each cost is a declared input taken from the broker's published
-  contract specification and recorded in the result. The one option that does
-  default is `--stress-multiplier`, the 1.5x–2x sensitivity knob section 12
-  asks for — a scenario, not a cost. The classic flattering backtest is one
-  that silently assumed zero commission; omitting a cost here refuses.
+  contract specification and recorded in the result. Two options default and
+  neither is a cost: `--stress-multiplier`, the 1.5x–2x sensitivity knob
+  section 12 asks for — a scenario, not a cost — and `--toy-every-n`, which
+  belongs to the toy rather than to the cost model. The classic flattering
+  backtest is one that silently assumed zero commission; omitting a cost here
+  refuses.
 - **`--contract` is a file** for the same reason `order submit --decision` is:
   nothing in this repo can produce an `InstrumentContract` without a live
   MetaTrader 5 terminal, and a research command that needs one cannot be
   replayed. The facts come from a vetted file, never from flags.
-- **Errors leave by two doors and both are typed.** A refusal prints
+- **Bad input leaves by four doors and all four are typed.** A refusal out of
+  the run prints
   `{"status": "error", "detail": "backtest refused", "refusal": "<kind>"}` on
-  stderr; a bad `--firm-equity` — non-positive, or not a number at all — is a
-  configuration failure with the same exit code. Neither reaches the operator
-  as a correlation id, and neither carries free text a DSN or a broker message
-  could ride out on.
+  stderr. A money option that is not a finite number — `abc`, but also `NaN`
+  and `Infinity`, which both *construct* as `Decimal`s — is refused where it is
+  parsed. An equity the request rejects as non-positive is refused around its
+  construction. A `--contract` that cannot be read, cannot be decoded, or is
+  not valid JSON is refused at the file; that one matters most, because
+  `--contract` is the only input to this command with no producer anywhere in
+  the repository, so every operator hand-writes it. All four exit 2 with
+  key-sorted JSON on stderr. None reaches the operator as a correlation id —
+  which is what this system prints when *it* is broken, not when the input is —
+  and none carries free text a DSN, a path or a broker message could ride out
+  on. `--atr-period`, `--spread-window` and `--toy-every-n` are refused below 1
+  by the option parser, before the command body runs, with the same exit code.
 
 ## Operator commands
 
@@ -700,17 +714,24 @@ the one place `Mt5VenueRef` is allowed to carry those facts.
 
 ## What this repository deliberately excludes
 
-Order submission of any kind; strategies, sizing and risk evaluation; market
-data ingest and backtesting; LangGraph or any LLM SDK; web APIs and
-dashboards; automatic migration at startup; and live, paper, shadow or
-simulated trading. MetaTrader 5 is present but read-only, and reachable from
-one module.
+LangGraph or any LLM SDK; web APIs and dashboards; and automatic migration at
+startup. MetaTrader 5 is reachable from one module and serves a demo account
+only — no path in this repository can reach a funded one.
+
+Order submission, strategies, sizing, risk evaluation, market data ingest and
+backtesting were all on this list and have all since shipped (Phases 1.5, 3, 4,
+5 and 6). They are named here only so the list is not read as still excluding
+them.
 
 The absence is testable. `tests/acceptance/test_architecture.py` parses every
 source module and fails on an import of `langgraph`, `openai`, `anthropic` or
 `ccxt`, on an import of `MetaTrader5` from anywhere but
 `brokers/mt5/terminal.py`, on private-key primitives outside
 `constitution/signing.py`, and on any Alembic upgrade path in runtime code.
-`tests/acceptance/test_phase1.py` fails if the string `order_send` appears
-anywhere in `src/`, if any mutating adapter method stops refusing, or if the
-gateway ever serves a non-demo account.
+`tests/acceptance/test_phase1.py` fails if the string `order_send` appears in
+any `src/` module other than `brokers/mt5/terminal.py` — and, guarding that
+exemption, if it stops appearing in `terminal.py` — if `amend_protection` ever
+closes a position on its own initiative, or if the gateway ever serves a
+non-demo account. It no longer asserts that any adapter method refuses
+unconditionally: Phases 4 and 5 filled in `submit`, `close` and
+`amend_protection`, and that parametrized test was deleted rather than emptied.

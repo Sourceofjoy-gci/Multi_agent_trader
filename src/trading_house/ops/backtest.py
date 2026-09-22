@@ -83,6 +83,13 @@ class ToyStrategy:
     It counts snapshots rather than bars because the feature windows are cold at
     the start of any range, so the first bars produce no snapshot and the
     strategy is never asked about them.
+
+    **An instance is single-use.** ``_seen`` is never reset -- nothing in the
+    ``Strategy`` port gives a run a place to reset it from -- so replaying the
+    same instance twice offsets the second run's entries and changes its
+    digest. ``backtest run`` builds a fresh one per invocation, which is the
+    only path this phase ships; a caller reusing one in-process must build a
+    new one per run.
     """
 
     every_n: int

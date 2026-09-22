@@ -218,12 +218,25 @@ def _decimal(value: str) -> Decimal:
     ``ArithmeticError`` and not a ``ValueError``, so it slips past every
     handler written for the latter and lands in ``_execute``'s catch-all --
     where a typo becomes "unexpected failure" and a correlation id.
+
+    Rejects a non-finite result for the same reason, one step later.
+    ``Decimal("NaN")`` and ``Decimal("Infinity")`` both CONSTRUCT cleanly, so
+    catching the construction is not enough: ``NaN <= 0`` raises
+    ``InvalidOperation`` from inside a later comparison -- again an
+    ``ArithmeticError``, again the catch-all -- and ``Infinity <= 0`` is simply
+    ``False``, so an infinite equity is accepted as a positive one and the run
+    proceeds. Every caller here wants money or a multiplier and none of them
+    legitimately wants either value, so the guard lives once in the shared
+    helper rather than at each call site.
     """
 
     try:
-        return Decimal(value)
+        parsed = Decimal(value)
     except InvalidOperation as error:
         raise ConfigurationError() from error
+    if not parsed.is_finite():
+        raise ConfigurationError()
+    return parsed
 
 
 def _atomic_write(destination: Path, contents: bytes) -> None:
@@ -1046,14 +1059,14 @@ def backtest_run(
     end: Annotated[datetime, typer.Option("--end", help="Last bar open, inclusive (UTC).")],
     firm_equity: Annotated[str, typer.Option("--firm-equity")],
     contract: Annotated[Path, typer.Option("--contract", help="Instrument contract JSON.")],
-    atr_period: Annotated[int, typer.Option("--atr-period")],
-    spread_window: Annotated[int, typer.Option("--spread-window")],
+    atr_period: Annotated[int, typer.Option("--atr-period", min=1)],
+    spread_window: Annotated[int, typer.Option("--spread-window", min=1)],
     commission_per_lot_per_side: Annotated[str, typer.Option("--commission-per-lot-per-side")],
     slippage_points_per_side: Annotated[str, typer.Option("--slippage-points-per-side")],
     swap_long_points_per_day: Annotated[str, typer.Option("--swap-long-points-per-day")],
     swap_short_points_per_day: Annotated[str, typer.Option("--swap-short-points-per-day")],
     triple_swap_weekday: Annotated[int, typer.Option("--triple-swap-weekday")],
-    toy_every_n: Annotated[int, typer.Option("--toy-every-n")] = 1,
+    toy_every_n: Annotated[int, typer.Option("--toy-every-n", min=1)] = 1,
     stress_multiplier: Annotated[str, typer.Option("--stress-multiplier")] = "1",
 ) -> None:
     """Replay one strategy over stored bars and print the result and its digest.
@@ -1091,10 +1104,14 @@ def backtest_run(
             instrument_contract = InstrumentContract.model_validate(
                 json.loads(contract.read_text(encoding="utf-8")), strict=False
             )
-        except OSError as error:
-            # Typed here rather than left to the catch-all: an unreadable
-            # contract file is the operator's input, not an internal failure,
-            # and the catch-all would answer a wrong path with a correlation id.
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            # Typed here rather than left to the catch-all: a contract file the
+            # operator cannot read, cannot decode, or mistyped is input, not an
+            # internal failure, and the catch-all would answer it with a
+            # correlation id. ``--contract`` has no producer anywhere in this
+            # repo -- every operator hand-writes that file -- so a trailing
+            # comma in it is the likeliest mistake this command sees, and
+            # ``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
             raise ConfigurationError() from error
         try:
             # BacktestRequest validates firm_equity in __post_init__ and raises
@@ -1131,6 +1148,12 @@ def backtest_run(
         return {
             "result": cast(JsonValue, json.loads(result.model_dump_json())),
             "digest": result.digest(),
+            # Section 8.1's free-margin headroom gate is switched off in a
+            # replay (``NeverBindingMargin``), and a reader of the JSON --
+            # Phase 8's trial ledger included -- cannot see that from the
+            # result alone. ``result.py`` is frozen, so the disclosure rides on
+            # the payload beside the digest rather than inside the model.
+            "margin_modelled": False,
         }
 
     _run(operation)
