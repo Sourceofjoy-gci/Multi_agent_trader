@@ -35,7 +35,23 @@ class SimulatedTrade(CanonicalModel):
     given -- it is checked against the trade's own ``gross_pnl``,
     ``commission`` and ``swap`` (swap is signed; a charge is negative), so a
     trade that claims a net its own terms do not produce is refused here
-    rather than surfacing later as an inexplicable equity curve."""
+    rather than surfacing later as an inexplicable equity curve.
+
+    **``gross_pnl`` is not gross of every cost, and the name oversells it.**
+    Section 7.1 lists five modelled terms: the gross move, spread, commission,
+    slippage and swap. Two of them -- spread and slippage -- are charged inside
+    ``entry_price`` and ``exit_price`` by the fill model, and ``gross_pnl`` is
+    computed from those prices. So this field is gross of ``commission`` and
+    ``swap``, which sit beside it as named lines, and *net* of spread and
+    slippage, which appear nowhere in this model. ``net_pnl`` is the correct
+    total either way; what is partial is the attribution, not the arithmetic.
+
+    Splitting spread and slippage into their own fields belongs with Phase 8's
+    cost attribution, which is the first thing that needs them. Doing it here
+    would change this model, the digest, and every known-answer number in the
+    phase whose proof those numbers are -- at the end of that phase, for a
+    breakdown nothing yet consumes.
+    """
 
     proposal_id: NonEmptyStr
     side: Side

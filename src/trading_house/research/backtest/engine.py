@@ -455,6 +455,15 @@ class Backtester:
     ) -> Decimal:
         """The move in the trade's favour, priced.
 
+        Named "gross" and gross of only two of section 7.1's five terms.
+        ``entry_price`` and ``exit_price`` come from the fill model, which has
+        already charged the half-spread and the slippage offset into both, so
+        this number already contains those two and excludes only
+        ``commission`` and ``swap`` -- the two ``SimulatedTrade`` carries as
+        named lines beside it. ``net_pnl`` is right either way; the breakdown
+        is partial, and splitting spread and slippage out is Phase 8's, with
+        the cost attribution that needs them. See ``SimulatedTrade``.
+
         Every exact factor multiplies first and the single division by
         ``price_increment`` runs last, on an already-exact numerator -- the
         shape ``swap_cost`` uses, and the reason two runs over identical inputs

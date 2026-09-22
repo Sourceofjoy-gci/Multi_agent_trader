@@ -54,6 +54,16 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
     half_spread = Decimal(bar.spread) * contract.point_size / _HALF
     raw_price = bar.open + half_spread if side is Side.BUY else bar.open - half_spread
     offset = slippage_price_offset(model=model, side=side, contract=contract, opening=True)
+    # The stamp is one bar later than the price. ``bar.open`` is the instant
+    # this fills at, but ``at`` is ``bar.availability_time`` -- that bar's
+    # close. So every ``entry_at`` and ``exit_at`` in a result misreports the
+    # fill instant by one bar, the engine's time stop honours
+    # ``max_holding_seconds`` as H plus one bar, and ``swap_cost`` sees a date
+    # pair shifted by the same amount. Plan-mandated -- the plan's own test
+    # demands this stamp -- and every known-answer number in this phase was
+    # derived against it, so correcting the stamps would move all of them.
+    # Carried to Phase 7 rather than fixed here; the README states the
+    # H-plus-one-bar effect so Phase 7 finds it rather than discovers it.
     return Fill(price=raw_price + offset, at=bar.availability_time)
 
 

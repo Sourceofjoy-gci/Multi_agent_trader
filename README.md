@@ -1,11 +1,19 @@
-# Trading House — Phase 1 Read-Only MT5 Gateway
+# Trading House — Phase 6 Backtester and Cost Model
 
-> **This repository still cannot trade.** It now talks to MetaTrader 5, but
-> only to read. There is no order path, no strategy, no sizing, and no LLM
-> agent. The gateway refuses to start against anything but a demo account,
-> and `submit`, `amend_protection` and `close` raise `NotImplementedError`
-> until Phase 3 brings the intent ledger that makes a lost response
-> recoverable. That absence is deliberate and is enforced by tests.
+> **This repository can place orders, and only ever against a demo account.**
+> Phases 1.5 to 5 shipped the parts the opening of this file used to say were
+> absent: market-data ingest, the signed risk constitution and the sizing it
+> governs, an idempotent order path with an intent ledger, and a position
+> guard that keeps protective stops attached. Phase 6 adds a backtester that
+> replays stored bars through that same risk engine.
+>
+> **The one thing that is still absent is a funded account.** The MT5 gateway
+> refuses to start against anything but a demo login, MetaTrader 5 is
+> reachable from exactly one module, and both properties are enforced by
+> `tests/acceptance/test_architecture.py` and `test_phase1.py` rather than by
+> this paragraph. There is still no LLM agent and no strategy with an edge:
+> `--strategy toy` is the entire registry, and Phase 7 brings the first real
+> one.
 
 Phase 0 establishes five guarantees:
 
@@ -493,6 +501,30 @@ next bar.
 - **Compounding does not happen.** `--firm-equity` is constant for the whole run
   (D-4), so a measured edge cannot be an artefact of position sizes growing with
   the strategy's own luck.
+- **The cost breakdown in the result is partial.** Section 7.1 lists five
+  modelled terms; `SimulatedTrade` names only two of them — `commission` and
+  `swap`. Spread and slippage are charged inside the fill prices, so they are
+  already inside `gross_pnl`, which is therefore gross of commission and swap
+  and *net* of spread and slippage. `net_pnl` is the correct total either way;
+  it is the attribution that is incomplete. Splitting spread and slippage into
+  their own fields changes the model, the digest and every known-answer number
+  this phase's proof is built on, so it lands with Phase 8's cost attribution
+  rather than at the end of this one.
+- **Spread is charged asymmetrically by exit kind, deliberately.** A round trip
+  that exits on its stop or its target pays half a spread — the entry crossing
+  only — because those exits fill at a resolved price level rather than at a
+  quote. One that exits on the time stop pays a full spread, because a time
+  stop fills at the next bar's open exactly as an entry does and crosses the
+  half-spread a second time. Spec section 7 defines each case separately and
+  the code follows it; this is a stated property, not an oversight.
+- **A fill is stamped one bar after the price it took.** `fills.py` prices at
+  `bar.open` but stamps `at=bar.availability_time`, which is that bar's close.
+  So `entry_at` and `exit_at` each report one bar later than the instant the
+  fill happened, `max_holding_seconds` is honoured as H plus one bar, and
+  `swap_cost` sees a date pair shifted by the same amount. This is
+  plan-mandated and every known-answer number in the phase was derived against
+  it; correcting the stamps would move all of them, so it is carried to Phase 7
+  and stated here so Phase 7 finds it rather than discovers it.
 
 **Four refusals, each rather than a plausible-looking number:**
 
@@ -541,28 +573,45 @@ uv run trading-house backtest run --strategy toy --toy-every-n 20 \
   contract specification and recorded in the result. Two options default and
   neither is a cost: `--stress-multiplier`, the 1.5x–2x sensitivity knob
   section 12 asks for — a scenario, not a cost — and `--toy-every-n`, which
-  belongs to the toy rather than to the cost model. The classic flattering
+  belongs to the toy rather than to the cost model. `--stress-multiplier` is
+  bounded strictly above zero, because at zero every cost in the equation
+  vanishes and below zero every one becomes a credit — which is the
+  zero-commission backtest D-5 forbids, reached through the one option D-5's
+  own guard exempts. Values below 1 are permitted, as the legitimate
+  sensitivity probe in the other direction, but a result produced below 1
+  flatters the strategy and is not evidence it passes anything. And because
+  the swap rates are signed and the multiplier applies to the whole model,
+  stressing a *positive* carry increases profit, so a positive-carry strategy
+  clears the section 12 gate more easily at 2x than at 1x; section 7.1
+  mandates one multiplier over the whole model, so this is a stated
+  consequence rather than a second code path. The classic flattering
   backtest is one that silently assumed zero commission; omitting a cost here
   refuses.
 - **`--contract` is a file** for the same reason `order submit --decision` is:
   nothing in this repo can produce an `InstrumentContract` without a live
   MetaTrader 5 terminal, and a research command that needs one cannot be
   replayed. The facts come from a vetted file, never from flags.
-- **Bad input leaves by six doors and all six are typed.** A refusal out of
+- **Bad input leaves by seven doors and all seven are typed.** A refusal out of
   the run prints
   `{"status": "error", "detail": "backtest refused", "refusal": "<kind>"}` on
   stderr. A money option that is not a finite number — `abc`, but also `NaN`
-  and `Infinity`, which both *construct* as `Decimal`s — is refused where it is
-  parsed. An equity the request rejects as non-positive is refused around its
-  construction. A `--contract` that cannot be read, cannot be decoded, or is
-  not valid JSON is refused at the file; that one matters most, because
-  `--contract` is the only input to this command with no producer anywhere in
-  the repository, so every operator hand-writes it. And a contract or a cost
+  and `Infinity`, which both *construct* as `Decimal`s — or whose magnitude is
+  past `1e30` — `1e1000000` is finite, is positive, and raises
+  `decimal.Overflow` from inside the risk engine's sizing if nothing stops it
+  — is refused where it is parsed. An equity the request rejects as
+  non-positive is refused around the request's construction. A `--contract`
+  whose `instrument_id` is not the one `--instrument` names is refused before
+  the run starts, because the risk engine would otherwise catch it as one
+  rejection per proposal and the command would exit 0 with an empty,
+  plausible-looking result. A `--contract` that cannot be read, cannot be
+  decoded, or is not valid JSON is refused at the file; that one matters most,
+  because `--contract` is the only input to this command with no producer
+  anywhere in the repository, so every operator hand-writes it. And a contract or a cost
   value that parses but does not satisfy its model is refused by the same
   schema handler every other command in this system uses. An unknown
-  `--strategy` is refused where the strategy is built, which is a sixth cause
-  rather than a sixth handler: it raises the same error the money and contract
-  doors raise and leaves by the one every command shares. All six exit 2 with
+  `--strategy` is refused where the strategy is built, which is a seventh cause
+  rather than a seventh handler: it raises the same error the money and contract
+  doors raise and leaves by the one every command shares. All seven exit 2 with
   key-sorted JSON on stderr. None reaches the operator as a correlation id —
   which is what this system prints when *it* is broken, not when the input is —
   and none carries free text a DSN, a path or a broker message could ride out
