@@ -1048,10 +1048,19 @@ def _printed_strings(result: Any) -> str:
     ``json.loads`` undoes the outer layer and collapsing the doubles undoes
     the inner one. On POSIX every spelling already agrees, which is exactly
     how a check that asserts nothing here would have shipped unnoticed.
+
+    Two narrow false negatives are left standing rather than coded around: a
+    leak escaped a third time collapses to two backslashes and stops matching,
+    and a ``tmp_path`` on a UNC share would have its own leading ``\\``
+    collapsed. Neither is reachable in this repository's layout. What is not
+    left standing is the empty case -- a command that exits without printing
+    would satisfy every ``not in`` below while proving nothing, so this refuses
+    to return nothing at all.
     """
 
     streams = [stream for stream in (result.stdout, result.stderr) if stream.strip()]
     printed = " ".join(str(value) for stream in streams for value in json.loads(stream).values())
+    assert printed, "the command printed nothing, so a leak assertion would be vacuous"
     return printed.replace("\\\\", "\\")
 
 
