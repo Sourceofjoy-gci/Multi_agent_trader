@@ -18,6 +18,7 @@ import psycopg
 import pytest
 from pydantic import SecretStr
 
+from tests.conftest import printed_strings
 from tests.integration.marketdata.conftest import seed
 from tests.unit.research.backtest.conftest import _contract, _ramp
 from trading_house.database.connection import open_runtime_connection
@@ -172,10 +173,22 @@ def test_the_emitted_result_carries_no_credential_or_path(seeded: Fixture) -> No
     one is handed both: a DSN through the environment and a file path through
     ``--contract``. Walking the result's fields says none of them can carry
     one; this says the rendering agrees.
+
+    Asserted against the decoded payload, not the raw stream. A path that
+    leaks into the JSON arrives escaped -- doubled by ``json.dumps`` on the
+    wire and doubled again by the ``str()`` that renders a nested object --
+    so on Windows ``str(PROJECT_ROOT) not in stdout`` could not fail under
+    any production change, and this file is the phase's reproducibility
+    proof. ``printed_strings`` is the same helper ``tests/unit/test_cli.py``
+    uses, shared rather than copied so the two cannot drift.
+
+    The credential assertion needs none of that -- there are no backslashes in
+    it -- and is kept on the decoded text anyway, because a helper that
+    silently stopped decoding would then be caught by the two beside it.
     """
 
-    stdout = _run_cli(seeded, hash_seed="0")
+    printed = printed_strings(_run_cli(seeded, hash_seed="0"))
 
-    assert SECRET_IN_THE_DSN not in stdout
-    assert str(seeded.contract) not in stdout
-    assert str(PROJECT_ROOT) not in stdout
+    assert SECRET_IN_THE_DSN not in printed
+    assert str(seeded.contract) not in printed
+    assert str(PROJECT_ROOT) not in printed

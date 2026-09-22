@@ -211,6 +211,19 @@ def _settings() -> RuntimeSettings:
     return RuntimeSettings()
 
 
+_DECIMAL_MAGNITUDE_CEILING: Decimal = Decimal("1e30")
+"""The largest magnitude any ``--`` money or multiplier option may carry.
+
+Not a modelled limit -- a sanity bound. No firm equity, commission, swap rate
+or stress multiplier in this system is within many orders of magnitude of
+1e30: the largest of them is an account balance, and 1e30 is past the notional
+value of every asset there is. Anything beyond it is a typo or a probe, and
+without this bound it survives every guard below and reaches the risk engine's
+sizing arithmetic as a ``decimal.Overflow`` -- an ``ArithmeticError``, so the
+catch-all answers a mistyped number with a correlation id.
+"""
+
+
 def _decimal(value: str) -> Decimal:
     """Money off the command line, typed at the boundary it entered.
 
@@ -228,6 +241,14 @@ def _decimal(value: str) -> Decimal:
     proceeds. Every caller here wants money or a multiplier and none of them
     legitimately wants either value, so the guard lives once in the shared
     helper rather than at each call site.
+
+    Rejects a value beyond ``_DECIMAL_MAGNITUDE_CEILING`` for the third time
+    in the same shape. ``Decimal("1e1000000")`` is finite, clears both guards
+    above and clears ``BacktestRequest.__post_init__``'s positivity check --
+    and then raises ``decimal.Overflow``, an ``ArithmeticError``, from inside
+    the risk engine's sizing arithmetic, landing in the catch-all with a
+    correlation id. A bound here turns that back into the typed input error it
+    is.
     """
 
     try:
@@ -235,6 +256,13 @@ def _decimal(value: str) -> Decimal:
     except InvalidOperation as error:
         raise ConfigurationError() from error
     if not parsed.is_finite():
+        raise ConfigurationError()
+    # ``copy_abs()``, not ``abs()``. ``abs`` is a context operation and
+    # ``abs(Decimal("1e1000000"))`` raises the very ``decimal.Overflow`` this
+    # line exists to prevent -- measured, not assumed: written with ``abs`` the
+    # command exited 1 with a correlation id instead of 2. ``copy_abs`` is
+    # context-free and cannot raise.
+    if parsed.copy_abs() > _DECIMAL_MAGNITUDE_CEILING:
         raise ConfigurationError()
     return parsed
 

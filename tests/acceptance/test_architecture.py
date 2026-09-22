@@ -50,13 +50,34 @@ RISK_FORBIDDEN = frozenset(
     {"trading_house.brokers", "trading_house.marketdata", "trading_house.features"}
 )
 BACKTEST_ROOT = SOURCE_ROOT / "research" / "backtest"
-# research/backtest/ may reach core/, marketdata/, features/ and risk/, and it
-# must not reach a broker or the execution plane. A simulator that could place
-# an order is no longer a simulator, and one that could read a terminal would
-# make a replay depend on whether MetaTrader 5 happened to be running. The
-# composition shim that joins this package to a live bar store lives in ops/,
-# exactly as the position guard's does.
-BACKTEST_FORBIDDEN = frozenset({"trading_house.brokers", "trading_house.execution"})
+# An ALLOWLIST, which is what spec section 4 states: research/backtest/ "may
+# import core/, marketdata/, features/ and risk/" -- plus its own modules. The
+# denylist this replaces named only brokers/ and execution/, so an import of
+# database/, audit/, ops/ or constitution/ passed a guard whose docstring
+# claimed to enforce the sentence above, and the spec's own remark that adding
+# strategies/ later "widens the allowlist deliberately" had no allowlist to
+# widen.
+#
+# The two the denylist did name are still the two that matter most: a simulator
+# that could place an order is no longer a simulator, and one that could read a
+# terminal would make a replay depend on whether MetaTrader 5 happened to be
+# running. The composition shim that joins this package to a live bar store
+# lives in ops/, exactly as the position guard's does -- which is why ops/ is
+# NOT on this list.
+#
+# research/ is admitted at research.backtest rather than whole: research/ also
+# holds trial_ledger.py and packages.py, and Phase 8 reaching for the ledger
+# from here should be a deliberate widening of this line rather than something
+# that was always permitted.
+BACKTEST_ALLOWED = frozenset(
+    {
+        "trading_house.core",
+        "trading_house.marketdata",
+        "trading_house.features",
+        "trading_house.risk",
+        "trading_house.research.backtest",
+    }
+)
 EXECUTION_ROOT = SOURCE_ROOT / "execution"
 # execution/ may reach core/ and database/, nothing else this project owns:
 # it declares the venue port (VenueSubmitPort/DealSource/ProtectionPort) it
@@ -151,6 +172,24 @@ def _reaches(tree: ast.Module, forbidden: frozenset[str]) -> set[str]:
         module
         for module in _imported_modules(tree)
         if any(module == root or module.startswith(f"{root}.") for root in forbidden)
+    }
+
+
+def _reaches_outside(tree: ast.Module, allowed: frozenset[str]) -> set[str]:
+    """Project modules imported that are not, and do not live under, an
+    allowed path.
+
+    Only ``trading_house`` modules are judged: the standard library, pydantic
+    and typer are not this project's to partition. A bare ``import
+    trading_house`` is flagged, because the package root is a door to every
+    subpackage and naming it is not the same as naming one.
+    """
+
+    return {
+        module
+        for module in _imported_modules(tree)
+        if (module == "trading_house" or module.startswith("trading_house."))
+        and not any(module == root or module.startswith(f"{root}.") for root in allowed)
     }
 
 
@@ -358,21 +397,25 @@ def test_the_execution_import_guard_can_still_fail(statement: str) -> None:
     assert _reaches(ast.parse(statement + "\n"), EXECUTION_FORBIDDEN)
 
 
-def test_no_backtest_module_imports_a_broker_or_the_execution_plane() -> None:
-    """research/backtest/ may reach core/, marketdata/, features/ and risk/.
+def test_no_backtest_module_imports_outside_its_allowlist() -> None:
+    """research/backtest/ may reach core/, marketdata/, features/ and risk/,
+    and nothing else this project owns.
 
-    A broker import would make a replay depend on a running terminal and give
+    Stated as an allowlist because that is how spec section 4 states it. A
+    broker import would make a replay depend on a running terminal and give
     the simulator a way to place a real order; an execution import would give
     it the order manager and the intent ledger, so a "backtest" could write to
-    the live plane. Neither has any reason to exist on a path whose whole job
-    is to replay stored bars.
+    the live plane. But those are two examples, not the rule -- and the rule is
+    what a simulator whose whole job is to replay stored bars may touch.
+    Widening this set is then a decision somebody makes on purpose, which is
+    exactly what the spec says adding strategies/ later should be.
     """
 
     offenders: dict[str, list[str]] = {}
     for path, tree in _parsed():
         if not path.is_relative_to(BACKTEST_ROOT):
             continue
-        reached = _reaches(tree, BACKTEST_FORBIDDEN)
+        reached = _reaches_outside(tree, BACKTEST_ALLOWED)
         if reached:
             offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
 
@@ -393,6 +436,13 @@ def test_the_backtest_package_is_not_empty() -> None:
         "from trading_house.execution.manager import OrderManager",
         "import trading_house.brokers",
         "from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter",
+        # The four the denylist this replaced could not see. Every one of them
+        # passed the old guard while contradicting the sentence its own
+        # docstring quoted from the spec.
+        "from trading_house.database.connection import open_runtime_connection",
+        "from trading_house.audit.repository import PostgresAuditLedger",
+        "from trading_house.ops.backtest import build_backtester",
+        "import trading_house",
     ],
 )
 def test_the_backtest_import_guard_can_still_fail(statement: str) -> None:
@@ -400,7 +450,32 @@ def test_the_backtest_import_guard_can_still_fail(statement: str) -> None:
     check reflects research/backtest/ staying clean rather than a detector
     gone blind."""
 
-    assert _reaches(ast.parse(statement + "\n"), BACKTEST_FORBIDDEN)
+    assert _reaches_outside(ast.parse(statement + "\n"), BACKTEST_ALLOWED)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.core.schemas import Side",
+        "from trading_house.marketdata.models import Bar",
+        "from trading_house.features.engine import FeatureEngine",
+        "from trading_house.risk.engine import RiskEngine",
+        "from trading_house.research.backtest.costs import CostModel",
+        "import json",
+        "from pydantic import Field",
+    ],
+)
+def test_the_backtest_import_guard_permits_what_the_spec_permits(statement: str) -> None:
+    """Guard the guard, the other direction -- which only an allowlist needs.
+
+    A detector that flagged everything would satisfy the case above while
+    failing the real loop, and the four denylist arrows next door cannot go
+    wrong this way because a denylist that over-matches simply never fires.
+    This pins the exact set section 4 grants, so narrowing it is as visible as
+    widening it.
+    """
+
+    assert _reaches_outside(ast.parse(statement + "\n"), BACKTEST_ALLOWED) == set()
 
 
 def test_the_terminal_module_stays_thin() -> None:

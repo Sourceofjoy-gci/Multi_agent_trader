@@ -1038,30 +1038,12 @@ def _contract_file(tmp_path: Path) -> Path:
 
 
 def _printed_strings(result: Any) -> str:
-    """What the command actually printed, with both layers of escaping undone.
+    """This file's spelling of the shared helper: a ``CliRunner`` result has
+    two streams, and only one of them is ever populated."""
 
-    Searching a raw stream for a leaked Windows path is escape-blind, and
-    twice over. ``OSError.__str__`` reprs the filename, which doubles every
-    backslash; ``json.dumps`` then doubles them again on the wire. So a
-    ``FileNotFoundError`` that prints the operator's whole path arrives as
-    four backslashes per separator and matches no path any test holds.
-    ``json.loads`` undoes the outer layer and collapsing the doubles undoes
-    the inner one. On POSIX every spelling already agrees, which is exactly
-    how a check that asserts nothing here would have shipped unnoticed.
+    from tests.conftest import printed_strings
 
-    Two narrow false negatives are left standing rather than coded around: a
-    leak escaped a third time collapses to two backslashes and stops matching,
-    and a ``tmp_path`` on a UNC share would have its own leading ``\\``
-    collapsed. Neither is reachable in this repository's layout. What is not
-    left standing is the empty case -- a command that exits without printing
-    would satisfy every ``not in`` below while proving nothing, so this refuses
-    to return nothing at all.
-    """
-
-    streams = [stream for stream in (result.stdout, result.stderr) if stream.strip()]
-    printed = " ".join(str(value) for stream in streams for value in json.loads(stream).values())
-    assert printed, "the command printed nothing, so a leak assertion would be vacuous"
-    return printed.replace("\\\\", "\\")
+    return printed_strings(result.stdout, result.stderr)
 
 
 def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
@@ -1276,15 +1258,24 @@ def test_backtest_refuses_a_contract_for_a_different_instrument(
     that "the worst failure shape available" and closes it for the clock; this
     closes the same shape reached one argument over.
 
-    The bar store is faked so the assertion is about the mismatch rather than
-    about an absent database -- without it this would exit CONFIGURATION for
-    the wrong reason, which is exactly the kind of pass this fix exists to
-    prevent.
+    The store is seeded under BOTH instrument ids, and that is the whole
+    fixture. Seeded under ``fx.eurusd`` alone, ``--instrument fx.gbpusd``
+    exits CONFIGURATION with or without this guard -- as a ``coverage``
+    refusal, because the store holds no gbpusd bars -- so the test would pass
+    against code that never compares the two. Mutation-checked: the guard was
+    removed and this version failed while that version did not.
+
+    The assertions that carry it are the exit code AND the absence of a
+    ``refusal`` key. ``BacktestRefused`` is the only error that carries one,
+    so its absence separates "refused at the composition root" from every
+    refusal reachable inside ``run``.
     """
 
     from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
 
-    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+    ramp = _ramp(60)
+    both = (*ramp, *(bar.model_copy(update={"instrument_id": "fx.gbpusd"}) for bar in ramp))
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(both))
 
     result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--instrument": "fx.gbpusd"}))
 
@@ -1292,6 +1283,56 @@ def test_backtest_refuses_a_contract_for_a_different_instrument(
     payload = json.loads(result.stderr)
     assert payload["status"] == "error"
     assert "correlation_id" not in payload
+    assert "refusal" not in payload
     # Guard the guard: the very same invocation with the matching instrument
-    # succeeds, so the refusal above is the mismatch and not the fixture.
+    # succeeds, so what is refused above is the mismatch and not the fixture.
     assert runner.invoke(cli.app, _backtest_args(tmp_path)).exit_code == 0
+
+
+@pytest.mark.parametrize("option", ["--firm-equity", "--commission-per-lot-per-side"])
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_a_money_option_beyond_the_magnitude_ceiling(
+    tmp_path: Path, option: str
+) -> None:
+    """Shape four, and the one that made the README's count of typed doors
+    false.
+
+    ``Decimal("1e1000000")`` is finite -- ``is_finite()`` is ``True`` -- so it
+    clears ``_decimal``'s NaN/Infinity guard, and it is positive, so it clears
+    ``BacktestRequest.__post_init__``. It then raises ``decimal.Overflow``
+    inside the risk engine's sizing, and ``Overflow`` is an
+    ``ArithmeticError``, not a ``ValueError``: nothing on the way out catches
+    it and the operator gets "unexpected failure" and a correlation id for a
+    mistyped number.
+
+    Parametrized across two options because the bound lives in the shared
+    ``_decimal`` helper, not on the equity path: a fix applied at one call
+    site would leave the other four money options open.
+    """
+
+    args = _backtest_args(tmp_path, **{option: "1e1000000"})
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_the_magnitude_ceiling_leaves_ordinary_money_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard the guard: the bound is a sanity limit, not a modelled one, so
+    an equity far larger than any account this system will ever size against
+    must still run. A ceiling that refused real money would be caught here
+    rather than by an operator."""
+
+    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "1e12"}))
+
+    assert result.exit_code == 0, result.stderr

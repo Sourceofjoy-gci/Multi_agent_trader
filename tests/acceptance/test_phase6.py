@@ -7,15 +7,16 @@ Two structural properties that no behavioural test can hold down:
   backtest is one that silently assumed zero commission (D-5), and a default
   added to either side of that boundary would produce exactly it -- with a
   green suite, because every existing test states all the costs anyway.
-* **The simulator does not size.** ``research/backtest/`` calls neither
-  ``compute_volume`` nor ``stop_price``. This is the structural form of D-3:
+* **The simulator does not size.** ``research/backtest/`` calls none of
+  ``compute_volume``, ``compute_stop_distance`` or ``stop_price``. This is the
+  structural form of D-3:
   ``RiskEngine.evaluate_for_execution`` already calls both internally and
   returns ``approved_quantity`` and ``stop_loss_price`` on the decision, so a
   simulator calling them again sizes the position a second time -- and would
   measure a strategy the live system will never trade.
 
 An AST check rather than a grep, because ``engine.py``'s own docstring and one
-of its comments name both functions in prose. A textual search would have to
+of its comments name all three functions in prose. A textual search would have to
 be taught to ignore them, and would then be one edit away from ignoring a real
 call.
 """
@@ -41,7 +42,12 @@ SOURCE_ROOT = PROJECT_ROOT / "src" / "trading_house"
 # largest module in the package -- and it holds Phase 6's toy strategy, so a
 # sizing call added there would be as invisible as one inside the loop itself.
 SIZING_SCANNED_ROOTS = (SOURCE_ROOT / "research", SOURCE_ROOT / "ops" / "backtest.py")
-SIZING_PRIMITIVES = frozenset({"compute_volume", "stop_price"})
+# All three of the functions section 5.6 names as ones the risk engine
+# already calls. ``compute_stop_distance`` alone does not double-size, but
+# a simulator computing its own stop distance is one step from computing
+# its own stop, and leaving it off made the list read as a judgement about
+# which of the three matter rather than as the section it comes from.
+SIZING_PRIMITIVES = frozenset({"compute_volume", "compute_stop_distance", "stop_price"})
 # stress_multiplier is the 1.5x-2x sensitivity knob section 12 asks for, not a
 # cost. Every actual cost -- commission, slippage, both swap rates -- and the
 # rollover weekday they are charged against must be stated by the caller.
@@ -117,6 +123,7 @@ def test_no_backtest_module_sizes_a_position() -> None:
     "statement",
     [
         "compute_volume(equity, stop, contract)",
+        "compute_stop_distance(proposal, atr, contract)",
         "stop_price(reference, distance, side)",
         "sizing.compute_volume(equity)",
         "trading_house.risk.sizing.stop_price(reference)",
@@ -134,8 +141,8 @@ def test_the_sizing_guard_can_still_fail(statement: str) -> None:
     assert (_called_names(tree) | _imported_names(tree)) & SIZING_PRIMITIVES
 
 
-def test_the_sizing_guard_ignores_the_prose_that_names_both_functions() -> None:
-    """Guard the guard, the other direction: ``engine.py`` names both
+def test_the_sizing_guard_ignores_the_prose_that_names_the_functions() -> None:
+    """Guard the guard, the other direction: ``engine.py`` names all three
     functions in a comment and a docstring explaining why it does NOT call
     them. A grep would have to special-case that; the AST simply does not see
     it, and this pins that distinction rather than leaving it to luck."""
@@ -143,7 +150,7 @@ def test_the_sizing_guard_ignores_the_prose_that_names_both_functions() -> None:
     source = (SOURCE_ROOT / "research" / "backtest" / "engine.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    assert "compute_volume" in source
+    assert all(name in source for name in SIZING_PRIMITIVES)
     assert (_called_names(tree) | _imported_names(tree)) & SIZING_PRIMITIVES == set()
 
 
