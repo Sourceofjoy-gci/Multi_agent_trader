@@ -8,7 +8,7 @@ from alembic import command
 from alembic.config import Config
 from psycopg import sql
 from sqlalchemy import URL
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 MIGRATION_PASSWORD = "integration-migration-password"  # noqa: S105
 RUNTIME_PASSWORD = "integration-runtime-password"  # noqa: S105

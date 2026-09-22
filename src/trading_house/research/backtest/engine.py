@@ -27,15 +27,16 @@ after it exits rather than one bar later.
 
 The time stop lives here rather than in ``fills.resolve_exit``, which takes no
 time input and never returns ``ExitKind.TIME``: only the loop holds the
-position's ``entry_at`` and the strategy's ``max_holding_seconds``.
+position's ``entry_at`` and the proposal's ``max_holding_seconds``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import InsufficientHistoryError, TradingHouseError
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import RejectedRiskDecision, Side
@@ -47,6 +48,9 @@ from trading_house.research.backtest.result import BacktestResult, RefusalKind, 
 from trading_house.research.backtest.snapshot import FeatureSnapshot, horizon_is_simulatable
 from trading_house.research.backtest.strategy import Strategy
 from trading_house.risk.engine import MarginPort, RiskEngine
+
+_BEFORE_ANY_BAR: datetime = datetime.min.replace(tzinfo=UTC)
+"""``ReplayClock``'s starting instant: a time no market ever traded at."""
 
 
 class BacktestRefused(TradingHouseError):
@@ -75,7 +79,16 @@ class ReplayClock:
     every proposal in the run.
     """
 
-    instant: datetime
+    # Overwritten by the first bar of every run, so a caller has nothing useful
+    # to say here. The default makes a clock read before the run a visibly
+    # wrong time rather than a plausible one.
+    instant: datetime = _BEFORE_ANY_BAR
+
+    def __post_init__(self) -> None:
+        # The same guard ``FixedClock`` applies. A naive datetime reaching the
+        # risk engine's tick-freshness gate raises deep inside a comparison
+        # rather than here, where the value entered.
+        self.instant = ensure_utc(self.instant)
 
     def now(self) -> datetime:
         return self.instant
@@ -88,6 +101,15 @@ class BacktestRequest:
     ``firm_equity`` is constant for the whole run (D-4): this simulator does
     not compound, so a strategy's measured edge cannot be an artefact of
     position sizes growing with its own luck.
+
+    A dataclass rather than a ``CanonicalModel`` because ``strategy`` is a bare
+    ``Protocol``: pydantic cannot build a schema for one, and widening the base
+    config with ``arbitrary_types_allowed`` to admit it would weaken every
+    canonical model in the package. So the two checks the model's own
+    annotations would have made -- ``PositiveDecimal`` and an ordered range --
+    are made here by hand. ``end < start`` is refused in ``run`` rather than
+    raised here, beside the other range refusals; see
+    ``_refuse_outside_coverage``.
     """
 
     strategy: Strategy
@@ -99,6 +121,16 @@ class BacktestRequest:
     cost_model: CostModel
     atr_period: int
     spread_window: int
+
+    def __post_init__(self) -> None:
+        # The boundary carrying the money. A float here would survive every
+        # later Decimal arithmetic as a silently inexact number, and a
+        # non-positive equity sizes nothing while looking like a strategy that
+        # proposed nothing.
+        if not isinstance(self.firm_equity, Decimal):
+            raise ValueError("firm_equity must be a Decimal")
+        if self.firm_equity <= 0:
+            raise ValueError("firm_equity must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +146,11 @@ class _Signal:
     lots: Decimal
     stop: Decimal
     target: Decimal | None
+    # The proposal's own holding limit, not the strategy's. They are the same
+    # for a strategy that states one number, and they are not for one that
+    # sizes the horizon per proposal -- in which case the time stop must honour
+    # what was proposed.
+    max_holding_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,8 +243,14 @@ class Backtester:
                 lots=decision.approved_quantity.amount,
                 stop=decision.stop_loss_price,
                 target=decision.take_profit_price,
+                max_holding_seconds=proposal.max_holding_seconds,
             )
 
+        # A position still open when the bars run out is discarded, and a
+        # queued signal never fills. Closing it at the last bar would report a
+        # trade the requested period cannot justify -- the exit price would
+        # come from the range's edge rather than from anything the position's
+        # own rules asked for. An unfinished trade is not a result.
         return self._result(
             request, trades=tuple(trades), rejections=tuple(rejections), bars_seen=bars_seen
         )
@@ -225,8 +268,17 @@ class Backtester:
 
         Checked before any bar is read, so a run that cannot be simulated
         honestly never starts.
+
+        A backwards range is refused here too, for the same reason and with the
+        same kind. ``end < start`` reaches no bar in any store: the loop never
+        runs and the result is ``bars_seen=0`` with no trades, which is
+        indistinguishable from a strategy that proposed nothing. That is the
+        silent lie this refusal exists to prevent, reached through a different
+        door. ``start == end`` is a legal one-bar run -- both are inclusive.
         """
 
+        if request.end < request.start:
+            raise BacktestRefused(RefusalKind.COVERAGE)
         coverage = self._bars.coverage(request.instrument_id, request.timeframe)
         if coverage.earliest_event_time is None or coverage.latest_event_time is None:
             raise BacktestRefused(RefusalKind.COVERAGE)
@@ -304,7 +356,7 @@ class Backtester:
         return _Position(
             signal=signal,
             entry=fill,
-            deadline=fill.at + timedelta(seconds=request.strategy.max_holding_seconds),
+            deadline=fill.at + timedelta(seconds=signal.max_holding_seconds),
         )
 
     def _close_if_done(

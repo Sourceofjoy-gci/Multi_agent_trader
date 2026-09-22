@@ -4,10 +4,11 @@ from decimal import Decimal
 import pytest
 
 from tests.unit.research.backtest.conftest import (
+    FIRST_SNAPSHOT_BAR,
     HALF_SPREAD,
+    POINT,
     PeekingStrategy,
     ToyStrategy,
-    _expected_net,
     _ramp,
     _run,
     ramp_price,
@@ -58,8 +59,12 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     assert result.trades[0].gross_pnl == Decimal("6.74")
     assert result.trades[0].commission == Decimal("23.59")
     assert result.trades[0].swap == Decimal(0)
+    # The one line that carries the run's arithmetic. Restating it per trade
+    # would add nothing: SimulatedTrade already refuses a net its own terms do
+    # not produce and BacktestResult already refuses a net that is not the sum
+    # of the trades', so every per-trade restatement is true by construction.
+    # Only the hand-computed absolute can fail.
     assert result.net_pnl == Decimal("-33.70")
-    assert result.net_pnl == _expected_net(result)
     assert result.bars_seen == 60
 
 
@@ -85,18 +90,86 @@ def test_one_position_at_a_time_and_an_exit_frees_the_slot_on_its_own_bar() -> N
         assert later.entry_at - earlier.exit_at == duration(Timeframe.M1)
 
 
-def test_the_strategy_never_sees_a_bar_that_had_not_closed() -> None:
-    """Point-in-time discipline, checked on the snapshots the strategy actually
-    received rather than on the store's filtering. Bar.availability_time >
-    event_time is a schema invariant; this asserts the simulator honours it."""
+def test_the_strategy_is_asked_once_per_bar_at_the_loops_own_position() -> None:
+    """Which bar the engine fed in -- the part no validator can speak for.
+
+    ``FeatureSnapshot`` already refuses unless ``as_of`` equals the bar's
+    ``availability_time``, and ``Bar`` already refuses unless that is after
+    ``event_time``, so asserting either here would assert Task 1's validators
+    rather than this loop: no object violating them can exist to be caught.
+    What they cannot see is WHICH bar the loop handed over, and how many. One
+    snapshot per bar, in the store's order, from the first bar the ATR window
+    can answer for through the last bar of the requested range -- including
+    every bar where a position is open, because the D-7 guard drops the
+    proposal after the strategy is asked rather than skipping the ask.
+    """
 
     strategy = ToyStrategy(every_n=5)
-    _run(bars=_ramp(30), strategy=strategy)
+    bars = _ramp(30)
+    _run(bars=bars, strategy=strategy)
 
-    assert strategy.seen != []
-    for snapshot in strategy.seen:
-        assert snapshot.as_of == snapshot.bar.availability_time
-        assert snapshot.bar.event_time < snapshot.as_of
+    assert [snapshot.bar.event_time for snapshot in strategy.seen] == [
+        bar.event_time for bar in bars[FIRST_SNAPSHOT_BAR:]
+    ]
+
+
+def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop() -> None:
+    """The engine's stop path, and the order ``_close_if_done`` claims.
+
+    Every other test here rides a monotonically rising ramp with a BUY stop
+    100 points below the reference, so the stop is unreachable by construction
+    and every exit is ``ExitKind.TIME`` -- ``resolve_exit`` could return
+    ``None`` unconditionally and the suite would not notice. Task 3 tests
+    ``resolve_exit`` in isolation; nothing tested that the engine calls it,
+    with the stop that came off the risk decision, before the time stop.
+
+    One bar dips below that stop, and it is the deadline bar: the bar that
+    could have exited either way. D-2 says it is charged the stop, so both the
+    kind and the price tell the two apart -- the stop exits at 1.09920 while a
+    time stop on the same bar would exit at its open less half the spread.
+    """
+
+    bars = _ramp(40)
+    # decision.stop_loss_price: the proposal references bar 20's close and puts
+    # its invalidation 100 points under it, the structural term is the widest
+    # of section 8.2's four, and stop_price quantises onto the tick grid.
+    stop = ramp_price(FIRST_SNAPSHOT_BAR) - Decimal("0.00100")
+    # Entry fills on bar 21's open and HOLDING_SECONDS lands the deadline on
+    # bar 33's open -- the same two bars the known-answer run above uses.
+    deadline_bar = 33
+    dipped = (
+        *bars[:deadline_bar],
+        bars[deadline_bar].model_copy(update={"low": stop - POINT}),
+        *bars[deadline_bar + 1 :],
+    )
+
+    result = _run(bars=dipped, strategy=ToyStrategy(every_n=20))
+
+    assert [trade.exit_kind for trade in result.trades] == [ExitKind.STOP]
+    assert result.trades[0].exit_price == stop
+    assert result.trades[0].exit_at == bars[deadline_bar].availability_time
+
+
+def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None:
+    """Two properties, because one strategy shows both.
+
+    The proposal carries 7200 seconds while the strategy's own field still
+    says 660. The deadline must come from the proposal -- two hours past an
+    entry on bar 21, well outside a 40-bar ramp -- and not from the strategy,
+    which would close on bar 33 and report a trade. They agree for a strategy
+    stating one number, which is why nothing else here can tell them apart.
+
+    And the position left open when the range ends is discarded rather than
+    flushed at the last bar: an exit priced at the edge of the requested range
+    is an exit the position's own rules never asked for, and crediting the
+    strategy with it reports a trade the period cannot justify.
+    """
+
+    result = _run(bars=_ramp(40), strategy=ToyStrategy(every_n=20, proposal_holding_seconds=7200))
+
+    assert result.trades == ()
+    assert result.net_pnl == Decimal(0)
+    assert result.bars_seen == 40
 
 
 def test_a_rejected_decision_is_recorded_with_its_reasons() -> None:
@@ -150,6 +223,62 @@ def test_a_range_outside_the_stores_coverage_refuses_the_run() -> None:
         )
 
     assert caught.value.kind is RefusalKind.COVERAGE
+
+
+def test_a_range_ending_past_the_stores_last_bar_refuses_the_run() -> None:
+    """The other half of the coverage boundary, and the half that does work.
+
+    A start reaching further back than anything held is refused twice over:
+    the store raises ``CoverageError`` on it anyway. A too-far end is not --
+    the store answers with fewer bars than the period claims and says nothing,
+    which is the short equity curve with no one to blame.
+    """
+
+    bars = _ramp(30)
+
+    with pytest.raises(BacktestRefused) as caught:
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(every_n=5),
+            end=bars[-1].event_time + timedelta(days=1),
+        )
+
+    assert caught.value.kind is RefusalKind.COVERAGE
+
+
+def test_an_end_before_the_start_refuses_the_run() -> None:
+    """A backwards range reaches no bar in any store. Both coverage
+    comparisons pass, the loop never runs, and the result is bars_seen=0 with
+    no trades and no refusal -- indistinguishable from a strategy that proposed
+    nothing. The same silent lie, through a different door."""
+
+    bars = _ramp(30)
+
+    with pytest.raises(BacktestRefused) as caught:
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(every_n=5),
+            start=bars[-1].event_time,
+            end=bars[0].event_time,
+        )
+
+    assert caught.value.kind is RefusalKind.COVERAGE
+
+
+@pytest.mark.parametrize("equity", [Decimal(0), Decimal("-1"), 100000.0])
+def test_a_request_refuses_an_equity_that_is_not_positive_decimal_money(equity: object) -> None:
+    """The backtester's one input boundary, and the field carrying the money.
+
+    Zero or negative equity sizes nothing, so every proposal is rejected and
+    the run reports no trades -- a strategy that cannot be sized reads exactly
+    like a strategy with nothing to say. A float survives every later Decimal
+    multiply as a silently inexact number. ``BacktestRequest`` is a dataclass
+    because ``strategy`` is a bare Protocol, so these are the two checks a
+    ``CanonicalModel``'s own annotations would have made.
+    """
+
+    with pytest.raises(ValueError, match="firm_equity"):
+        _run(bars=_ramp(30), strategy=ToyStrategy(every_n=5), firm_equity=equity)
 
 
 def test_a_strategy_that_peeks_is_refused() -> None:

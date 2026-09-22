@@ -19,7 +19,7 @@ from trading_house.core.errors import CoverageError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.schemas import Side, TradeProposal
 from trading_house.core.values import AssetClass
-from trading_house.features.engine import FeatureEngine
+from trading_house.features.engine import WARMUP_MULTIPLE, FeatureEngine
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import (
@@ -50,6 +50,11 @@ ATR_PERIOD = 2
 2 needs 21 bars of history before it answers at all. A 60-bar ramp cannot
 afford the usual 14 (141 bars), and the warm-up length is why the first
 decision in every test below lands on bar 20 rather than bar 0."""
+
+FIRST_SNAPSHOT_BAR = ATR_PERIOD * WARMUP_MULTIPLE
+"""The index of the first bar a strategy is ever asked about: the first one
+with ``period * WARMUP_MULTIPLE`` bars behind it. Derived, not written down, so
+a change to ``ATR_PERIOD`` moves the tests with it."""
 
 SPREAD_WINDOW = 10
 
@@ -226,6 +231,12 @@ class ToyStrategy:
     every_n: int = 1
     horizon_seconds: int = 7200
     max_holding_seconds: int = HOLDING_SECONDS
+    proposal_holding_seconds: int | None = None
+    """What the PROPOSAL carries, when it differs from the strategy's own
+    number. Only a strategy sizing its horizon per proposal has the two
+    diverge, and the engine must honour the proposal's -- which is exactly
+    what a strategy stating one number cannot show."""
+
     id: str = "toy"
     version: str = "1"
     book: str = "fx_swing"
@@ -264,7 +275,7 @@ class ToyStrategy:
             # widest of section 8.2's four and the stop distance is exactly
             # 0.00100 -- which is what makes the lot size hand-computable.
             invalidation_price=entry - Decimal("0.00100"),
-            max_holding_seconds=self.max_holding_seconds,
+            max_holding_seconds=self.proposal_holding_seconds or self.max_holding_seconds,
             expected_return_bps=5.0,
             expected_return_stdev_bps=2.0,
             expected_cost_bps=1.0,
@@ -324,18 +335,4 @@ def _run(
             atr_period=ATR_PERIOD,
             spread_window=SPREAD_WINDOW,
         )
-    )
-
-
-def _expected_net(result: BacktestResult) -> Decimal:
-    """The run's net, recomputed from each trade's own terms.
-
-    A second, independent path to the same number, so the known-answer test
-    fails when the engine and the result disagree rather than only when one of
-    them is wrong on its own.
-    """
-
-    return sum(
-        (trade.gross_pnl - trade.commission + trade.swap for trade in result.trades),
-        Decimal(0),
     )
