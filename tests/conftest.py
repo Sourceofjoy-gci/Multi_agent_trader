@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,11 +9,48 @@ from alembic import command
 from alembic.config import Config
 from psycopg import sql
 from sqlalchemy import URL
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 MIGRATION_PASSWORD = "integration-migration-password"  # noqa: S105
 RUNTIME_PASSWORD = "integration-runtime-password"  # noqa: S105
 TEST_SUPERUSER_PASSWORD = "integration-test-superuser-password"  # noqa: S105
+
+
+def printed_strings(*streams: str) -> str:
+    """What a command actually printed, with both layers of escaping undone.
+
+    Searching a raw stream for a leaked Windows path is escape-blind, and
+    twice over. ``OSError.__str__`` reprs the filename, which doubles every
+    backslash; ``json.dumps`` then doubles them again on the wire, and a
+    nested object rendered through ``str()`` doubles them a further time. So a
+    ``FileNotFoundError`` that prints the operator's whole path, or a payload
+    that carries one, arrives with four backslashes per separator and matches
+    no path any test holds. ``json.loads`` undoes the outer layer and
+    collapsing the doubles undoes the inner one. On POSIX every spelling
+    already agrees, which is exactly how a check that asserts nothing here
+    would have shipped unnoticed.
+
+    Shared rather than duplicated. ``tests/unit/test_cli.py`` grew this in the
+    previous fix round; ``tests/integration/research`` asserted against the
+    raw stream and so could not fail under any production change on Windows --
+    in the file that is this phase's reproducibility proof. Two copies would
+    be two things to keep in step, and the copy that drifts is the one nobody
+    is looking at.
+
+    Two narrow false negatives are left standing rather than coded around: a
+    leak escaped a third time collapses to two backslashes and stops matching,
+    and a path on a UNC share would have its own leading ``\\\\`` collapsed.
+    Neither is reachable in this repository's layout. What is not left
+    standing is the empty case -- a command that exits without printing would
+    satisfy every ``not in`` at the call site while proving nothing, so this
+    refuses to return nothing at all.
+    """
+
+    printed = " ".join(
+        str(value) for stream in streams if stream.strip() for value in json.loads(stream).values()
+    )
+    assert printed, "the command printed nothing, so a leak assertion would be vacuous"
+    return printed.replace("\\\\", "\\")
 
 
 @dataclass(frozen=True)

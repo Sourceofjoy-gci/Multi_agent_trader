@@ -1,11 +1,19 @@
-# Trading House — Phase 1 Read-Only MT5 Gateway
+# Trading House — Phase 6 Backtester and Cost Model
 
-> **This repository still cannot trade.** It now talks to MetaTrader 5, but
-> only to read. There is no order path, no strategy, no sizing, and no LLM
-> agent. The gateway refuses to start against anything but a demo account,
-> and `submit`, `amend_protection` and `close` raise `NotImplementedError`
-> until Phase 3 brings the intent ledger that makes a lost response
-> recoverable. That absence is deliberate and is enforced by tests.
+> **This repository can place orders, and only ever against a demo account.**
+> Phases 1.5 to 5 shipped the parts the opening of this file used to say were
+> absent: market-data ingest, the signed risk constitution and the sizing it
+> governs, an idempotent order path with an intent ledger, and a position
+> guard that keeps protective stops attached. Phase 6 adds a backtester that
+> replays stored bars through that same risk engine.
+>
+> **The one thing that is still absent is a funded account.** The MT5 gateway
+> refuses to start against anything but a demo login, MetaTrader 5 is
+> reachable from exactly one module, and both properties are enforced by
+> `tests/acceptance/test_architecture.py` and `test_phase1.py` rather than by
+> this paragraph. There is still no LLM agent and no strategy with an edge:
+> `--strategy toy` is the entire registry, and Phase 7 brings the first real
+> one.
 
 Phase 0 establishes five guarantees:
 
@@ -450,6 +458,166 @@ uv run trading-house guard status
   nothing else — no terminal, no gate — because an escalation is exactly when
   the broker may be the thing that is broken.
 
+## Phase 6 — the backtester
+
+Phase 6 makes one promise: **a strategy's proposals go through the real risk
+engine, fill pessimistically against stored bars in point-in-time order, and
+produce a result two different processes agree on byte for byte.** Nothing is
+sized here — `RiskEngine.evaluate_for_execution` sizes, and the simulator reads
+`approved_quantity` and `stop_loss_price` off the decision it returned (D-3).
+Sizing has exactly one home, so a measured edge belongs to the strategy rather
+than to a second copy of the arithmetic that no live order goes through.
+
+Per bar, in this order, and the order is the design: a queued entry fills at
+**this** bar's open (never the close that generated the signal); an open
+position is resolved against this bar, the stop before the target (D-2) and the
+stop before the time stop; `as_of` becomes the bar's `availability_time`; a
+snapshot is built at that instant, or the bar is skipped because the feature
+windows are still cold; the strategy sees that snapshot and nothing else
+(I-17); the risk engine decides; an executable decision is queued to fill on the
+next bar.
+
+**What it does not promise, stated as plainly:**
+
+- **Bar resolution only.** There is no tick stream. `tick_spread_points` is the
+  closing bar's own spread and `tick_time` is that bar's `availability_time` —
+  constructed invariants, not a convention. Any strategy whose edge lives in the
+  difference between the two is one D-1 refuses anyway.
+- **No strategy with an edge exists.** `--strategy toy` is the entire registry.
+  The toy buys every *n*-th snapshot at a fixed structural stop; it has no edge
+  and is not meant to acquire one. Whatever P&L it reports is the shape of the
+  data it was pointed at. Phase 7 brings the real registry.
+- **Market impact is not modelled.** Fills assume the requested size was always
+  available at the price the model computed. A size that would move the book
+  fills exactly as a small one does.
+- **Inference cost is not modelled.** An agent's latency and its money cost
+  appear nowhere in the cost equation.
+- **Margin is not modelled.** Nothing in this repo can supply a margin
+  requirement, so section 8.1's free-margin headroom gate is switched off rather
+  than fed an invented number. A run assumes margin was always available. The
+  emitted payload says so rather than leaving it to this paragraph: it carries
+  `"margin_modelled": false` beside the digest, so a reader of the JSON — Phase
+  8's trial ledger included — sees the assumption without reading the README.
+- **Compounding does not happen.** `--firm-equity` is constant for the whole run
+  (D-4), so a measured edge cannot be an artefact of position sizes growing with
+  the strategy's own luck.
+- **The cost breakdown in the result is partial.** Section 7.1 lists five
+  modelled terms; `SimulatedTrade` names only two of them — `commission` and
+  `swap`. Spread and slippage are charged inside the fill prices, so they are
+  already inside `gross_pnl`, which is therefore gross of commission and swap
+  and *net* of spread and slippage. `net_pnl` is the correct total either way;
+  it is the attribution that is incomplete. Splitting spread and slippage into
+  their own fields changes the model, the digest and every known-answer number
+  this phase's proof is built on, so it lands with Phase 8's cost attribution
+  rather than at the end of this one.
+- **Spread is charged asymmetrically by exit kind, deliberately.** A round trip
+  that exits on its stop or its target pays half a spread — the entry crossing
+  only — because those exits fill at a resolved price level rather than at a
+  quote. One that exits on the time stop pays a full spread, because a time
+  stop fills at the next bar's open exactly as an entry does and crosses the
+  half-spread a second time. Spec section 7 defines each case separately and
+  the code follows it; this is a stated property, not an oversight.
+- **A fill is stamped one bar after the price it took.** `fills.py` prices at
+  `bar.open` but stamps `at=bar.availability_time`, which is that bar's close.
+  So `entry_at` and `exit_at` each report one bar later than the instant the
+  fill happened, `max_holding_seconds` is honoured as H plus one bar, and
+  `swap_cost` sees a date pair shifted by the same amount. This is
+  plan-mandated and every known-answer number in the phase was derived against
+  it; correcting the stamps would move all of them, so it is carried to Phase 7
+  and stated here so Phase 7 finds it rather than discovers it.
+
+**Four refusals, each rather than a plausible-looking number:**
+
+| Kind | Refused because |
+|---|---|
+| `coverage` | The requested range reaches outside what the store holds — or runs backwards, which reaches no bar at all and would otherwise report an empty run |
+| `defective_bar` | A bar in the range is not `BarQuality.OK`. Dropping it silently would leave the run shorter than the period it claims |
+| `lookahead` | A proposal claimed availability later than the snapshot that produced it |
+| `horizon` | The strategy's horizon is shorter than ten bars of the timeframe (D-1), below which the number being measured is the simulator's own pessimism |
+
+Interior gaps are deliberately **not** refused: FX closes every weekend, so a
+gap rule would refuse every run spanning a Saturday.
+
+**`max_concurrent_positions` is enforced nowhere at decision time.** It appears
+only in a constitution self-consistency validator, and neither risk-engine entry
+point takes open-position state. This is a live-system gap, not a backtest one.
+D-7 sidesteps it — the simulator holds one position at a time, so it can never
+report concurrency the live path does not limit — and closing it belongs to
+whichever phase gives the risk engine a portfolio view.
+
+**The result is reproducible across processes, not across changes.**
+`tests/integration/research/test_backtest_determinism.py` runs the command
+twice in separate interpreters under different `PYTHONHASHSEED` values and
+compares the bytes, which is what catches set or dict ordering reaching the
+output. It does not establish that the digest survives an unrelated edit:
+`digest()` hashes a `Decimal`'s string form while the reconciliation validators
+compare by value, so `Decimal("93")` and `Decimal("93.00")` both validate and
+hash differently. That question is open.
+
+### Commands
+
+```bash
+uv run trading-house backtest run --strategy toy --toy-every-n 20 \
+  --instrument fx.eurusd --timeframe M1 \
+  --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00 \
+  --firm-equity 100000 --contract contract.json \
+  --atr-period 14 --spread-window 20 \
+  --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4 \
+  --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30 \
+  --triple-swap-weekday 2
+```
+
+- **Every cost is required and none is defaulted** (D-5). The repo has no
+  `commission` field anywhere and `FinancingModel` is an enum tag with no rate
+  table, so each cost is a declared input taken from the broker's published
+  contract specification and recorded in the result. Two options default and
+  neither is a cost: `--stress-multiplier`, the 1.5x–2x sensitivity knob
+  section 12 asks for — a scenario, not a cost — and `--toy-every-n`, which
+  belongs to the toy rather than to the cost model. `--stress-multiplier` is
+  bounded strictly above zero, because at zero every cost in the equation
+  vanishes and below zero every one becomes a credit — which is the
+  zero-commission backtest D-5 forbids, reached through the one option D-5's
+  own guard exempts. Values below 1 are permitted, as the legitimate
+  sensitivity probe in the other direction, but a result produced below 1
+  flatters the strategy and is not evidence it passes anything. And because
+  the swap rates are signed and the multiplier applies to the whole model,
+  stressing a *positive* carry increases profit, so a positive-carry strategy
+  clears the section 12 gate more easily at 2x than at 1x; section 7.1
+  mandates one multiplier over the whole model, so this is a stated
+  consequence rather than a second code path. The classic flattering
+  backtest is one that silently assumed zero commission; omitting a cost here
+  refuses.
+- **`--contract` is a file** for the same reason `order submit --decision` is:
+  nothing in this repo can produce an `InstrumentContract` without a live
+  MetaTrader 5 terminal, and a research command that needs one cannot be
+  replayed. The facts come from a vetted file, never from flags.
+- **Bad input leaves by seven doors and all seven are typed.** A refusal out of
+  the run prints
+  `{"status": "error", "detail": "backtest refused", "refusal": "<kind>"}` on
+  stderr. A money option that is not a finite number — `abc`, but also `NaN`
+  and `Infinity`, which both *construct* as `Decimal`s — or whose magnitude is
+  past `1e30` — `1e1000000` is finite, is positive, and raises
+  `decimal.Overflow` from inside the risk engine's sizing if nothing stops it
+  — is refused where it is parsed. An equity the request rejects as
+  non-positive is refused around the request's construction. A `--contract`
+  whose `instrument_id` is not the one `--instrument` names is refused before
+  the run starts, because the risk engine would otherwise catch it as one
+  rejection per proposal and the command would exit 0 with an empty,
+  plausible-looking result. A `--contract` that cannot be read, cannot be
+  decoded, or is not valid JSON is refused at the file; that one matters most,
+  because `--contract` is the only input to this command with no producer
+  anywhere in the repository, so every operator hand-writes it. And a contract
+  or a cost value that parses but does not satisfy its model is refused by the
+  same schema handler every other command in this system uses. An unknown
+  `--strategy` is refused where the strategy is built, which is a seventh cause
+  rather than a seventh handler: it raises the same error the money and contract
+  doors raise and leaves by the one every command shares. All seven exit 2 with
+  key-sorted JSON on stderr. None reaches the operator as a correlation id —
+  which is what this system prints when *it* is broken, not when the input is —
+  and none carries free text a DSN, a path or a broker message could ride out
+  on. `--atr-period`, `--spread-window` and `--toy-every-n` are refused below 1
+  by the option parser, before the command body runs, with the same exit code.
+
 ## Operator commands
 
 ```bash
@@ -464,6 +632,7 @@ uv run trading-house --help
 | `trading-house db check` | Confirm the database is reachable and at the expected revision |
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
+| `trading-house backtest run` | Replay one strategy over stored bars and print the result and its digest |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on
@@ -606,17 +775,24 @@ the one place `Mt5VenueRef` is allowed to carry those facts.
 
 ## What this repository deliberately excludes
 
-Order submission of any kind; strategies, sizing and risk evaluation; market
-data ingest and backtesting; LangGraph or any LLM SDK; web APIs and
-dashboards; automatic migration at startup; and live, paper, shadow or
-simulated trading. MetaTrader 5 is present but read-only, and reachable from
-one module.
+LangGraph or any LLM SDK; web APIs and dashboards; and automatic migration at
+startup. MetaTrader 5 is reachable from one module and serves a demo account
+only — no path in this repository can reach a funded one.
+
+Order submission, strategies, sizing, risk evaluation, market data ingest and
+backtesting were all on this list and have all since shipped (Phases 1.5, 3, 4,
+5 and 6). They are named here only so the list is not read as still excluding
+them.
 
 The absence is testable. `tests/acceptance/test_architecture.py` parses every
 source module and fails on an import of `langgraph`, `openai`, `anthropic` or
 `ccxt`, on an import of `MetaTrader5` from anywhere but
 `brokers/mt5/terminal.py`, on private-key primitives outside
 `constitution/signing.py`, and on any Alembic upgrade path in runtime code.
-`tests/acceptance/test_phase1.py` fails if the string `order_send` appears
-anywhere in `src/`, if any mutating adapter method stops refusing, or if the
-gateway ever serves a non-demo account.
+`tests/acceptance/test_phase1.py` fails if the string `order_send` appears in
+any `src/` module other than `brokers/mt5/terminal.py` — and, guarding that
+exemption, if it stops appearing in `terminal.py` — if `amend_protection` ever
+closes a position on its own initiative, or if the gateway ever serves a
+non-demo account. It no longer asserts that any adapter method refuses
+unconditionally: Phases 4 and 5 filled in `submit`, `close` and
+`amend_protection`, and that parametrized test was deleted rather than emptied.

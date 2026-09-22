@@ -1018,3 +1018,321 @@ def test_the_daemon_stop_event_starts_unset() -> None:
     stop = cli._stop_event()
 
     assert not stop.is_set()
+
+
+# --- backtest run: the input boundary's two error shapes -------------------
+#
+# ``BacktestRequest`` raises a bare ``ValueError`` on a non-positive equity at
+# CONSTRUCTION, while a bad date range raises ``BacktestRefused`` from ``run``.
+# A caller wrapping only one of those catches one and not the other, so both
+# are pinned here: neither may reach an operator as "unexpected failure" with a
+# correlation id, which is what the CLI's catch-all does to anything untyped.
+
+
+def _contract_file(tmp_path: Path) -> Path:
+    from tests.unit.research.backtest.conftest import _contract
+
+    path = tmp_path / "contract.json"
+    path.write_text(_contract().model_dump_json(), encoding="utf-8")
+    return path
+
+
+def _printed_strings(result: Any) -> str:
+    """This file's spelling of the shared helper: a ``CliRunner`` result has
+    two streams, and only one of them is ever populated."""
+
+    from tests.conftest import printed_strings
+
+    return printed_strings(result.stdout, result.stderr)
+
+
+def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
+    options: dict[str, str] = {
+        "--strategy": "toy",
+        "--toy-every-n": "20",
+        "--instrument": "fx.eurusd",
+        "--timeframe": "M1",
+        "--start": "2026-09-21T09:00:00",
+        "--end": "2026-09-21T09:59:00",
+        "--firm-equity": "100000",
+        "--contract": str(_contract_file(tmp_path)),
+        "--atr-period": "2",
+        "--spread-window": "10",
+        "--commission-per-lot-per-side": "3.50",
+        "--slippage-points-per-side": "0",
+        "--swap-long-points-per-day": "-0.80",
+        "--swap-short-points-per-day": "0.30",
+        "--triple-swap-weekday": "2",
+    }
+    options.update(overrides)
+    return ["backtest", "run", *[value for pair in options.items() for value in pair]]
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_rejects_an_unregistered_strategy(tmp_path: Path) -> None:
+    """Phase 6 has one registrable strategy. An unknown id is a typed
+    configuration failure rather than a silent run of the toy."""
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--strategy": "momentum"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert json.loads(result.stderr)["status"] == "error"
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_non_positive_equity_as_a_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """Shape one: a bare ``ValueError`` from ``BacktestRequest.__post_init__``,
+    raised before ``run`` is ever called. Untranslated it lands in the CLI's
+    catch-all and an operator gets a correlation id for a typo."""
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "0"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_an_unparseable_equity_as_a_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """``Decimal("abc")`` raises ``InvalidOperation``, which is an
+    ``ArithmeticError`` and not a ``ValueError`` -- so it escapes any handler
+    written for the shape above."""
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "abc"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "correlation_id" not in json.loads(result.stderr)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_refusal_with_its_kind_and_nothing_else(tmp_path: Path) -> None:
+    """Shape two: ``BacktestRefused`` out of ``run``. A backwards range reaches
+    no bar in any store, so it is refused before the store is touched -- which
+    is why this needs no database.
+
+    The refusal's kind is a closed enum and is the whole diagnosis; the message
+    carries no free text, so nothing from a DSN or a broker message can ride
+    out on it.
+    """
+
+    args = _backtest_args(
+        tmp_path, **{"--start": "2026-09-21T09:59:00", "--end": "2026-09-21T09:00:00"}
+    )
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload == {
+        "status": "error",
+        "detail": "backtest refused",
+        "refusal": "coverage",
+    }
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_errors_never_echo_a_path_or_a_credential(tmp_path: Path) -> None:
+    """No command in this system prints a path, a credential or a key, and the
+    backtest command is handed both a DSN (through the environment) and a file
+    path (through ``--contract``).
+
+    A MISSING contract, not a bad equity. ``--firm-equity 0`` cannot leak
+    either string under any single production change: its handler answers with
+    ``ConfigurationError``'s fixed class string, and rewriting that handler to
+    echo ``str(error)`` still yields only "firm_equity must be positive". A
+    missing file is the one error path here that genuinely has something to
+    lose -- ``FileNotFoundError``'s message embeds the path the operator typed,
+    and the fixed string is the only thing between it and stderr. A future "let
+    us give a more helpful error" edit is exactly how that would leak.
+    """
+
+    args = _backtest_args(tmp_path, **{"--contract": str(tmp_path / "absent" / "contract.json")})
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    output = _printed_strings(result)
+    assert "super-secret-password" not in output
+    assert str(tmp_path) not in output
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_malformed_contract_file_as_a_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
+
+    ``--contract`` is the one input to this command with no producer anywhere
+    in the repo -- every operator hand-writes that file -- so a trailing comma
+    in it is the likeliest mistake the command ever sees. A handler written for
+    the unreadable-file case alone lets it through to the catch-all, where a
+    typo comes back as a correlation id.
+    """
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text('{"instrument_id": "fx.eurusd",}', encoding="utf-8")
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--contract": str(malformed)}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "correlation_id" not in json.loads(result.stderr)
+
+
+@pytest.mark.parametrize("equity", ["NaN", "Infinity"])
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_non_finite_equity_as_a_configuration_failure(
+    tmp_path: Path, equity: str
+) -> None:
+    """Shape three, which ``Decimal(value)`` alone cannot see.
+
+    Both CONSTRUCT cleanly, so catching the construction is not enough.
+    ``NaN <= 0`` raises ``InvalidOperation`` from inside ``BacktestRequest`` --
+    an ``ArithmeticError``, so it slips past the ``ValueError`` handler wrapping
+    that construction and lands in the catch-all. ``Infinity <= 0`` is worse:
+    it is simply ``False``, so an infinite equity is accepted as a positive one
+    and the command carries on to open a database connection with it.
+
+    ``-Infinity`` is deliberately NOT parametrized here. The existing
+    non-positive check already refuses it, so the case would pass with the
+    finiteness guard removed -- a parametrization that cannot fail, which is
+    the defect this phase keeps finding.
+    """
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": equity}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "correlation_id" not in json.loads(result.stderr)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_prints_the_result_its_digest_and_the_margin_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The success path, which otherwise runs only under Docker.
+
+    Every other case here is an error path, so a default ``uv run pytest -q``
+    that deselects ``integration`` never executes the payload assembly at all --
+    and that payload is the one piece of Phase 6 output shaping nothing outside
+    Docker touches, and the shape Phase 8 will hash. The bar store is the only
+    fake: the constitution, the risk engine and the simulator are real.
+
+    The digest is re-derived from the emitted result rather than compared to a
+    literal, so the assertion catches a payload whose digest belongs to some
+    other object without needing an update on every legitimate change.
+    """
+
+    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+    from trading_house.research.backtest.result import BacktestResult
+
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path))
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    # Section 8.1's headroom gate is off in a replay; the JSON has to say so,
+    # because ``BacktestResult`` is frozen and cannot.
+    assert payload["margin_modelled"] is False
+    emitted = BacktestResult.model_validate_json(json.dumps(payload["result"]))
+    assert payload["digest"] == emitted.digest()
+    assert emitted.trades
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_a_contract_for_a_different_instrument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The silent-empty-run shape, closed at the composition root.
+
+    Nothing downstream compares ``--contract``'s ``instrument_id`` to
+    ``--instrument``. The risk engine does reject the mismatch -- but as a
+    ``RejectedRiskDecision``, which the replay loop records and continues past,
+    so the command exits 0 with zero trades, N rejections and a payload that
+    looks like a strategy that simply never fired. ``ops/backtest.py`` calls
+    that "the worst failure shape available" and closes it for the clock; this
+    closes the same shape reached one argument over.
+
+    The store is seeded under BOTH instrument ids, and that is the whole
+    fixture. Seeded under ``fx.eurusd`` alone, ``--instrument fx.gbpusd``
+    exits CONFIGURATION with or without this guard -- as a ``coverage``
+    refusal, because the store holds no gbpusd bars -- so the test would pass
+    against code that never compares the two. Mutation-checked: the guard was
+    removed and this version failed while that version did not.
+
+    The assertions that carry it are the exit code AND the absence of a
+    ``refusal`` key. ``BacktestRefused`` is the only error that carries one,
+    so its absence separates "refused at the composition root" from every
+    refusal reachable inside ``run``.
+    """
+
+    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+
+    ramp = _ramp(60)
+    both = (*ramp, *(bar.model_copy(update={"instrument_id": "fx.gbpusd"}) for bar in ramp))
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(both))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--instrument": "fx.gbpusd"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+    assert "refusal" not in payload
+    # Guard the guard: the very same invocation with the matching instrument
+    # succeeds, so what is refused above is the mismatch and not the fixture.
+    assert runner.invoke(cli.app, _backtest_args(tmp_path)).exit_code == 0
+
+
+@pytest.mark.parametrize("option", ["--firm-equity", "--commission-per-lot-per-side"])
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_a_money_option_beyond_the_magnitude_ceiling(
+    tmp_path: Path, option: str
+) -> None:
+    """Shape four, and the one that made the README's count of typed doors
+    false.
+
+    ``Decimal("1e1000000")`` is finite -- ``is_finite()`` is ``True`` -- so it
+    clears ``_decimal``'s NaN/Infinity guard, and it is positive, so it clears
+    ``BacktestRequest.__post_init__``. It then raises ``decimal.Overflow``
+    inside the risk engine's sizing, and ``Overflow`` is an
+    ``ArithmeticError``, not a ``ValueError``: nothing on the way out catches
+    it and the operator gets "unexpected failure" and a correlation id for a
+    mistyped number.
+
+    Parametrized across two options because the bound lives in the shared
+    ``_decimal`` helper, not on the equity path: a fix applied at one call
+    site would leave the other four money options open.
+    """
+
+    args = _backtest_args(tmp_path, **{option: "1e1000000"})
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_the_magnitude_ceiling_leaves_ordinary_money_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard the guard: the bound is a sanity limit, not a modelled one, so
+    an equity far larger than any account this system will ever size against
+    must still run. A ceiling that refused real money would be caught here
+    rather than by an operator."""
+
+    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "1e12"}))
+
+    assert result.exit_code == 0, result.stderr

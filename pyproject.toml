@@ -30,7 +30,13 @@ dev = [
   "pytest>=8,<10",
   "pytest-cov>=6,<8",
   "ruff>=0.12,<1",
-  "testcontainers[postgres]>=4.10,<5",
+  # 4.15 is the first release that ships ``testcontainers.community``,
+  # which ``tests/conftest.py`` imports. Probed, not guessed: 4.10.0
+  # through 4.14.2 all raise ModuleNotFoundError on that import, so the
+  # previous >=4.10 floor declared a range where the test suite could
+  # not collect. The lock pins 4.15.0, so CI was unaffected and only a
+  # fresh resolve would have found it.
+  "testcontainers[postgres]>=4.15,<5",
   "types-pyyaml>=6,<7",
 ]
 

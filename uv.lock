@@ -733,7 +733,7 @@ dev = [
     { name = "pytest", specifier = ">=8,<10" },
     { name = "pytest-cov", specifier = ">=6,<8" },
     { name = "ruff", specifier = ">=0.12,<1" },
-    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.10,<5" },
+    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.15,<5" },
     { name = "types-pyyaml", specifier = ">=6,<7" },
 ]
 
