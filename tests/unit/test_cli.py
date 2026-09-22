@@ -1038,18 +1038,21 @@ def _contract_file(tmp_path: Path) -> Path:
 
 
 def _printed_strings(result: Any) -> str:
-    """What the command actually printed, with JSON escaping undone.
+    """What the command actually printed, with both layers of escaping undone.
 
-    Searching the raw stream for a leaked path is escape-blind on Windows:
-    ``json.dumps`` doubles every backslash, so a Windows path on the wire
-    never matches the one a test compares it to and a leak walks past a
-    substring check that looks exactly right. Decoding first makes the
-    assertion mean the same thing on every platform -- on POSIX the two
-    spellings already agree, which is how this would have shipped unnoticed.
+    Searching a raw stream for a leaked Windows path is escape-blind, and
+    twice over. ``OSError.__str__`` reprs the filename, which doubles every
+    backslash; ``json.dumps`` then doubles them again on the wire. So a
+    ``FileNotFoundError`` that prints the operator's whole path arrives as
+    four backslashes per separator and matches no path any test holds.
+    ``json.loads`` undoes the outer layer and collapsing the doubles undoes
+    the inner one. On POSIX every spelling already agrees, which is exactly
+    how a check that asserts nothing here would have shipped unnoticed.
     """
 
     streams = [stream for stream in (result.stdout, result.stderr) if stream.strip()]
-    return " ".join(str(value) for stream in streams for value in json.loads(stream).values())
+    printed = " ".join(str(value) for stream in streams for value in json.loads(stream).values())
+    return printed.replace("\\\\", "\\")
 
 
 def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
