@@ -1113,6 +1113,16 @@ def backtest_run(
             # comma in it is the likeliest mistake this command sees, and
             # ``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
             raise ConfigurationError() from error
+        if instrument_contract.instrument_id != instrument:
+            # The composition root is the only place that holds both, and
+            # nothing downstream refuses the pair. The risk engine does catch
+            # it -- but as a RejectedRiskDecision, which the replay loop
+            # records and continues past, so the run exits 0 with zero trades,
+            # N rejections and a plausible-looking payload. That is the same
+            # silent shape the shared clock exists to avoid, reached through a
+            # different argument, and it is refused before the run starts
+            # rather than reported after it.
+            raise ConfigurationError()
         try:
             # BacktestRequest validates firm_equity in __post_init__ and raises
             # a bare ValueError, while a bad range raises BacktestRefused from

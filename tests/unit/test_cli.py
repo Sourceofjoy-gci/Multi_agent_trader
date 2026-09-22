@@ -1260,3 +1260,38 @@ def test_backtest_prints_the_result_its_digest_and_the_margin_disclosure(
     emitted = BacktestResult.model_validate_json(json.dumps(payload["result"]))
     assert payload["digest"] == emitted.digest()
     assert emitted.trades
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_a_contract_for_a_different_instrument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The silent-empty-run shape, closed at the composition root.
+
+    Nothing downstream compares ``--contract``'s ``instrument_id`` to
+    ``--instrument``. The risk engine does reject the mismatch -- but as a
+    ``RejectedRiskDecision``, which the replay loop records and continues past,
+    so the command exits 0 with zero trades, N rejections and a payload that
+    looks like a strategy that simply never fired. ``ops/backtest.py`` calls
+    that "the worst failure shape available" and closes it for the clock; this
+    closes the same shape reached one argument over.
+
+    The bar store is faked so the assertion is about the mismatch rather than
+    about an absent database -- without it this would exit CONFIGURATION for
+    the wrong reason, which is exactly the kind of pass this fix exists to
+    prevent.
+    """
+
+    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--instrument": "fx.gbpusd"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+    # Guard the guard: the very same invocation with the matching instrument
+    # succeeds, so the refusal above is the mismatch and not the fixture.
+    assert runner.invoke(cli.app, _backtest_args(tmp_path)).exit_code == 0

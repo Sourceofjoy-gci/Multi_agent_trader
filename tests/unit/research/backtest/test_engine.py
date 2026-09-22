@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -7,16 +7,23 @@ from tests.unit.research.backtest.conftest import (
     FIRST_SNAPSHOT_BAR,
     HALF_SPREAD,
     POINT,
+    AlwaysAffordableMargin,
     PeekingStrategy,
     ToyStrategy,
+    _constitution,
+    _contract,
     _ramp,
     _run,
     ramp_price,
 )
+from trading_house.core.errors import TimestampError
+from trading_house.core.schemas import RejectedRiskDecision
 from trading_house.marketdata.models import BarQuality, Timeframe, duration
-from trading_house.research.backtest.engine import BacktestRefused
+from trading_house.research.backtest.engine import BacktestRefused, ReplayClock
 from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import RefusalKind
+from trading_house.research.backtest.snapshot import FeatureSnapshot
+from trading_house.risk.engine import RiskEngine
 
 
 def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
@@ -290,3 +297,102 @@ def test_a_strategy_that_peeks_is_refused() -> None:
         _run(bars=_ramp(30), strategy=PeekingStrategy())
 
     assert caught.value.kind is RefusalKind.LOOKAHEAD
+
+
+def test_no_run_can_exit_on_a_target_while_the_risk_engine_produces_none() -> None:
+    """``ExitKind.TARGET`` is unreachable through the engine today, and this
+    says so out loud so the day it changes, something fails.
+
+    ``RiskEngine`` hard-codes ``take_profit_price`` to ``None`` on every
+    executable decision, so ``_Signal.target`` is always ``None`` and
+    ``resolve_exit``'s target branch never fires in a real run. D-2 --
+    stop before target, this phase's headline pessimism rule -- is therefore
+    proven only in ``test_fills.py`` and never end to end.
+
+    The cause is asserted, not just the consequence. Over this ramp a
+    take-profit set any realistic distance away would not be reached inside
+    the toy's twelve-bar hold, so "no trade exited on a target" would keep
+    passing after the risk engine started producing them -- vacuously, and
+    for a reason unrelated to its claim. The decision's own
+    ``take_profit_price`` is what actually changes in Phase 7, so that is
+    what is pinned.
+    """
+
+    bars = _ramp(60)
+    result = _run(bars=bars, strategy=ToyStrategy(every_n=20))
+
+    assert result.trades
+    assert ExitKind.TARGET not in {trade.exit_kind for trade in result.trades}
+
+    # The cause, read off the same call the loop makes at the same instant.
+    warm = bars[FIRST_SNAPSHOT_BAR]
+    snapshot = FeatureSnapshot(
+        as_of=warm.availability_time,
+        instrument_id="fx.eurusd",
+        timeframe=Timeframe.M1,
+        bar=warm,
+        atr=Decimal("0.00002"),  # every bar's true range is exactly two points
+        median_spread_points=Decimal(warm.spread),
+        tick_spread_points=Decimal(warm.spread),
+        tick_time=warm.availability_time,
+    )
+    proposal = ToyStrategy(every_n=1).evaluate(snapshot)
+    assert proposal is not None
+    decision = RiskEngine(
+        _constitution(), ReplayClock(instant=snapshot.as_of)
+    ).evaluate_for_execution(
+        proposal,
+        margin=AlwaysAffordableMargin(),
+        contract=_contract(),
+        firm_equity=Decimal("100000"),
+        atr=snapshot.atr,
+        median_spread_points=snapshot.median_spread_points,
+        tick_spread_points=snapshot.tick_spread_points,
+        tick_time=snapshot.tick_time,
+    )
+
+    assert not isinstance(decision, RejectedRiskDecision)
+    assert decision.take_profit_price is None
+
+
+@pytest.mark.parametrize("field_name", ["start", "end"])
+def test_a_request_refuses_a_naive_start_or_end(field_name: str) -> None:
+    """The boundary's third exception shape, closed.
+
+    ``BacktestRequest`` stands in for the annotations a ``CanonicalModel``
+    would have carried, and a canonical model would have enforced
+    UTC-awareness -- which is why ``ReplayClock.__post_init__`` calls
+    ``ensure_utc`` twenty lines up. Without it a naive stamp survived
+    construction and raised ``TypeError`` from inside
+    ``_refuse_outside_coverage``'s comparison against an aware ``Coverage``
+    stamp: past every handler, so an operator got "unexpected failure" and a
+    correlation id for a missing timezone. ``cli.py``'s ``_as_utc`` saved the
+    CLI path only; an in-process caller had nothing.
+    """
+
+    bars = _ramp(60)
+    naive = {field_name: bars[0].event_time.replace(tzinfo=None)}
+
+    with pytest.raises(TimestampError):
+        _run(bars=bars, strategy=ToyStrategy(every_n=20), **naive)  # type: ignore[arg-type]
+
+
+def test_a_request_normalises_an_offset_aware_range_to_utc() -> None:
+    """Checked *and* normalised, as ``FixedClock`` does. ``run_id`` is built
+    from ``start.isoformat()`` and the digest is built from the result, so two
+    requests naming the same instant in different offsets must not produce two
+    different digests."""
+
+    bars = _ramp(60)
+    plus_two = timezone(timedelta(hours=2))
+
+    utc = _run(bars=bars, strategy=ToyStrategy(every_n=20))
+    offset = _run(
+        bars=bars,
+        strategy=ToyStrategy(every_n=20),
+        start=bars[0].event_time.astimezone(plus_two),
+        end=bars[-1].event_time.astimezone(plus_two),
+    )
+
+    assert offset.run_id == utc.run_id
+    assert offset.digest() == utc.digest()

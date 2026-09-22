@@ -105,11 +105,11 @@ class BacktestRequest:
     A dataclass rather than a ``CanonicalModel`` because ``strategy`` is a bare
     ``Protocol``: pydantic cannot build a schema for one, and widening the base
     config with ``arbitrary_types_allowed`` to admit it would weaken every
-    canonical model in the package. So the two checks the model's own
-    annotations would have made -- ``PositiveDecimal`` and an ordered range --
-    are made here by hand. ``end < start`` is refused in ``run`` rather than
-    raised here, beside the other range refusals; see
-    ``_refuse_outside_coverage``.
+    canonical model in the package. So the three checks the model's own
+    annotations would have made -- ``PositiveDecimal``, UTC-awareness on both
+    stamps, and an ordered range -- are made here by hand. ``end < start`` is
+    refused in ``run`` rather than raised here, beside the other range
+    refusals; see ``_refuse_outside_coverage``.
     """
 
     strategy: Strategy
@@ -131,6 +131,17 @@ class BacktestRequest:
             raise ValueError("firm_equity must be a Decimal")
         if self.firm_equity <= 0:
             raise ValueError("firm_equity must be positive")
+        # The same guard ``ReplayClock`` applies twenty lines up, for the same
+        # reason: a naive ``start`` reached ``_refuse_outside_coverage``'s
+        # comparison against an aware ``Coverage`` stamp and raised
+        # ``TypeError`` from inside the run -- past every handler, so an
+        # operator got "unexpected failure" and a correlation id for a missing
+        # timezone. ``ensure_utc`` raises the typed ``TimestampError`` instead,
+        # here, where the value entered. Normalised rather than only checked,
+        # as ``FixedClock`` does, so two requests naming the same instant in
+        # different offsets produce the same ``run_id`` and the same digest.
+        object.__setattr__(self, "start", ensure_utc(self.start))
+        object.__setattr__(self, "end", ensure_utc(self.end))
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +253,17 @@ class Backtester:
                 side=proposal.side,
                 lots=decision.approved_quantity.amount,
                 stop=decision.stop_loss_price,
+                # Dormant, and deliberately wired anyway. ``RiskEngine``
+                # hard-codes ``take_profit_price`` to ``None`` on every
+                # executable decision (risk/engine.py), so this is always
+                # ``None`` and ``ExitKind.TARGET`` cannot occur in any run this
+                # phase can perform -- D-2's stop-before-target pessimism is
+                # proven in ``resolve_exit``'s unit tests and nowhere end to
+                # end. The wiring stays because the day the risk engine starts
+                # producing take-profits is the day the simulator must honour
+                # them; ``test_engine.py`` pins the dormancy so that day
+                # announces itself. Producing them is Phase 7's, not this
+                # phase's.
                 target=decision.take_profit_price,
                 max_holding_seconds=proposal.max_holding_seconds,
             )
