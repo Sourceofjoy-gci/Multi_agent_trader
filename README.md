@@ -606,9 +606,9 @@ uv run trading-house backtest run --strategy toy --toy-every-n 20 \
   plausible-looking result. A `--contract` that cannot be read, cannot be
   decoded, or is not valid JSON is refused at the file; that one matters most,
   because `--contract` is the only input to this command with no producer
-  anywhere in the repository, so every operator hand-writes it. And a contract or a cost
-  value that parses but does not satisfy its model is refused by the same
-  schema handler every other command in this system uses. An unknown
+  anywhere in the repository, so every operator hand-writes it. And a contract
+  or a cost value that parses but does not satisfy its model is refused by the
+  same schema handler every other command in this system uses. An unknown
   `--strategy` is refused where the strategy is built, which is a seventh cause
   rather than a seventh handler: it raises the same error the money and contract
   doors raise and leaves by the one every command shares. All seven exit 2 with
