@@ -1037,6 +1037,21 @@ def _contract_file(tmp_path: Path) -> Path:
     return path
 
 
+def _printed_strings(result: Any) -> str:
+    """What the command actually printed, with JSON escaping undone.
+
+    Searching the raw stream for a leaked path is escape-blind on Windows:
+    ``json.dumps`` doubles every backslash, so a Windows path on the wire
+    never matches the one a test compares it to and a leak walks past a
+    substring check that looks exactly right. Decoding first makes the
+    assertion mean the same thing on every platform -- on POSIX the two
+    spellings already agree, which is how this would have shipped unnoticed.
+    """
+
+    streams = [stream for stream in (result.stdout, result.stderr) if stream.strip()]
+    return " ".join(str(value) for stream in streams for value in json.loads(stream).values())
+
+
 def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
     options: dict[str, str] = {
         "--strategy": "toy",
@@ -1146,9 +1161,8 @@ def test_backtest_errors_never_echo_a_path_or_a_credential(tmp_path: Path) -> No
 
     result = runner.invoke(cli.app, args)
 
-    output = result.stdout + result.stderr
-
     assert result.exit_code == cli.ExitCode.CONFIGURATION
+    output = _printed_strings(result)
     assert "super-secret-password" not in output
     assert str(tmp_path) not in output
 
