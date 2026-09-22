@@ -525,7 +525,14 @@ hash differently. That question is open.
 ### Commands
 
 ```bash
-uv run trading-house backtest run --strategy toy --toy-every-n 20   --instrument fx.eurusd --timeframe M1   --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00   --firm-equity 100000 --contract contract.json   --atr-period 14 --spread-window 20   --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4   --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30   --triple-swap-weekday 2
+uv run trading-house backtest run --strategy toy --toy-every-n 20 \
+  --instrument fx.eurusd --timeframe M1 \
+  --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00 \
+  --firm-equity 100000 --contract contract.json \
+  --atr-period 14 --spread-window 20 \
+  --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4 \
+  --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30 \
+  --triple-swap-weekday 2
 ```
 
 - **Every cost is required and none is defaulted** (D-5). The repo has no

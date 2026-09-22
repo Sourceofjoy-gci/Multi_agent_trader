@@ -1192,19 +1192,24 @@ def test_backtest_surfaces_a_malformed_contract_file_as_a_configuration_failure(
     assert "correlation_id" not in json.loads(result.stderr)
 
 
-@pytest.mark.parametrize("equity", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("equity", ["NaN", "Infinity"])
 @pytest.mark.usefixtures("_dsn")
 def test_backtest_surfaces_a_non_finite_equity_as_a_configuration_failure(
     tmp_path: Path, equity: str
 ) -> None:
     """Shape three, which ``Decimal(value)`` alone cannot see.
 
-    All three CONSTRUCT cleanly, so catching the construction is not enough.
+    Both CONSTRUCT cleanly, so catching the construction is not enough.
     ``NaN <= 0`` raises ``InvalidOperation`` from inside ``BacktestRequest`` --
     an ``ArithmeticError``, so it slips past the ``ValueError`` handler wrapping
     that construction and lands in the catch-all. ``Infinity <= 0`` is worse:
     it is simply ``False``, so an infinite equity is accepted as a positive one
-    and the run proceeds on it.
+    and the command carries on to open a database connection with it.
+
+    ``-Infinity`` is deliberately NOT parametrized here. The existing
+    non-positive check already refuses it, so the case would pass with the
+    finiteness guard removed -- a parametrization that cannot fail, which is
+    the defect this phase keeps finding.
     """
 
     result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": equity}))
