@@ -1018,3 +1018,125 @@ def test_the_daemon_stop_event_starts_unset() -> None:
     stop = cli._stop_event()
 
     assert not stop.is_set()
+
+
+# --- backtest run: the input boundary's two error shapes -------------------
+#
+# ``BacktestRequest`` raises a bare ``ValueError`` on a non-positive equity at
+# CONSTRUCTION, while a bad date range raises ``BacktestRefused`` from ``run``.
+# A caller wrapping only one of those catches one and not the other, so both
+# are pinned here: neither may reach an operator as "unexpected failure" with a
+# correlation id, which is what the CLI's catch-all does to anything untyped.
+
+
+def _contract_file(tmp_path: Path) -> Path:
+    from tests.unit.research.backtest.conftest import _contract
+
+    path = tmp_path / "contract.json"
+    path.write_text(_contract().model_dump_json(), encoding="utf-8")
+    return path
+
+
+def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
+    options: dict[str, str] = {
+        "--strategy": "toy",
+        "--toy-every-n": "20",
+        "--instrument": "fx.eurusd",
+        "--timeframe": "M1",
+        "--start": "2026-09-21T09:00:00",
+        "--end": "2026-09-21T09:59:00",
+        "--firm-equity": "100000",
+        "--contract": str(_contract_file(tmp_path)),
+        "--atr-period": "2",
+        "--spread-window": "10",
+        "--commission-per-lot-per-side": "3.50",
+        "--slippage-points-per-side": "0",
+        "--swap-long-points-per-day": "-0.80",
+        "--swap-short-points-per-day": "0.30",
+        "--triple-swap-weekday": "2",
+    }
+    options.update(overrides)
+    return ["backtest", "run", *[value for pair in options.items() for value in pair]]
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_rejects_an_unregistered_strategy(tmp_path: Path) -> None:
+    """Phase 6 has one registrable strategy. An unknown id is a typed
+    configuration failure rather than a silent run of the toy."""
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--strategy": "momentum"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert json.loads(result.stderr)["status"] == "error"
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_non_positive_equity_as_a_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """Shape one: a bare ``ValueError`` from ``BacktestRequest.__post_init__``,
+    raised before ``run`` is ever called. Untranslated it lands in the CLI's
+    catch-all and an operator gets a correlation id for a typo."""
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "0"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_an_unparseable_equity_as_a_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """``Decimal("abc")`` raises ``InvalidOperation``, which is an
+    ``ArithmeticError`` and not a ``ValueError`` -- so it escapes any handler
+    written for the shape above."""
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "abc"}))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "correlation_id" not in json.loads(result.stderr)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_surfaces_a_refusal_with_its_kind_and_nothing_else(tmp_path: Path) -> None:
+    """Shape two: ``BacktestRefused`` out of ``run``. A backwards range reaches
+    no bar in any store, so it is refused before the store is touched -- which
+    is why this needs no database.
+
+    The refusal's kind is a closed enum and is the whole diagnosis; the message
+    carries no free text, so nothing from a DSN or a broker message can ride
+    out on it.
+    """
+
+    args = _backtest_args(
+        tmp_path, **{"--start": "2026-09-21T09:59:00", "--end": "2026-09-21T09:00:00"}
+    )
+
+    result = runner.invoke(cli.app, args)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload == {
+        "status": "error",
+        "detail": "backtest refused",
+        "refusal": "coverage",
+    }
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_errors_never_echo_a_path_or_a_credential(tmp_path: Path) -> None:
+    """No command in this system prints a path, a credential or a key, and the
+    backtest command is handed both a DSN (through the environment) and a file
+    path (through ``--contract``)."""
+
+    args = _backtest_args(tmp_path, **{"--firm-equity": "0"})
+
+    result = runner.invoke(cli.app, args)
+
+    output = result.stdout + result.stderr
+
+    assert "super-secret-password" not in output
+    assert str(tmp_path) not in output

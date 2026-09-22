@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any, cast
 from uuid import uuid4
@@ -59,6 +59,7 @@ from trading_house.core.errors import (
     TradingHouseError,
     UnresolvedIntentsError,
 )
+from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import (
     RISK_DECISION_ADAPTER,
     OrderIntent,
@@ -86,8 +87,11 @@ from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
+from trading_house.ops.backtest import build_backtester, build_strategy
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
+from trading_house.research.backtest.costs import CostModel
+from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
 from trading_house.settings import RuntimeSettings
 
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
@@ -114,6 +118,12 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
     UnresolvedIntentsError: ExitCode.UNRESOLVED_INTENTS,
     ConcurrentSubmissionError: ExitCode.CONCURRENT_SUBMISSION,
+    # One code for all four refusal kinds. They have four different remedies --
+    # backfill, repair the bars, fix the strategy, widen the horizon -- but
+    # they are all "the run you asked for cannot be simulated honestly", and
+    # the kind itself travels as the ``refusal`` key on the error payload,
+    # which is what a script actually branches on.
+    BacktestRefused: ExitCode.CONFIGURATION,
 }
 
 
@@ -131,12 +141,14 @@ audit_app = typer.Typer(no_args_is_help=True, help="Audit-ledger commands.")
 data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
 order_app = typer.Typer(no_args_is_help=True, help="Order commands.")
 guard_app = typer.Typer(no_args_is_help=True, help="Position-guard commands.")
+backtest_app = typer.Typer(no_args_is_help=True, help="Backtest commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
 app.add_typer(data_app, name="data")
 app.add_typer(order_app, name="order")
 app.add_typer(guard_app, name="guard")
+app.add_typer(backtest_app, name="backtest")
 
 
 @app.callback()
@@ -162,6 +174,18 @@ def _execute(operation: Callable[[], dict[str, JsonValue]]) -> dict[str, JsonVal
 
     try:
         return operation()
+    except BacktestRefused as error:
+        # A refusal's kind IS the diagnosis, and the class-level
+        # public_message alone does not carry it: an operator told only
+        # "backtest refused" cannot tell a defective bar from a range the
+        # store does not cover. The kind is a closed enum, so naming it adds
+        # no free text -- nothing from a DSN, a path or a broker message can
+        # ride out on this key.
+        raise _fail(
+            BacktestRefused.public_message,
+            EXIT_CODES[BacktestRefused],
+            refusal=error.kind.value,
+        ) from None
     except UnresolvedIntentsError as error:
         # str(error) names the offending intent ids; the class-level
         # public_message alone does not, and an operator who cannot see
@@ -185,6 +209,21 @@ def _run(operation: Callable[[], dict[str, JsonValue]]) -> None:
 
 def _settings() -> RuntimeSettings:
     return RuntimeSettings()
+
+
+def _decimal(value: str) -> Decimal:
+    """Money off the command line, typed at the boundary it entered.
+
+    ``Decimal("abc")`` raises ``InvalidOperation``, which is an
+    ``ArithmeticError`` and not a ``ValueError``, so it slips past every
+    handler written for the latter and lands in ``_execute``'s catch-all --
+    where a typo becomes "unexpected failure" and a correlation id.
+    """
+
+    try:
+        return Decimal(value)
+    except InvalidOperation as error:
+        raise ConfigurationError() from error
 
 
 def _atomic_write(destination: Path, contents: bytes) -> None:
@@ -996,3 +1035,110 @@ def guard_status() -> None:
         return {"open_positions": len(positions), "escalated": escalated, "positions": positions}
 
     _run(operation)
+
+
+@backtest_app.command("run")
+def backtest_run(
+    strategy: Annotated[str, typer.Option("--strategy", help="Registered strategy id.")],
+    instrument: Annotated[str, typer.Option("--instrument")],
+    timeframe: Annotated[Timeframe, typer.Option("--timeframe")],
+    start: Annotated[datetime, typer.Option("--start", help="First bar open (UTC).")],
+    end: Annotated[datetime, typer.Option("--end", help="Last bar open, inclusive (UTC).")],
+    firm_equity: Annotated[str, typer.Option("--firm-equity")],
+    contract: Annotated[Path, typer.Option("--contract", help="Instrument contract JSON.")],
+    atr_period: Annotated[int, typer.Option("--atr-period")],
+    spread_window: Annotated[int, typer.Option("--spread-window")],
+    commission_per_lot_per_side: Annotated[str, typer.Option("--commission-per-lot-per-side")],
+    slippage_points_per_side: Annotated[str, typer.Option("--slippage-points-per-side")],
+    swap_long_points_per_day: Annotated[str, typer.Option("--swap-long-points-per-day")],
+    swap_short_points_per_day: Annotated[str, typer.Option("--swap-short-points-per-day")],
+    triple_swap_weekday: Annotated[int, typer.Option("--triple-swap-weekday")],
+    toy_every_n: Annotated[int, typer.Option("--toy-every-n")] = 1,
+    stress_multiplier: Annotated[str, typer.Option("--stress-multiplier")] = "1",
+) -> None:
+    """Replay one strategy over stored bars and print the result and its digest.
+
+    Every cost is a required option. ``CostModel`` defaults exactly one field --
+    ``stress_multiplier``, the 1.5x-2x sensitivity knob section 12 asks for --
+    and defaults no cost at all, because the classic flattering backtest is one
+    that silently assumed zero commission (D-5). This command keeps that
+    property: omit a cost and the command refuses rather than charging nothing.
+
+    ``--contract`` is a file because nothing in this repo can supply an
+    ``InstrumentContract`` without a live MetaTrader 5 terminal, and a research
+    command that needs a terminal is not one that can be replayed. The same
+    reasoning as ``order submit --decision``: the facts come from a file, never
+    from flags nobody vetted.
+
+    ``--strategy`` names a registry with exactly one entry in Phase 6 -- the
+    toy, whose only option is ``--toy-every-n``. It has no edge and nothing it
+    reports is evidence about a strategy. Phase 7 replaces it with a real
+    registry; until then, an unknown id is refused rather than silently
+    running the toy under another name.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        settings = _settings()
+        cost_model = CostModel(
+            commission_per_lot_per_side=_decimal(commission_per_lot_per_side),
+            slippage_points_per_side=_decimal(slippage_points_per_side),
+            swap_long_points_per_day=_decimal(swap_long_points_per_day),
+            swap_short_points_per_day=_decimal(swap_short_points_per_day),
+            triple_swap_weekday=triple_swap_weekday,
+            stress_multiplier=_decimal(stress_multiplier),
+        )
+        try:
+            instrument_contract = InstrumentContract.model_validate(
+                json.loads(contract.read_text(encoding="utf-8")), strict=False
+            )
+        except OSError as error:
+            # Typed here rather than left to the catch-all: an unreadable
+            # contract file is the operator's input, not an internal failure,
+            # and the catch-all would answer a wrong path with a correlation id.
+            raise ConfigurationError() from error
+        try:
+            # BacktestRequest validates firm_equity in __post_init__ and raises
+            # a bare ValueError, while a bad range raises BacktestRefused from
+            # run() further down. Two shapes out of one boundary: wrapping only
+            # the second would let a mistyped equity escape as "unexpected
+            # failure".
+            request = BacktestRequest(
+                strategy=build_strategy(strategy, every_n=toy_every_n, timeframe=timeframe),
+                instrument_id=instrument,
+                timeframe=timeframe,
+                start=_as_utc(start),
+                end=_as_utc(end),
+                firm_equity=_decimal(firm_equity),
+                cost_model=cost_model,
+                atr_period=atr_period,
+                spread_window=spread_window,
+            )
+        except ValueError as error:
+            raise ConfigurationError() from error
+        result = build_backtester(
+            bars=_bar_store(),
+            contract=instrument_contract,
+            constitution=load_constitution(
+                settings.constitution_path,
+                settings.constitution_signature_path,
+                settings.constitution_public_key_path,
+            ).constitution,
+        ).run(request)
+        # The result is re-parsed rather than embedded as a string so the whole
+        # payload is one key-sorted JSON document, like every other command's.
+        # The digest is still taken over the model's own declaration-ordered
+        # serialisation, which is what Phase 8 will hash.
+        return {
+            "result": cast(JsonValue, json.loads(result.model_dump_json())),
+            "digest": result.digest(),
+        }
+
+    _run(operation)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    # ``python -m trading_house.cli`` is how the determinism test starts a run
+    # in a fresh interpreter under its own PYTHONHASHSEED. Without this the
+    # module imports and exits silently, and the test compares two empty
+    # strings -- which would pass.
+    app()

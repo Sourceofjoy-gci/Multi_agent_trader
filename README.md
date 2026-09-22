@@ -450,6 +450,99 @@ uv run trading-house guard status
   nothing else — no terminal, no gate — because an escalation is exactly when
   the broker may be the thing that is broken.
 
+## Phase 6 — the backtester
+
+Phase 6 makes one promise: **a strategy's proposals go through the real risk
+engine, fill pessimistically against stored bars in point-in-time order, and
+produce a result two different processes agree on byte for byte.** Nothing is
+sized here — `RiskEngine.evaluate_for_execution` sizes, and the simulator reads
+`approved_quantity` and `stop_loss_price` off the decision it returned (D-3).
+Sizing has exactly one home, so a measured edge belongs to the strategy rather
+than to a second copy of the arithmetic that no live order goes through.
+
+Per bar, in this order, and the order is the design: a queued entry fills at
+**this** bar's open (never the close that generated the signal); an open
+position is resolved against this bar, the stop before the target (D-2) and the
+stop before the time stop; `as_of` becomes the bar's `availability_time`; a
+snapshot is built at that instant, or the bar is skipped because the feature
+windows are still cold; the strategy sees that snapshot and nothing else
+(I-17); the risk engine decides; an executable decision is queued to fill on the
+next bar.
+
+**What it does not promise, stated as plainly:**
+
+- **Bar resolution only.** There is no tick stream. `tick_spread_points` is the
+  closing bar's own spread and `tick_time` is that bar's `availability_time` —
+  constructed invariants, not a convention. Any strategy whose edge lives in the
+  difference between the two is one D-1 refuses anyway.
+- **No strategy with an edge exists.** `--strategy toy` is the entire registry.
+  The toy buys every *n*-th snapshot at a fixed structural stop; it has no edge
+  and is not meant to acquire one. Whatever P&L it reports is the shape of the
+  data it was pointed at. Phase 7 brings the real registry.
+- **Market impact is not modelled.** Fills assume the requested size was always
+  available at the price the model computed. A size that would move the book
+  fills exactly as a small one does.
+- **Inference cost is not modelled.** An agent's latency and its money cost
+  appear nowhere in the cost equation.
+- **Margin is not modelled.** Nothing in this repo can supply a margin
+  requirement, so section 8.1's free-margin headroom gate is switched off rather
+  than fed an invented number. A run assumes margin was always available.
+- **Compounding does not happen.** `--firm-equity` is constant for the whole run
+  (D-4), so a measured edge cannot be an artefact of position sizes growing with
+  the strategy's own luck.
+
+**Four refusals, each rather than a plausible-looking number:**
+
+| Kind | Refused because |
+|---|---|
+| `coverage` | The requested range reaches outside what the store holds — or runs backwards, which reaches no bar at all and would otherwise report an empty run |
+| `defective_bar` | A bar in the range is not `BarQuality.OK`. Dropping it silently would leave the run shorter than the period it claims |
+| `lookahead` | A proposal claimed availability later than the snapshot that produced it |
+| `horizon` | The strategy's horizon is shorter than ten bars of the timeframe (D-1), below which the number being measured is the simulator's own pessimism |
+
+Interior gaps are deliberately **not** refused: FX closes every weekend, so a
+gap rule would refuse every run spanning a Saturday.
+
+**`max_concurrent_positions` is enforced nowhere at decision time.** It appears
+only in a constitution self-consistency validator, and neither risk-engine entry
+point takes open-position state. This is a live-system gap, not a backtest one.
+D-7 sidesteps it — the simulator holds one position at a time, so it can never
+report concurrency the live path does not limit — and closing it belongs to
+whichever phase gives the risk engine a portfolio view.
+
+**The result is reproducible across processes, not across changes.**
+`tests/integration/research/test_backtest_determinism.py` runs the command
+twice in separate interpreters under different `PYTHONHASHSEED` values and
+compares the bytes, which is what catches set or dict ordering reaching the
+output. It does not establish that the digest survives an unrelated edit:
+`digest()` hashes a `Decimal`'s string form while the reconciliation validators
+compare by value, so `Decimal("93")` and `Decimal("93.00")` both validate and
+hash differently. That question is open.
+
+### Commands
+
+```bash
+uv run trading-house backtest run   --strategy toy --toy-every-n 20   --instrument fx.eurusd --timeframe M1   --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00   --firm-equity 100000 --contract contract.json   --atr-period 14 --spread-window 20   --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4   --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30   --triple-swap-weekday 2
+```
+
+- **Every cost is required and none is defaulted** (D-5). The repo has no
+  `commission` field anywhere and `FinancingModel` is an enum tag with no rate
+  table, so each cost is a declared input taken from the broker's published
+  contract specification and recorded in the result. The one option that does
+  default is `--stress-multiplier`, the 1.5x–2x sensitivity knob section 12
+  asks for — a scenario, not a cost. The classic flattering backtest is one
+  that silently assumed zero commission; omitting a cost here refuses.
+- **`--contract` is a file** for the same reason `order submit --decision` is:
+  nothing in this repo can produce an `InstrumentContract` without a live
+  MetaTrader 5 terminal, and a research command that needs one cannot be
+  replayed. The facts come from a vetted file, never from flags.
+- **Errors leave by two doors and both are typed.** A refusal prints
+  `{"status": "error", "detail": "backtest refused", "refusal": "<kind>"}` on
+  stderr; a bad `--firm-equity` — non-positive, or not a number at all — is a
+  configuration failure with the same exit code. Neither reaches the operator
+  as a correlation id, and neither carries free text a DSN or a broker message
+  could ride out on.
+
 ## Operator commands
 
 ```bash
@@ -464,6 +557,7 @@ uv run trading-house --help
 | `trading-house db check` | Confirm the database is reachable and at the expected revision |
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
+| `trading-house backtest run` | Replay one strategy over stored bars and print the result and its digest |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on
