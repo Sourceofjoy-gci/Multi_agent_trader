@@ -36,17 +36,20 @@ def test_every_indicator_returns_decimal() -> None:
     assert checked >= 3, "expected true_range, wilder_atr and median_spread_points"
 
 
-def test_no_indicator_can_reach_the_store() -> None:
-    """Only the engine holds the store. If an indicator could fetch, a caller
+def test_no_feature_module_can_reach_the_store() -> None:
+    """Only the engine holds the store. If a feature module could fetch, a caller
     could obtain a feature without a point-in-time read and without the fixed
     window, which is exactly what I-18 forbids.
 
     The engine depends on ``BarReader``, not ``BarStore`` (see
-    ``test_the_engine_holds_the_store`` below) -- so an indicator must carry
-    neither name, not just the one the engine happens to use.
+    ``test_the_engine_holds_the_store`` below) -- so every feature module must carry
+    neither name, not just the one the engine happens to use. ``engine.py`` is
+    exempt: it is where the store lives and where ``BarReader`` is declared.
     """
 
-    for path in sorted(INDICATORS.glob("*.py")):
+    for path in sorted(FEATURES.rglob("*.py")):
+        if path.name == "engine.py":
+            continue
         source = path.read_text(encoding="utf-8")
         assert "BarReader" not in source, f"{path.name} reaches the store's read protocol"
         assert "BarStore" not in source, f"{path.name} reaches the store"
