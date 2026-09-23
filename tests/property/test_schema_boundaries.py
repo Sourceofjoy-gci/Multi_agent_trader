@@ -294,27 +294,18 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
             swap_short_points_per_day=Decimal("-1"),
             triple_swap_weekday=2,
         ),
-        "trades": (
-            SimulatedTrade(
-                proposal_id="p-1",
-                side=Side.BUY,
-                lots=Decimal("0.10"),
-                entry_price=Decimal("1.10000"),
-                entry_at=AWARE,
-                exit_price=Decimal("1.10100"),
-                exit_at=AWARE + timedelta(minutes=12),
-                exit_kind=ExitKind.TIME,
-                gross_pnl=Decimal("100"),
-                commission=Decimal("7"),
-                swap=Decimal("-3"),
-                net_pnl=Decimal("90"),
-            ),
-        ),
+        "trades": (),  # filled in below: SimulatedTrade's own entry is not bound yet here
         "rejections": (),
         "bars_seen": 60,
         "net_pnl": Decimal("90"),
     },
 }
+
+BUILDERS[BacktestResult]["trades"] = (SimulatedTrade(**BUILDERS[SimulatedTrade]),)
+# One source of truth for a trade's shape: BUILDERS is not bound during its own
+# literal's evaluation, so this couldn't be `SimulatedTrade(**BUILDERS[SimulatedTrade])`
+# inline above -- it must be resolved after the dict exists instead of duplicating
+# SimulatedTrade's fields a second time.
 
 MODELS = sorted(BUILDERS, key=lambda model: model.__name__)
 
@@ -333,6 +324,20 @@ DATETIME_CASES = sorted(
 )
 
 
+UNIMPORTABLE_OFF_WINDOWS: frozenset[str] = frozenset(
+    {
+        # Imports ``MetaTrader5`` at module scope, and that package ships a
+        # ``sys_platform == 'win32'`` wheel only (pyproject.toml) -- it does
+        # not exist to import on the Linux CI job. This is the one module the
+        # package's own architecture guards (``brokers/mt5/__init__.py``'s
+        # docstring, ``tests/acceptance/test_phase1.py``'s ORDER_SEND_ALLOWED)
+        # allow to import it. Named here, not swallowed: an import failure
+        # outside this set is a real regression and must fail the test below.
+        "trading_house.brokers.mt5.terminal",
+    }
+)
+
+
 def _import_every_module() -> None:
     """Import the whole package so subclass discovery cannot miss a model.
 
@@ -341,12 +346,29 @@ def _import_every_module() -> None:
     other tests shared the process -- it passed alone and failed after
     ``tests/unit``, and Phase 6 shipped three unregistered models through the
     gap. Importing the package first removes the dependency on test ordering.
+
+    One module cannot be imported on every platform -- see
+    ``UNIMPORTABLE_OFF_WINDOWS``. Catching ``ImportError`` unconditionally and
+    moving on would reopen exactly the hole this file exists to close: a
+    module that quietly stops importing (for any reason, not just a missing
+    platform wheel) would hide its models again with nothing to say so. So a
+    failure is recorded, not swallowed, and checked against the declared set --
+    a failure outside it fails this test instead of vanishing silently.
     """
 
     import trading_house
 
+    skipped: set[str] = set()
     for module in pkgutil.walk_packages(trading_house.__path__, f"{trading_house.__name__}."):
-        importlib.import_module(module.name)
+        try:
+            importlib.import_module(module.name)
+        except ImportError:
+            skipped.add(module.name)
+
+    unexpected = skipped - UNIMPORTABLE_OFF_WINDOWS
+    assert not unexpected, (
+        f"unexpected import failure(s) during subclass discovery: {sorted(unexpected)}"
+    )
 
 
 def _canonical_models() -> set[type[BaseModel]]:
