@@ -291,7 +291,7 @@ def test_a_naive_moment_is_refused() -> None:
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/unit/features/indicators/test_session.py -q --no-cov`
+Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/unit/features/test_sessions.py -q --no-cov`
 Expected: FAIL with `ModuleNotFoundError: trading_house.features.indicators.session`.
 
 - [ ] **Step 3: Implement**
@@ -370,7 +370,7 @@ def preceding_session_window(as_of: datetime) -> tuple[Session, datetime, dateti
 
 - [ ] **Step 4: Run the tests**
 
-Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/unit/features/indicators/test_session.py -q --no-cov`
+Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/unit/features/test_sessions.py -q --no-cov`
 Expected: PASS.
 
 - [ ] **Step 5: Mutation**
