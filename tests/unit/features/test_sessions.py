@@ -5,10 +5,10 @@ import pytest
 
 from trading_house.core.errors import TimestampError
 from trading_house.features.sessions import (
+    Session,
     preceding_session_window,
     session_bounds,
     session_of,
-    Session,
 )
 
 UTC = ZoneInfo("UTC")
