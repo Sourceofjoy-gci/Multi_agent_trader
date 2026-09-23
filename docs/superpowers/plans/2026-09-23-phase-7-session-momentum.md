@@ -67,6 +67,8 @@
 
 **Background the implementer needs.** `_canonical_models()` walks `CanonicalModel.__subclasses__()`. That is *runtime* discovery: a subclass exists only once its module has been imported. Running `tests/property` alone never imports `research/backtest/`, so Phase 6's three models are invisible and the guard reports clean. They appear only when `tests/unit` runs first in the same process.
 
+**And the hole behind the blindness is real, not theoretical.** The controller checked: `FeatureSnapshot`, `SimulatedTrade` and `BacktestResult` are plain `CanonicalModel` subclasses. `CanonicalModel` is only `strict=True, frozen=True, extra="forbid"` — it carries no timezone validation. The normalisation lives on `Stamped.normalize_timestamp`, which none of the three inherits, and `result.py` contains no `field_validator` at all. **All three accept a naive datetime today.** So registering them in `BUILDERS` will make the naive-datetime test *fail*, correctly — and this task must close the hole, not merely make it visible.
+
 - [ ] **Step 1: Prove the hole exists, and record the proof**
 
 Run:
@@ -120,24 +122,35 @@ Expected: FAIL naming the same three models. The guard now tells the truth in is
 
 Follow the dict's existing style exactly. Each builder constructs a minimal valid instance. The three models and the datetime fields that make them qualify: `FeatureSnapshot` (`as_of`, `tick_time`), `SimulatedTrade` (`entry_at`, `exit_at`), `BacktestResult` (`start`, `end`). Read each model to get its required fields; reuse existing builders for nested models where the dict already has them.
 
-- [ ] **Step 5: Run the naive-datetime test and confirm it now covers them**
+- [ ] **Step 5: Watch the naive-datetime test fail, because the hole is real**
 
 Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/property -q --no-cov`
-Expected: PASS, with `test_naive_datetimes_are_rejected_everywhere` now parametrized over three more models than before. Report the before and after parameter counts.
+Expected: **FAIL** for the three newly covered models. They accept naive datetimes. Quote the failure — it is the finding, and a reader who sees only the final green suite would never know the hole existed.
 
-- [ ] **Step 6: Mutation — prove the naive-datetime check is no longer vacuous for them**
+- [ ] **Step 6: Close the hole**
 
-Pick one of the three models and remove the UTC-awareness validation its datetime field relies on (the shared `_PointInTime`/`Stamped` validator, or the field's own). Confirm the parametrized case for that model now fails, where before Task 1 it did not exist. Restore.
+Give the three models UTC-awareness validation on every datetime field. Prefer the mechanism already in the codebase over a new one: read `Stamped.normalize_timestamp` (`core/schemas.py:65`) and reuse its shape, or reuse `ensure_utc` from `core/clock.py` directly. Say which you chose and why.
 
-- [ ] **Step 7: Fix the documented test invocation**
+Do **not** make the three inherit `Stamped` — it carries `source`, `revision_id` and `quality_flags`, which none of them has any business declaring, and `extra="forbid"` means adding them changes every construction site.
+
+- [ ] **Step 7: Run it again and watch it pass**
+
+Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/property tests/unit/research -q --no-cov`
+Expected: PASS. Report the before and after parameter counts for `test_naive_datetimes_are_rejected_everywhere`.
+
+- [ ] **Step 8: Mutation — prove the new validation is what makes it pass**
+
+Remove the validation from one of the three models. Confirm that model's parametrized case fails and only it. Restore.
+
+- [ ] **Step 9: Fix the documented test invocation**
 
 `README.md` documents the test commands. Add `tests/property` to the invocation that runs `tests/unit tests/acceptance`, so the combination that exposes an ordering-dependent guard is the one people run. State in one sentence why the trees run together.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add tests/property/test_schema_boundaries.py README.md
-git commit -m "fix(tests): a model cannot hide from the naive-datetime guard by being unimported"
+git add tests/property/test_schema_boundaries.py src/trading_house/research/backtest/ README.md
+git commit -m "fix: three Phase 6 models accepted naive datetimes, and the guard could not see them"
 ```
 
 ---
@@ -465,7 +478,10 @@ Expected: FAIL with `AttributeError: 'FeatureEngine' object has no attribute 'pr
         """
 
         _session, start, end = preceding_session_window(as_of)
-        bars = [bar for bar in self._read(instrument_id, timeframe, as_of=as_of) if start <= bar.event_time < end]
+        # _read's signature is (instrument_id, timeframe, *, start, as_of) -- the
+        # window's own start is exactly the bound it wants, so no filtering of
+        # the lower edge is needed and the store reads no bar it must discard.
+        bars = [bar for bar in self._read(instrument_id, timeframe, start=start, as_of=as_of) if bar.event_time < end]
         if not bars:
             return None
         return (bars[-1].close - bars[0].close) / bars[0].close
@@ -1014,7 +1030,7 @@ A declared tolerance keeps the honesty: the run may be shorter than it claims, b
 ```python
 def test_a_defective_bar_within_tolerance_is_counted_and_skipped() -> None:
     bars = _ramp(40)
-    bars = (*bars[:20], bars[20].model_copy(update={"quality": BarQuality.SUSPECT}), *bars[21:])
+    bars = (*bars[:20], bars[20].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}), *bars[21:])
 
     result = _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.1"))
 
@@ -1025,7 +1041,7 @@ def test_a_defective_bar_within_tolerance_is_counted_and_skipped() -> None:
 def test_a_defective_fraction_above_tolerance_still_refuses() -> None:
     """The tolerance is a declared allowance, not a way to ignore bad data."""
 
-    bars = tuple(bar.model_copy(update={"quality": BarQuality.SUSPECT}) for bar in _ramp(40))
+    bars = tuple(bar.model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}) for bar in _ramp(40))
 
     with pytest.raises(BacktestRefused) as caught:
         _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.1"))
@@ -1038,7 +1054,7 @@ def test_the_default_tolerance_is_zero_so_phase_sixs_behaviour_is_unchanged() ->
     cannot be acquired by accident."""
 
     bars = _ramp(40)
-    bars = (*bars[:20], bars[20].model_copy(update={"quality": BarQuality.SUSPECT}), *bars[21:])
+    bars = (*bars[:20], bars[20].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}), *bars[21:])
 
     with pytest.raises(BacktestRefused):
         _run(bars=bars, strategy=ToyStrategy())
