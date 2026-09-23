@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from trading_house.core.errors import TimestampError
-from trading_house.features.indicators.session import Session, preceding_session_window, session_of
+from trading_house.features.sessions import Session, preceding_session_window, session_of
 
 UTC = ZoneInfo("UTC")
 

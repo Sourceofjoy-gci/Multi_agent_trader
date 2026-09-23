@@ -5,6 +5,10 @@ depend on the machine's tzdata version, and tzdata changes several times a
 year -- so a phase whose contract is byte-reproducibility cannot define its
 clock that way. The cost is that DST moves the effective local hour by one,
 which the strategy spec states as a limitation rather than absorbing.
+
+This module sits beside indicators/ rather than inside it because session
+windows are calendar logic that returns non-numeric types (Session enum,
+datetime), not numeric features on the money path.
 """
 
 from __future__ import annotations
