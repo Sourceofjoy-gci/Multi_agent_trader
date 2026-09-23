@@ -16,6 +16,7 @@ from typing import Protocol
 from trading_house.core.errors import InsufficientHistoryError
 from trading_house.features.indicators.spread import median_spread_points as _median_spread
 from trading_house.features.indicators.volatility import wilder_atr
+from trading_house.features.sessions import preceding_session_window, session_bounds, session_of
 from trading_house.marketdata.models import Bar, Coverage, Timeframe, duration
 
 WARMUP_MULTIPLE = 10
@@ -88,6 +89,66 @@ class FeatureEngine:
 
         bars = self._window(instrument_id, timeframe, count=window, as_of=as_of)
         return _median_spread(bars)
+
+    def prior_session_return(
+        self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
+    ) -> Decimal | None:
+        """Close-to-close return of the window that ended at or before ``as_of``.
+
+        ``None`` when that window holds no completed bars -- a holiday, a
+        data gap, or the first window in the store -- which is distinct from
+        a return of zero: a strategy must be able to tell a feed outage from
+        a flat night, or it stands down for the wrong reason.
+        """
+
+        _session, start, end = preceding_session_window(as_of)
+        # start is the window's own lower bound, so the store is asked for no
+        # bar the `event_time < end` filter below would discard anyway.
+        bars = [
+            bar
+            for bar in self._read(instrument_id, timeframe, start=start, as_of=as_of)
+            if bar.event_time < end
+        ]
+        if not bars:
+            return None
+        return (bars[-1].close - bars[0].close) / bars[0].close
+
+    def session_open_price(
+        self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
+    ) -> Decimal:
+        """Open of the first bar of the window containing ``as_of``."""
+
+        return self._current_session_bars(instrument_id, timeframe, as_of=as_of)[0].open
+
+    def bars_since_session_open(
+        self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
+    ) -> int:
+        """Zero on the window's first closed bar."""
+
+        return len(self._current_session_bars(instrument_id, timeframe, as_of=as_of)) - 1
+
+    def _current_session_bars(
+        self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
+    ) -> Sequence[Bar]:
+        """Bars of the window containing ``as_of``, known by ``as_of``.
+
+        Raises ``InsufficientHistoryError`` when empty: ``session_open_price``
+        has no sensible answer without a bar, and a caller only asks this
+        inside a window it is already in -- a window with nothing knowable
+        yet is a warm-up problem, the same family the guard in ``_window``
+        refuses for rather than inventing a placeholder answer.
+        """
+
+        session = session_of(as_of)
+        start, end = session_bounds(as_of, session)
+        bars = [
+            bar
+            for bar in self._read(instrument_id, timeframe, start=start, as_of=as_of)
+            if bar.event_time < end
+        ]
+        if not bars:
+            raise InsufficientHistoryError
+        return bars
 
     def _window(
         self,

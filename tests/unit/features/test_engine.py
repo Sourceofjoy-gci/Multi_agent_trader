@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -253,3 +254,164 @@ def test_a_weekend_gap_does_not_starve_the_window() -> None:
     as_of = store.all[-1].availability_time + timedelta(minutes=3)
 
     assert engine.atr("fx.eurusd", Timeframe.M1, period=14, as_of=as_of) > 0
+
+
+@dataclass(slots=True)
+class FakeBarReader:
+    """A ``BarReader`` over a list held in memory.
+
+    ``held`` is public on purpose. A test staging a store that changes its
+    mind between cycles assigns to it, and a private name would accept the
+    assignment silently while this fake went on serving the old bars --
+    which is how a test passes for a reason unrelated to what it checks.
+    """
+
+    held: tuple[Bar, ...]
+
+    def bars(
+        self,
+        instrument_id: str,
+        timeframe: Timeframe,
+        *,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        include_defective: bool = False,
+    ) -> tuple[Bar, ...]:
+        """``[start, end)`` by event time, knowable at ``as_of`` -- the real
+        store's contract, including its ``CoverageError`` on a start that
+        reaches further back than anything held."""
+
+        coverage = self.coverage(instrument_id, timeframe)
+        if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
+            raise CoverageError
+        return tuple(
+            bar
+            for bar in sorted(self.held, key=lambda bar: bar.event_time)
+            if bar.instrument_id == instrument_id
+            and bar.timeframe is timeframe
+            and start <= bar.event_time < end
+            and bar.availability_time <= as_of
+            and (include_defective or bar.quality is BarQuality.OK)
+        )
+
+    def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
+        matching = [
+            bar
+            for bar in self.held
+            if bar.instrument_id == instrument_id and bar.timeframe is timeframe
+        ]
+        return Coverage(
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            earliest_event_time=min((bar.event_time for bar in matching), default=None),
+            latest_event_time=max((bar.event_time for bar in matching), default=None),
+            latest_availability_time=max((bar.availability_time for bar in matching), default=None),
+            clean_bars=sum(1 for bar in matching if bar.quality is BarQuality.OK),
+            defective_bars=sum(1 for bar in matching if bar.quality is not BarQuality.OK),
+        )
+
+
+def _m15_bar(event_time: datetime, price: Decimal) -> Bar:
+    """A flat M15 bar: opens and closes at ``price``."""
+
+    return Bar(
+        instrument_id="fx.eurusd",
+        timeframe=Timeframe.M15,
+        event_time=event_time,
+        availability_time=event_time + duration(Timeframe.M15),
+        open=price,
+        high=price + Decimal("0.00010"),
+        low=price - Decimal("0.00010"),
+        close=price,
+        tick_volume=10,
+        spread=9,
+        real_volume=0,
+        quality=BarQuality.OK,
+    )
+
+
+def _asian_then_london() -> tuple[Bar, ...]:
+    """Two Asian M15 bars bracketing a 0.001 close-to-close return, then the
+    first bar of the following London session."""
+
+    return (
+        _m15_bar(datetime(2026, 9, 21, 0, 0, tzinfo=UTC), Decimal("1.10000")),
+        _m15_bar(datetime(2026, 9, 21, 6, 45, tzinfo=UTC), Decimal("1.10110")),
+        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),
+    )
+
+
+def _london_only() -> tuple[Bar, ...]:
+    """A bar the evening before, then a gap spanning the whole Asian window,
+    then London resumes -- the "data gap" case, not "nothing stored yet": a
+    truly empty store fails the read with ``CoverageError`` before
+    ``prior_session_return`` ever gets to decide, which is a different
+    failure than the one this fixture is for."""
+
+    return (
+        _m15_bar(datetime(2026, 9, 20, 23, 45, tzinfo=UTC), Decimal("1.09990")),
+        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),
+    )
+
+
+def _flat_asian_then_london() -> tuple[Bar, ...]:
+    """Asian closes exactly where it opened."""
+
+    return (
+        _m15_bar(datetime(2026, 9, 21, 0, 0, tzinfo=UTC), Decimal("1.10000")),
+        _m15_bar(datetime(2026, 9, 21, 6, 45, tzinfo=UTC), Decimal("1.10000")),
+        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10000")),
+    )
+
+
+def test_the_prior_session_return_is_close_to_close_over_the_preceding_window() -> None:
+    """At the London open the preceding window is the Asian session."""
+
+    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+
+    value = engine.prior_session_return(
+        "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+    )
+
+    # Asian window first close 1.10000, last close 1.10110 -> 0.001
+    assert value == Decimal("0.001")
+
+
+def test_a_preceding_window_with_no_bars_returns_none_not_zero() -> None:
+    """None means "no data", zero means "no movement", and a strategy must be
+    able to tell them apart -- otherwise a feed outage looks like a flat
+    night and the strategy silently stands down for the wrong reason."""
+
+    engine = FeatureEngine(FakeBarReader(_london_only()))
+
+    assert (
+        engine.prior_session_return(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+        is None
+    )
+
+
+def test_a_flat_preceding_window_returns_zero_not_none() -> None:
+    """The mirror of the case above, and the reason it cannot be one branch."""
+
+    engine = FeatureEngine(FakeBarReader(_flat_asian_then_london()))
+
+    assert engine.prior_session_return(
+        "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+    ) == Decimal(0)
+
+
+def test_the_session_open_price_and_bar_count_at_the_open() -> None:
+    """As of 07:15 the 07:00 London bar has just closed and is the only bar
+    the window can know about -- not 07:00 itself, the wall-clock instant
+    the session opens: a bar opening exactly at ``as_of`` cannot yet be
+    known then (``Bar`` requires ``availability_time > event_time``), so no
+    bar of a brand-new window is ever readable at the window's own start."""
+
+    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+    as_of = datetime(2026, 9, 21, 7, 15, tzinfo=UTC)
+
+    assert engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of) == Decimal("1.10120")
+    assert engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of) == 0
