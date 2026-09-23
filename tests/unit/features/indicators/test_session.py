@@ -1,10 +1,10 @@
 from datetime import datetime
-
-import pytest
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from trading_house.core.errors import TimestampError
-from trading_house.features.indicators.session import Session, session_of, preceding_session_window
+from trading_house.features.indicators.session import Session, preceding_session_window, session_of
 
 UTC = ZoneInfo("UTC")
 
@@ -14,8 +14,8 @@ UTC = ZoneInfo("UTC")
     [
         (0, Session.ASIAN),
         (6, Session.ASIAN),
-        (7, Session.LONDON),      # half-open: the boundary belongs to the later window
-        (13, Session.LONDON),     # the London/New York overlap resolves to London
+        (7, Session.LONDON),  # half-open: the boundary belongs to the later window
+        (13, Session.LONDON),  # the London/New York overlap resolves to London
         (16, Session.NEW_YORK),
         (20, Session.NEW_YORK),
         (21, Session.OFF),
