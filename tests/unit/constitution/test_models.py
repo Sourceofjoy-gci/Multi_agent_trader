@@ -84,6 +84,7 @@ def valid_data() -> dict[str, object]:
                     "max_overnight_positions": 6,
                     "max_weekend_exposure_pct": Decimal("15.0"),
                     "max_swap_cost_pct_of_expected_edge": Decimal("20.0"),
+                    "min_expected_edge_after_cost_bps": Decimal("2.0"),
                     "gap_risk_multiple": Decimal("3.0"),
                     "earnings_blackout_days": 0,
                 },
@@ -105,6 +106,7 @@ def valid_data() -> dict[str, object]:
                     "max_overnight_positions": 4,
                     "max_weekend_exposure_pct": Decimal("10.0"),
                     "max_swap_cost_pct_of_expected_edge": Decimal("15.0"),
+                    "min_expected_edge_after_cost_bps": Decimal("2.0"),
                     "gap_risk_multiple": Decimal("4.0"),
                     "earnings_blackout_days": 2,
                 },
@@ -126,6 +128,7 @@ def valid_data() -> dict[str, object]:
                     "max_overnight_positions": 2,
                     "max_weekend_exposure_pct": Decimal("25.0"),
                     "max_swap_cost_pct_of_expected_edge": Decimal("30.0"),
+                    "min_expected_edge_after_cost_bps": Decimal("2.0"),
                     "gap_risk_multiple": Decimal("5.0"),
                     "earnings_blackout_days": 0,
                 },
@@ -197,6 +200,7 @@ def test_checked_in_constitution_matches_spec() -> None:
     assert fx_swing.limits.max_overnight_positions == 6
     assert fx_swing.limits.max_weekend_exposure_pct == Decimal("15.0")
     assert fx_swing.limits.max_swap_cost_pct_of_expected_edge == Decimal("20.0")
+    assert fx_swing.limits.min_expected_edge_after_cost_bps == Decimal("2.0")
     assert fx_swing.limits.gap_risk_multiple == Decimal("3.0")
     assert fx_swing.limits.earnings_blackout_days == 0
 

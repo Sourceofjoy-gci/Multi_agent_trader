@@ -54,6 +54,7 @@ books:
       max_overnight_positions: 6
       max_weekend_exposure_pct: 15.0
       max_swap_cost_pct_of_expected_edge: 20.0
+      min_expected_edge_after_cost_bps: 2.0
       gap_risk_multiple: 3.0
       earnings_blackout_days: 0
   equity_swing:
@@ -73,6 +74,7 @@ books:
       max_overnight_positions: 4
       max_weekend_exposure_pct: 10.0
       max_swap_cost_pct_of_expected_edge: 15.0
+      min_expected_edge_after_cost_bps: 2.0
       gap_risk_multiple: 4.0
       earnings_blackout_days: 2
   sleeve:
@@ -92,6 +94,7 @@ books:
       max_overnight_positions: 2
       max_weekend_exposure_pct: 25.0
       max_swap_cost_pct_of_expected_edge: 30.0
+      min_expected_edge_after_cost_bps: 2.0
       gap_risk_multiple: 5.0
       earnings_blackout_days: 0
 firm:

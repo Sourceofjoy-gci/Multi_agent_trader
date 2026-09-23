@@ -61,16 +61,28 @@ class ScalpLimits(ConstitutionModel):
 
 
 class SwingLimits(ConstitutionModel):
+    """Swing-horizon budgets.
+
+    ``min_expected_edge_after_cost_bps`` is declared here as well as on
+    ``ScalpLimits`` because "do not take a trade you expect to lose money on"
+    is not a horizon-specific idea. It lived only on the scalp model until
+    Phase 7, where the first strategy to declare an expected return turned out
+    to be a swing strategy -- so the floor existed, and the one proposal in the
+    system it should have judged was the one it could not reach.
+    """
+
     horizon: Literal[Horizon.SWING]
     max_overnight_positions: PositiveInt
     max_weekend_exposure_pct: Percentage
     max_swap_cost_pct_of_expected_edge: Percentage
+    min_expected_edge_after_cost_bps: PositiveDecimal
     gap_risk_multiple: PositiveDecimal
     earnings_blackout_days: NonNegativeInt
 
     @field_validator(
         "max_weekend_exposure_pct",
         "max_swap_cost_pct_of_expected_edge",
+        "min_expected_edge_after_cost_bps",
         "gap_risk_multiple",
         mode="before",
     )
