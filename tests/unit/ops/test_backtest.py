@@ -102,8 +102,8 @@ def test_the_composed_backtester_shares_its_clock_with_its_risk_engine() -> None
     # the holding deadline. An exit kind that is not TIME means the simulator
     # resolved something this series cannot produce.
     assert (first.exit_kind, second.exit_kind) == (ExitKind.TIME, ExitKind.TIME)
-    assert (first.net_pnl, second.net_pnl) == (Decimal("-20.22"), Decimal("-20.22"))
-    assert result.net_pnl == Decimal("-40.44")
+    assert (first.net_pnl, second.net_pnl) == (Decimal("-23.59"), Decimal("-23.59"))
+    assert result.net_pnl == Decimal("-47.18")
 
 
 def test_the_toy_is_the_only_registered_strategy() -> None:

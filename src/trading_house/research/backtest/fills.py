@@ -54,17 +54,15 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
     half_spread = Decimal(bar.spread) * contract.point_size / _HALF
     raw_price = bar.open + half_spread if side is Side.BUY else bar.open - half_spread
     offset = slippage_price_offset(model=model, side=side, contract=contract, opening=True)
-    # The stamp is one bar later than the price. ``bar.open`` is the instant
-    # this fills at, but ``at`` is ``bar.availability_time`` -- that bar's
-    # close. So every ``entry_at`` and ``exit_at`` in a result misreports the
-    # fill instant by one bar, the engine's time stop honours
-    # ``max_holding_seconds`` as H plus one bar, and ``swap_cost`` sees a date
-    # pair shifted by the same amount. Plan-mandated -- the plan's own test
-    # demands this stamp -- and every known-answer number in this phase was
-    # derived against it, so correcting the stamps would move all of them.
-    # Carried to Phase 7 rather than fixed here; the README states the
-    # H-plus-one-bar effect so Phase 7 finds it rather than discovers it.
-    return Fill(price=raw_price + offset, at=bar.availability_time)
+    # ``at`` is the instant of the price, not the instant the bar became
+    # readable. ``bar.open`` is what this fills at, and the entry bar's
+    # ``event_time`` equals the producing snapshot's ``as_of`` -- the instant
+    # the strategy actually saw and decided on -- so ``event_time`` is the
+    # sound stamp. ``bar.availability_time`` is that bar's close, one whole
+    # bar later; stamping it there misreported every ``entry_at``/``exit_at``,
+    # gave the engine's time stop H plus one bar, and shifted ``swap_cost``'s
+    # date pair by the same bar (D-9).
+    return Fill(price=raw_price + offset, at=bar.event_time)
 
 
 def resolve_exit(
@@ -90,21 +88,21 @@ def resolve_exit(
         if bar.low <= stop:
             raw_price = min(stop, bar.open)
             return Exit(
-                kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.availability_time)
+                kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time)
             )
         if target is not None and bar.high >= target:
             return Exit(
-                kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.availability_time)
+                kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time)
             )
         return None
 
     if bar.high >= stop:
         raw_price = max(stop, bar.open)
         return Exit(
-            kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.availability_time)
+            kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time)
         )
     if target is not None and bar.low <= target:
         return Exit(
-            kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.availability_time)
+            kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time)
         )
     return None

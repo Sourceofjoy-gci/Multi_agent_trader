@@ -60,9 +60,9 @@ SPREAD_WINDOW = 10
 
 HOLDING_SECONDS = 660
 """Eleven minutes from an entry's stamped ``entry_at``, which is the entry
-bar's ``availability_time``. The deadline therefore lands on the open of the
-bar twelve bars after the one the entry filled on: entry on bar 21's open,
-exit on bar 33's open."""
+bar's ``event_time`` -- the instant its price is drawn from. The deadline
+therefore lands on the open of the bar exactly eleven bars after the one the
+entry filled on: entry on bar 21's open, exit on bar 32's open."""
 
 
 def ramp_price(index: int) -> Decimal:

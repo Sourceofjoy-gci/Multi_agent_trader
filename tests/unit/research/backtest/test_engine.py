@@ -37,33 +37,37 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     fills at the NEXT bar's open (bars 21 and 41), never the close that
     generated it -- bar 20 closes at 1.10020 while bar 21 opens at 1.10021, so
     the entry-price assertion below tells the two apart. Each is held to its
-    660-second deadline, which lands on the open of bar 33 and bar 53.
+    660-second (eleven-minute) deadline from its entry bar's ``event_time``,
+    which lands on the open of bar 32 and bar 52 -- eleven bars after the
+    entry bar, exactly what ``max_holding_seconds`` states.
 
     Every expectation is derived from the ramp's closed form and the fill rule,
     never from the simulator:
 
-        entry = ramp_price(21) + half spread,  exit = ramp_price(33) - half
+        entry = ramp_price(21) + half spread,  exit = ramp_price(32) - half
         stop distance = 0.00100 (the structural term is the widest of 8.2's
             four), so 100 ticks at $1 a tick a lot
         book equity = 100000 x 0.45, risked at 0.75% = $337.50
         lots = 337.50 / 100 = 3.375, floored to the 0.01 grid = 3.37
-        gross = 2 ticks x 3.37 = $6.74 a trade
+        gross = 1 tick x 3.37 = $3.37 a trade (ramp_price(32) - ramp_price(21)
+            is 11 points, less the two half-spreads crossed on entry and exit
+            -- 11 - 5 - 5 = 1 point)
         commission = 2 sides x 3.37 lots x $3.50 = $23.59 a trade
         swap = 0 (opened and closed the same calendar day)
-        net = 6.74 - 23.59 = -$16.85 a trade, -$33.70 over the run
+        net = 3.37 - 23.59 = -$20.22 a trade, -$40.44 over the run
     """
 
     result = _run(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
 
     assert [trade.exit_kind for trade in result.trades] == [ExitKind.TIME, ExitKind.TIME]
     assert result.trades[0].entry_price == ramp_price(21) + HALF_SPREAD
-    assert result.trades[0].exit_price == ramp_price(33) - HALF_SPREAD
+    assert result.trades[0].exit_price == ramp_price(32) - HALF_SPREAD
     assert result.trades[1].entry_price == ramp_price(41) + HALF_SPREAD
-    assert result.trades[1].exit_price == ramp_price(53) - HALF_SPREAD
+    assert result.trades[1].exit_price == ramp_price(52) - HALF_SPREAD
     # D-3: the lot size comes off the risk engine's decision. Sized against
     # firm equity instead of the book's 0.45 slice it would be 7.50 lots.
     assert [trade.lots for trade in result.trades] == [Decimal("3.37"), Decimal("3.37")]
-    assert result.trades[0].gross_pnl == Decimal("6.74")
+    assert result.trades[0].gross_pnl == Decimal("3.37")
     assert result.trades[0].commission == Decimal("23.59")
     assert result.trades[0].swap == Decimal(0)
     # The one line that carries the run's arithmetic. Restating it per trade
@@ -71,7 +75,7 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     # not produce and BacktestResult already refuses a net that is not the sum
     # of the trades', so every per-trade restatement is true by construction.
     # Only the hand-computed absolute can fail.
-    assert result.net_pnl == Decimal("-33.70")
+    assert result.net_pnl == Decimal("-40.44")
     assert result.bars_seen == 60
 
 
@@ -142,8 +146,8 @@ def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop(
     # of section 8.2's four, and stop_price quantises onto the tick grid.
     stop = ramp_price(FIRST_SNAPSHOT_BAR) - Decimal("0.00100")
     # Entry fills on bar 21's open and HOLDING_SECONDS lands the deadline on
-    # bar 33's open -- the same two bars the known-answer run above uses.
-    deadline_bar = 33
+    # bar 32's open -- the same two bars the known-answer run above uses.
+    deadline_bar = 32
     dipped = (
         *bars[:deadline_bar],
         bars[deadline_bar].model_copy(update={"low": stop - POINT}),
@@ -154,7 +158,7 @@ def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop(
 
     assert [trade.exit_kind for trade in result.trades] == [ExitKind.STOP]
     assert result.trades[0].exit_price == stop
-    assert result.trades[0].exit_at == bars[deadline_bar].availability_time
+    assert result.trades[0].exit_at == bars[deadline_bar].event_time
 
 
 def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None:

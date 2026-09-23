@@ -20,12 +20,13 @@ def _bar(
     close: Decimal | None = None,
     spread: int = 10,
     quality: BarQuality = BarQuality.OK,
+    event_time: datetime = NOW,
 ) -> Bar:
     return Bar(
         instrument_id="fx.eurusd",
         timeframe=Timeframe.M1,
-        event_time=NOW,
-        availability_time=NOW + duration(Timeframe.M1),
+        event_time=event_time,
+        availability_time=event_time + duration(Timeframe.M1),
         open=open,
         high=high if high is not None else open + _TEN_POINTS,
         low=low if low is not None else open - _TEN_POINTS,
@@ -71,6 +72,23 @@ def _zero_slip(**overrides: object) -> CostModel:
     return CostModel(**{**defaults, **overrides})  # type: ignore[arg-type]
 
 
+def test_a_fill_is_stamped_at_the_instant_of_its_price() -> None:
+    """``at`` is when the fill happened, not when the bar became readable.
+
+    ``entry_fill`` prices at the bar's OPEN, so stamping availability_time --
+    one whole bar later -- misreports the fill instant, and the engine's
+    deadline arithmetic inherits the error as a hold one bar longer than the
+    strategy declared.
+    """
+
+    bar = _bar(event_time=datetime(2026, 9, 21, 9, 0, tzinfo=UTC), open=Decimal("1.10000"))
+
+    fill = entry_fill(bar=bar, side=Side.BUY, contract=_contract(), model=_zero_slip())
+
+    assert fill.at == bar.event_time
+    assert fill.at != bar.availability_time
+
+
 def test_an_entry_fills_at_the_next_bars_open_plus_half_the_spread() -> None:
     """Section 11.1's named violation is executing at the same close that
     generated the signal. The bar passed here is already the NEXT one; the
@@ -80,7 +98,7 @@ def test_an_entry_fills_at_the_next_bars_open_plus_half_the_spread() -> None:
     fill = entry_fill(bar=bar, side=Side.BUY, contract=_contract(), model=_zero_slip())
 
     assert fill.price == Decimal("1.10010")  # half of 20 points at 0.00001
-    assert fill.at == bar.availability_time
+    assert fill.at == bar.event_time
 
 
 def test_a_stop_gapped_through_fills_at_the_open_not_the_stop() -> None:
@@ -213,7 +231,7 @@ def test_a_sell_target_gapped_past_fills_at_the_target_never_better() -> None:
     assert exit_ is not None
     assert exit_.kind is ExitKind.TARGET
     assert exit_.fill.price == Decimal("1.10500")  # the target, NOT 1.10000 or 1.09900
-    assert exit_.fill.at == bar.availability_time
+    assert exit_.fill.at == bar.event_time
 
 
 _FOUR_POINTS = Decimal(4) * Decimal("0.00001")
