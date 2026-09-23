@@ -4,7 +4,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from trading_house.core.errors import TimestampError
-from trading_house.features.sessions import Session, preceding_session_window, session_of
+from trading_house.features.sessions import (
+    preceding_session_window,
+    session_bounds,
+    session_of,
+    Session,
+)
 
 UTC = ZoneInfo("UTC")
 
@@ -49,3 +54,38 @@ def test_the_window_preceding_the_london_open_is_the_asian_session() -> None:
 def test_a_naive_moment_is_refused() -> None:
     with pytest.raises(TimestampError):
         session_of(datetime(2026, 9, 21, 7, 0))
+
+
+def test_the_window_preceding_early_asian_crosses_midnight() -> None:
+    """At 00:30 UTC the preceding window is the previous day's New York session.
+
+    This tests the cross-midnight lookback (offset=-1 branch) that the strategy
+    signal depends on. At 00:30, offset=0 finds only Asian (started at 00:00,
+    ends at 07:00), which is *later* than the offset=-1 New York (previous day,
+    ended at 21:00). The max() on end time selects New York.
+    """
+
+    session, start, end = preceding_session_window(datetime(2026, 9, 21, 0, 30, tzinfo=UTC))
+
+    assert session is Session.NEW_YORK
+    assert start == datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    assert end == datetime(2026, 9, 20, 21, 0, tzinfo=UTC)
+
+
+def test_session_bounds_for_london() -> None:
+    start, end = session_bounds(datetime(2026, 9, 21, 13, 0, tzinfo=UTC), Session.LONDON)
+
+    assert start == datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+    assert end == datetime(2026, 9, 21, 16, 0, tzinfo=UTC)
+
+
+def test_session_bounds_for_new_york() -> None:
+    start, end = session_bounds(datetime(2026, 9, 21, 13, 0, tzinfo=UTC), Session.NEW_YORK)
+
+    assert start == datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
+    assert end == datetime(2026, 9, 21, 21, 0, tzinfo=UTC)
+
+
+def test_session_bounds_rejects_off() -> None:
+    with pytest.raises(ValueError, match="OFF is not a window with bounds"):
+        session_bounds(datetime(2026, 9, 21, 22, 0, tzinfo=UTC), Session.OFF)
