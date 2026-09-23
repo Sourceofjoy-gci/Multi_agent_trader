@@ -14,8 +14,10 @@ from decimal import Decimal
 from enum import Enum
 from typing import Self
 
-from pydantic import NonNegativeInt, model_validator
+from pydantic import NonNegativeInt, field_validator, model_validator
 
+from trading_house.core.clock import ensure_utc
+from trading_house.core.errors import TimestampError
 from trading_house.core.schemas import Side
 from trading_house.core.values import CanonicalModel, InstrumentId, NonEmptyStr
 from trading_house.marketdata.models import Timeframe
@@ -66,6 +68,14 @@ class SimulatedTrade(CanonicalModel):
     swap: Decimal
     net_pnl: Decimal
 
+    @field_validator("entry_at", "exit_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
+
     @model_validator(mode="after")
     def net_reconciles_with_its_own_terms(self) -> Self:
         if self.net_pnl != self.gross_pnl - self.commission + self.swap:
@@ -99,6 +109,14 @@ class BacktestResult(CanonicalModel):
     rejections: tuple[tuple[NonEmptyStr, ...], ...]  # D-8: each decision's reasons
     bars_seen: NonNegativeInt
     net_pnl: Decimal
+
+    @field_validator("start", "end")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
 
     @model_validator(mode="after")
     def net_pnl_reconciles_with_trades(self) -> Self:

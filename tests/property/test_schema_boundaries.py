@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, get_args
@@ -40,6 +42,10 @@ from trading_house.marketdata.models import (
     Timeframe,
 )
 from trading_house.memory.models import AgentBelief, MemoryStore, ObservedFact, WriterKind
+from trading_house.research.backtest.costs import CostModel
+from trading_house.research.backtest.fills import ExitKind
+from trading_house.research.backtest.result import BacktestResult, SimulatedTrade
+from trading_house.research.backtest.snapshot import FeatureSnapshot
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
@@ -235,6 +241,79 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "outcome": IngestOutcome.COMPLETE,
         "detail": None,
     },
+    FeatureSnapshot: {
+        "as_of": AWARE + timedelta(minutes=1),
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.M1,
+        "bar": Bar(
+            instrument_id="fx.eurusd",
+            timeframe=Timeframe.M1,
+            event_time=AWARE,
+            availability_time=AWARE + timedelta(minutes=1),
+            open=Decimal("1.10000"),
+            high=Decimal("1.10050"),
+            low=Decimal("1.09950"),
+            close=Decimal("1.10020"),
+            tick_volume=42,
+            spread=9,
+            real_volume=0,
+            quality=BarQuality.OK,
+        ),
+        "atr": Decimal("0.00050"),
+        "median_spread_points": Decimal("9"),
+        "tick_spread_points": Decimal("9"),
+        "tick_time": AWARE + timedelta(minutes=1),
+    },
+    SimulatedTrade: {
+        "proposal_id": "p-1",
+        "side": Side.BUY,
+        "lots": Decimal("0.10"),
+        "entry_price": Decimal("1.10000"),
+        "entry_at": AWARE,
+        "exit_price": Decimal("1.10100"),
+        "exit_at": AWARE + timedelta(minutes=12),
+        "exit_kind": ExitKind.TIME,
+        "gross_pnl": Decimal("100"),
+        "commission": Decimal("7"),
+        "swap": Decimal("-3"),
+        "net_pnl": Decimal("90"),
+    },
+    BacktestResult: {
+        "run_id": "run-1",
+        "strategy_id": "strat-1",
+        "strategy_version": "v1",
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.M1,
+        "start": AWARE,
+        "end": AWARE + timedelta(hours=1),
+        "firm_equity": Decimal("100000"),
+        "cost_model": CostModel(
+            commission_per_lot_per_side=Decimal("3.50"),
+            slippage_points_per_side=Decimal("1"),
+            swap_long_points_per_day=Decimal("-1"),
+            swap_short_points_per_day=Decimal("-1"),
+            triple_swap_weekday=2,
+        ),
+        "trades": (
+            SimulatedTrade(
+                proposal_id="p-1",
+                side=Side.BUY,
+                lots=Decimal("0.10"),
+                entry_price=Decimal("1.10000"),
+                entry_at=AWARE,
+                exit_price=Decimal("1.10100"),
+                exit_at=AWARE + timedelta(minutes=12),
+                exit_kind=ExitKind.TIME,
+                gross_pnl=Decimal("100"),
+                commission=Decimal("7"),
+                swap=Decimal("-3"),
+                net_pnl=Decimal("90"),
+            ),
+        ),
+        "rejections": (),
+        "bars_seen": 60,
+        "net_pnl": Decimal("90"),
+    },
 }
 
 MODELS = sorted(BUILDERS, key=lambda model: model.__name__)
@@ -254,7 +333,24 @@ DATETIME_CASES = sorted(
 )
 
 
+def _import_every_module() -> None:
+    """Import the whole package so subclass discovery cannot miss a model.
+
+    ``CanonicalModel.__subclasses__()`` only sees classes whose module has been
+    imported. That made this file's guard answer differently depending on which
+    other tests shared the process -- it passed alone and failed after
+    ``tests/unit``, and Phase 6 shipped three unregistered models through the
+    gap. Importing the package first removes the dependency on test ordering.
+    """
+
+    import trading_house
+
+    for module in pkgutil.walk_packages(trading_house.__path__, f"{trading_house.__name__}."):
+        importlib.import_module(module.name)
+
+
 def _canonical_models() -> set[type[BaseModel]]:
+    _import_every_module()
     pending: list[type[BaseModel]] = [CanonicalModel]
     found: set[type[BaseModel]] = set()
     while pending:

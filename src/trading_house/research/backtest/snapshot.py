@@ -12,8 +12,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Self
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 
+from trading_house.core.clock import ensure_utc
+from trading_house.core.errors import TimestampError
 from trading_house.core.values import CanonicalModel, InstrumentId
 from trading_house.marketdata.models import Bar, Timeframe, duration
 
@@ -42,6 +44,14 @@ class FeatureSnapshot(CanonicalModel):
     median_spread_points: Decimal
     tick_spread_points: Decimal
     tick_time: datetime
+
+    @field_validator("as_of", "tick_time")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        try:
+            return ensure_utc(value)
+        except TimestampError as error:
+            raise ValueError(str(error)) from error
 
     @model_validator(mode="after")
     def tick_fields_match_the_closing_bar(self) -> Self:
