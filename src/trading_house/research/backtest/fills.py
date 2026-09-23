@@ -55,13 +55,17 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
     raw_price = bar.open + half_spread if side is Side.BUY else bar.open - half_spread
     offset = slippage_price_offset(model=model, side=side, contract=contract, opening=True)
     # ``at`` is the instant of the price, not the instant the bar became
-    # readable. ``bar.open`` is what this fills at, and the entry bar's
-    # ``event_time`` equals the producing snapshot's ``as_of`` -- the instant
-    # the strategy actually saw and decided on -- so ``event_time`` is the
-    # sound stamp. ``bar.availability_time`` is that bar's close, one whole
-    # bar later; stamping it there misreported every ``entry_at``/``exit_at``,
-    # gave the engine's time stop H plus one bar, and shifted ``swap_cost``'s
-    # date pair by the same bar (D-9).
+    # readable. ``bar.open`` is what this fills at, and ``bar.event_time`` is
+    # definitionally the instant that open price existed at -- it does not
+    # need to equal any snapshot's ``as_of``, and it need not be the bar
+    # immediately after the one that produced the signal: the store can (and
+    # does, across a weekend) skip bars, so the entry bar can sit any number
+    # of bars past the snapshot. ``event_time`` is sound regardless, because
+    # it names its own bar's price, not a distance from the signal.
+    # ``bar.availability_time`` is that bar's close, one whole bar later;
+    # stamping it there misreported every ``entry_at``/``exit_at``, gave the
+    # engine's time stop H plus one bar, and shifted ``swap_cost``'s date pair
+    # by the same bar (D-9).
     return Fill(price=raw_price + offset, at=bar.event_time)
 
 

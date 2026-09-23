@@ -156,6 +156,7 @@ def test_a_target_gapped_past_fills_at_the_target_never_better() -> None:
     assert exit_ is not None
     assert exit_.kind is ExitKind.TARGET
     assert exit_.fill.price == Decimal("1.10500")  # the target, NOT 1.11000
+    assert exit_.fill.at == bar.event_time
 
 
 def test_a_bar_touching_both_resolves_to_the_stop() -> None:
@@ -211,6 +212,7 @@ def test_the_same_rules_hold_mirrored_for_a_sell() -> None:
     assert exit_ is not None
     assert exit_.kind is ExitKind.STOP
     assert exit_.fill.price == Decimal("1.11000")  # gapped up through a sell's stop
+    assert exit_.fill.at == bar.event_time
 
 
 def test_a_sell_target_gapped_past_fills_at_the_target_never_better() -> None:
