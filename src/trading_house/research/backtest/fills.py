@@ -87,22 +87,14 @@ def resolve_exit(
     if side is Side.BUY:
         if bar.low <= stop:
             raw_price = min(stop, bar.open)
-            return Exit(
-                kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time)
-            )
+            return Exit(kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time))
         if target is not None and bar.high >= target:
-            return Exit(
-                kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time)
-            )
+            return Exit(kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time))
         return None
 
     if bar.high >= stop:
         raw_price = max(stop, bar.open)
-        return Exit(
-            kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time)
-        )
+        return Exit(kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time))
     if target is not None and bar.low <= target:
-        return Exit(
-            kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time)
-        )
+        return Exit(kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time))
     return None
