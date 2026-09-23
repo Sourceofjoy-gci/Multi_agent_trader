@@ -1110,7 +1110,11 @@ git commit -m "feat(backtest): a declared tolerance for defective bars"
 
 `trail_decision` is `NonEmptyStr` and starts as a statement that the A/B has not yet run — **not** an empty string. A spec that cannot say what its trail decision is must say that, because a blank field reads as an answer.
 
-**The entry rule, to implement exactly** (spec §4.2): on the first closed bar whose `session` is `LONDON` and whose `bars_since_session_open` is `0`, if `prior_session_return` is neither `None` nor zero, propose a trade in the direction of its sign, with `max_holding_seconds` equal to the seconds from the bar's `event_time` to 16:00 UTC that day.
+**The entry rule, to implement exactly** (spec §4.2): on the first closed bar whose `session` is `LONDON` and whose `bars_since_session_open` is `0`, if `prior_session_return` is neither `None` nor zero, propose a trade in the direction of its sign, with `max_holding_seconds` equal to the seconds from **the bar the entry will fill on** to 16:00 UTC that day — which is the snapshot bar's `event_time` plus one timeframe duration, **not** the snapshot bar's own `event_time`.
+
+**Why that distinction is the whole of this rule's arithmetic.** `engine.py:22` queues a signal "to fill on the next bar", `engine.py:381` sets `deadline = fill.at + max_holding_seconds`, and `fill.at` is the fill bar's `event_time`. A snapshot whose bar opens at 07:00 is read at `as_of = 07:15` — the bar's own `availability_time`, because a bar cannot be known at the instant it opens — and the entry fills on the next bar, at 07:15. Measuring the horizon from 07:00 therefore sets a deadline of 16:15 and holds one bar past the London close the rule exists to stop at.
+
+On M15 the correct value is `16:00 − 07:15 = 31500` seconds. Derive it from the fill bar rather than hard-coding it, so a different timeframe stays correct. The spec's §4.2 states the right basis ("the entry bar") and then gives 32400, which is the same error one document earlier; the basis is what binds.
 
 **Import boundary.** `strategies/` may import `core/`, `features/` and `risk/` only. In particular it may **not** import `research/` — so `FeatureSnapshot` and `ExitPolicy`, which live in `research/backtest/`, are a problem. **Resolve it by moving both to `core/`** as part of this task: `FeatureSnapshot` to `src/trading_house/core/snapshot.py` and the `ExitPolicy` union to `src/trading_house/core/exits.py`, re-exported from their old locations so nothing else breaks. Report this as the structural consequence it is; if you judge a different resolution better, say so with reasoning before implementing it.
 
@@ -1152,7 +1156,8 @@ def test_a_proposal_is_made_at_the_london_open_in_the_direction_of_the_night() -
 
     assert proposal is not None
     assert proposal.side is Side.BUY
-    assert proposal.max_holding_seconds == 9 * 3600
+    # 16:00 minus the 07:15 fill bar, not minus the 07:00 snapshot bar.
+    assert proposal.max_holding_seconds == 31500
 
 
 def test_a_negative_night_proposes_a_sell() -> None:
