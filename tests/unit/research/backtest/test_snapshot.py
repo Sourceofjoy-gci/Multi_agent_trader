@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -62,6 +62,29 @@ def test_the_snapshot_ties_its_tick_fields_to_the_bar_that_closed() -> None:
     assert snapshot.tick_spread_points == Decimal(17)
     assert snapshot.tick_time == snapshot.bar.availability_time
     assert snapshot.tick_time == snapshot.as_of
+
+
+def test_a_non_utc_but_consistent_triple_is_still_normalized_to_utc() -> None:
+    """I-10 is UTC-awareness, not merely naive-rejection -- a distinction the
+    cross-check above cannot see. ``tick_fields_match_the_closing_bar`` compares
+    datetimes with ``==``, which Python resolves by instant regardless of
+    ``tzinfo``, so a ``tick_time``/``as_of`` pair that agrees with the bar's
+    ``availability_time`` at a non-UTC offset satisfies that check without ever
+    exercising ``normalize_timestamp``. This is the case the naive-datetime
+    property test cannot reach either, since it only ever flips one field to
+    naive at a time. Assert the *stored* values are UTC, not merely equal."""
+
+    same_instant_plus_two = NOW.astimezone(timezone(timedelta(hours=2)))
+
+    snapshot = _snapshot(
+        spread=17,
+        as_of=same_instant_plus_two,
+        availability_time=same_instant_plus_two,
+        tick_time=same_instant_plus_two,
+    )
+
+    assert snapshot.as_of.tzinfo is UTC
+    assert snapshot.tick_time.tzinfo is UTC
 
 
 def test_a_snapshot_whose_tick_fields_disagree_with_its_bar_is_refused() -> None:
