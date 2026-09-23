@@ -33,7 +33,7 @@
 
 | File | Responsibility |
 |---|---|
-| `src/trading_house/features/indicators/session.py` | **New.** `Session` enum and the pure window arithmetic. No bar access. |
+| `src/trading_house/features/sessions.py` | **New.** `Session` enum and the pure window arithmetic. No bar access. A sibling of `indicators/`, not inside it: `tests/acceptance/test_phase2.py` requires every public function under `indicators/` to return `Decimal`, because indicators feed stop distance and then lot size. Session arithmetic returns an enum and datetimes and is not on that money path. |
 | `src/trading_house/features/engine.py` | Gains three session feature methods. Still the only holder of the bar store. |
 | `src/trading_house/research/backtest/snapshot.py` | `FeatureSnapshot` gains four named fields. |
 | `src/trading_house/research/backtest/fills.py` | Fill timestamps corrected (D-9). |
@@ -227,8 +227,8 @@ git commit -m "fix(backtest): stamp a fill at the instant of its price"
 ### Task 3: Session windows
 
 **Files:**
-- Create: `src/trading_house/features/indicators/session.py`
-- Test: `tests/unit/features/indicators/test_session.py`
+- Create: `src/trading_house/features/sessions.py`
+- Test: `tests/unit/features/test_sessions.py`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -380,7 +380,7 @@ Reverse the first two entries of `_WINDOWS` so New York precedes London. Confirm
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/trading_house/features/indicators/session.py tests/unit/features/
+git add src/trading_house/features/sessions.py tests/unit/features/
 git commit -m "feat(features): session windows, fixed in UTC"
 ```
 
