@@ -745,6 +745,14 @@ meaningful with the integration tests included — without them the repository
 measures about 82%, so the Windows CI job runs `-m "not integration" --no-cov`
 and the gate is enforced on Linux.
 
+Never scope a run to `tests/property` alone: `test_schema_boundaries.py`'s
+naive-datetime guard discovers canonical models by walking
+`CanonicalModel.__subclasses__()`, which only sees a model once its module has
+been imported, so `tests/property` run by itself can pass without ever
+importing — and therefore never checking — a model that only `tests/unit`
+imports; run `tests/unit` and `tests/property` together, as both commands
+above already do by covering the whole `tests/` tree in one process.
+
 ### Test layers
 
 | Path | Layer |
