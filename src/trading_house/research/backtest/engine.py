@@ -205,6 +205,7 @@ class Backtester:
         position: _Position | None = None
         queued: _Signal | None = None
         bars_seen = 0
+        snapshots_skipped = 0
 
         for bar in self._replay_bars(request):
             if bar.quality is not BarQuality.OK:
@@ -224,6 +225,7 @@ class Backtester:
             self._clock.instant = as_of
             snapshot = self._snapshot(request, bar, as_of)
             if snapshot is None:
+                snapshots_skipped += 1
                 continue
             proposal = strategy.evaluate(snapshot)
             if proposal is None:
@@ -275,7 +277,11 @@ class Backtester:
         # come from the range's edge rather than from anything the position's
         # own rules asked for. An unfinished trade is not a result.
         return self._result(
-            request, trades=tuple(trades), rejections=tuple(rejections), bars_seen=bars_seen
+            request,
+            trades=tuple(trades),
+            rejections=tuple(rejections),
+            bars_seen=bars_seen,
+            snapshots_skipped=snapshots_skipped,
         )
 
     def _refuse_outside_coverage(self, request: BacktestRequest) -> None:
@@ -344,19 +350,23 @@ class Backtester:
         history than an indicator's fixed window needs, and at the start of a
         range that is the normal case, not a fault. No features at an instant
         means no decision at that instant. ``session_open_price`` and
-        ``bars_since_session_open`` extend the same rule to a session's own
-        opening bars: both raise ``InsufficientHistoryError`` -- never a bare
-        ``None`` or a guessed answer -- when the current window has no closed
-        bars yet, which happens at the very start of every session and is
-        exactly as ordinary as the ATR and spread windows warming up. This
-        loop treats all four the same way: skip the bar, try again next bar.
-        The alternative of refusing the whole run would make an otherwise
-        healthy multi-year replay fail at its very first session open, and
-        the alternative of inventing a placeholder session-open price would
-        be the guess the store's own author refused to make one call down.
-        ``prior_session_return`` never raises -- its own ``None`` already
-        distinguishes an outage from a flat night, so it is read
-        unconditionally.
+        ``bars_since_session_open`` extend the same rule: both raise
+        ``InsufficientHistoryError`` -- never a bare ``None`` or a guessed
+        answer -- for any of three reasons, none of which is "the very start
+        of every session" (a session after the first in the store's history
+        already has bars behind it): the current window has no closed bars
+        yet (the store's whole history, or an interior gap, not a routine
+        per-session event), the store's coverage only starts partway through
+        it, or the reference bar falls in ``Session.OFF``, which has no
+        window at all. This loop treats all of these the same way as the ATR
+        and spread windows warming up: skip the bar, try again next bar. The
+        alternative of refusing the whole run would make an otherwise
+        healthy multi-year replay fail the first time it reaches OFF
+        hours -- which is daily. The alternative of inventing a placeholder
+        session-open price would be the guess the store's own author refused
+        to make one call down. ``prior_session_return`` never raises -- its
+        own ``None`` already distinguishes an outage from a flat night, so
+        it is read unconditionally.
         """
 
         try:
@@ -509,6 +519,7 @@ class Backtester:
         trades: tuple[SimulatedTrade, ...],
         rejections: tuple[tuple[str, ...], ...],
         bars_seen: int,
+        snapshots_skipped: int,
     ) -> BacktestResult:
         return BacktestResult(
             run_id=self._run_id(request),
@@ -523,6 +534,7 @@ class Backtester:
             trades=trades,
             rejections=rejections,
             bars_seen=bars_seen,
+            snapshots_skipped=snapshots_skipped,
             net_pnl=sum((trade.net_pnl for trade in trades), Decimal(0)),
         )
 

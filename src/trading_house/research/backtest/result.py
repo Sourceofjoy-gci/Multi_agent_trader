@@ -108,6 +108,16 @@ class BacktestResult(CanonicalModel):
     trades: tuple[SimulatedTrade, ...]
     rejections: tuple[tuple[NonEmptyStr, ...], ...]  # D-8: each decision's reasons
     bars_seen: NonNegativeInt
+    # A bar the loop saw but for which no FeatureSnapshot was built -- an ATR
+    # or spread window still warming up, a session the store only partly
+    # covers, or a reference bar in Session.OFF. Counted separately from
+    # bars_seen so a run skipping real hours of every day by design (every
+    # session close, every OFF window) stays distinguishable from one where
+    # the feature engine silently failed over the same range: both would
+    # otherwise report a plausible-looking bars_seen with no way to tell them
+    # apart. Task 9 extends this model with defective_bars on the same
+    # pattern.
+    snapshots_skipped: NonNegativeInt
     net_pnl: Decimal
 
     @field_validator("start", "end")

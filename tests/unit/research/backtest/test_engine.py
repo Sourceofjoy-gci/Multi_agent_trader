@@ -152,6 +152,51 @@ def test_a_session_the_store_only_partly_covers_is_skipped_not_refused() -> None
     assert result.bars_seen == 30
 
 
+def test_a_run_crossing_the_off_window_completes_and_counts_the_skips() -> None:
+    """C1 + C2. Between 21:00 and midnight UTC a bar's reference session is
+    ``Session.OFF``, which has no window -- before the fix,
+    ``_current_session_bars`` passed ``as_of`` straight to ``session_bounds``
+    and its bare ``ValueError`` propagated out of ``Backtester.run()``
+    uncaught, since the loop only ever catches ``InsufficientHistoryError``.
+    Every realistic multi-day backtest crosses 21:00 UTC daily.
+
+    The ramp starts at ``ORIGIN`` (07:00, London's own boundary -- the
+    default start, so London and New York are both fully covered, including
+    the 12:00-16:00 overlap that resolves to London) and runs to 21:10, ten
+    minutes into OFF. The run must complete rather than crash. The twenty
+    warm-up bars (the ATR window filling) and the eleven OFF bars (21:00
+    through 21:10) are exactly what ``snapshots_skipped`` (C2) exists to
+    make visible: without it, a run skipping real hours of every day by
+    design looks identical to one where the feature engine silently failed
+    over the same range. Verified directly (not just asserted here): every
+    bar strictly between the warm-up and 21:00 produces a real snapshot,
+    confirming the only skips are the two expected, contiguous ranges.
+    """
+
+    bars = _ramp(851)
+
+    result = _run(bars=bars, strategy=ToyStrategy(every_n=10_000))
+
+    assert result.bars_seen == 851
+    assert result.snapshots_skipped == 31  # 20 warm-up + 11 OFF (21:00-21:10)
+
+
+def test_snapshots_skipped_counts_only_the_warmup_when_no_session_is_involved() -> None:
+    """The plainest case, with no OFF hours anywhere in the fixture: every one
+    of the first ``FIRST_SNAPSHOT_BAR`` bars produces no snapshot because the
+    ATR window has not filled yet, and ``snapshots_skipped`` must count
+    exactly those and nothing else -- not bars where a proposal was simply
+    not made (the loop's other three ``continue`` paths all run after a
+    snapshot was already built)."""
+
+    bars = _ramp(30)
+
+    result = _run(bars=bars, strategy=ToyStrategy(every_n=1))
+
+    assert result.snapshots_skipped == FIRST_SNAPSHOT_BAR
+    assert result.bars_seen == 30
+
+
 def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop() -> None:
     """The engine's stop path, and the order ``_close_if_done`` claims.
 

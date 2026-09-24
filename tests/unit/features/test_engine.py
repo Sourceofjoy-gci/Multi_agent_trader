@@ -342,6 +342,14 @@ def _asian_then_london() -> tuple[Bar, ...]:
     )
 
 
+def _asian_only() -> tuple[Bar, ...]:
+    """The Asian session's own two bars, with London not yet ingested at
+    all -- as opposed to ``_asian_then_london``'s three, where London's
+    first bar already exists by the time anything asks about it."""
+
+    return _asian_then_london()[:2]
+
+
 def _london_only() -> tuple[Bar, ...]:
     """A bar the evening before, then a gap spanning the whole Asian window,
     then London resumes -- the "data gap" case, not "nothing stored yet": a
@@ -435,28 +443,44 @@ def test_the_session_open_price_and_bar_count_at_the_open() -> None:
     assert engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of) == 0
 
 
-def test_session_open_price_refuses_at_the_windows_own_start() -> None:
-    """As of 07:00 exactly, the London window's first bar has not closed --
-    the same fact that made the test above use 07:15. This exercises the
-    original ``not bars`` refusal in ``_current_session_bars``, which had no
-    test even though an ordinary caller reaches it on any session-boundary
-    ``as_of``."""
+def test_session_open_price_at_the_windows_own_start_resolves_to_the_preceding_session() -> None:
+    """I2 superseded this test's original premise. As of 07:00 exactly, the
+    bar that just closed is 06:45-07:00 -- Asian's own last bar, not
+    London's first -- because the engine keys off the reference bar
+    (``as_of - duration``), not off ``as_of`` itself. Before that fix this
+    raised ``InsufficientHistoryError`` on the mistaken belief that 07:00
+    meant "London has just opened"; now it correctly answers with Asian's
+    own open, matching ``FeatureSnapshot.session`` for the same bar, which
+    ``session_of(bar.event_time)`` also resolves to Asian."""
 
     engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+    as_of = datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+
+    assert engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of) == Decimal("1.10000")
+    assert engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of) == 1
+
+
+def test_session_open_price_refuses_when_the_new_session_has_no_bars_yet() -> None:
+    """The genuine ``not bars`` case under reference-keyed sessions: London
+    has not produced a single bar in the store yet, even though coverage
+    nominally reaches back far enough (Asian's own bars) to clear the
+    partial-coverage guard. This is what an ordinary caller reaches at a
+    session boundary now -- not "the window's own start", which the test
+    above shows resolves to the *preceding*, already-covered session."""
+
+    engine = FeatureEngine(FakeBarReader(_asian_only()))
+    as_of = datetime(2026, 9, 21, 7, 15, tzinfo=UTC)
 
     with pytest.raises(InsufficientHistoryError):
-        engine.session_open_price(
-            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
-        )
+        engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of)
 
 
-def test_bars_since_session_open_refuses_at_the_windows_own_start() -> None:
-    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+def test_bars_since_session_open_refuses_when_the_new_session_has_no_bars_yet() -> None:
+    engine = FeatureEngine(FakeBarReader(_asian_only()))
+    as_of = datetime(2026, 9, 21, 7, 15, tzinfo=UTC)
 
     with pytest.raises(InsufficientHistoryError):
-        engine.bars_since_session_open(
-            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
-        )
+        engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of)
 
 
 def test_a_partially_covered_preceding_window_returns_none_not_a_partial_return() -> None:
@@ -494,6 +518,52 @@ def test_bars_since_session_open_refuses_on_partial_coverage_not_coverage_error(
 
     with pytest.raises(InsufficientHistoryError):
         engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of)
+
+
+def test_session_open_price_refuses_in_the_off_window_not_a_bare_value_error() -> None:
+    """C1. Between 21:00 and midnight UTC ``session_of`` returns
+    ``Session.OFF``, and ``session_bounds`` has no window to give it for
+    OFF -- raising a bare ``ValueError`` a caller one level up (the replay
+    loop) never catches, since it only ever catches
+    ``InsufficientHistoryError``. An OFF reference bar is a data fact, not a
+    programming error: the same typed refusal as an empty or partially
+    covered window, not a crash."""
+
+    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.session_open_price(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 22, 0, tzinfo=UTC)
+        )
+
+
+def test_bars_since_session_open_refuses_in_the_off_window_not_a_bare_value_error() -> None:
+    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.bars_since_session_open(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 22, 0, tzinfo=UTC)
+        )
+
+
+def test_session_open_price_at_a_sessions_closing_bar_uses_the_bars_own_session() -> None:
+    """I2. The engine must key a session off the reference bar's own
+    ``event_time``, not off ``as_of``. ``as_of`` IS the closing bar's
+    ``availability_time``, one timeframe later -- on London's own closing
+    M15 bar (``event_time`` 15:45), ``as_of`` is 16:00, which
+    ``session_of`` alone reads as New York. ``session_open_price`` must
+    still answer with London's own open, matching
+    ``FeatureSnapshot.session``, which is pinned to
+    ``session_of(bar.event_time)`` -- the two must agree by construction."""
+
+    bars = (
+        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),  # London's open
+        _m15_bar(datetime(2026, 9, 21, 15, 45, tzinfo=UTC), Decimal("1.10500")),  # London's close
+    )
+    engine = FeatureEngine(FakeBarReader(bars))
+    as_of = datetime(2026, 9, 21, 16, 0, tzinfo=UTC)  # the closing bar's availability_time
+
+    assert engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of) == Decimal("1.10120")
 
 
 def test_prior_session_return_on_an_entirely_empty_store_returns_none() -> None:

@@ -152,10 +152,14 @@ def test_a_snapshot_whose_session_disagrees_with_its_bar_is_refused() -> None:
 
 
 def test_a_snapshot_carries_the_session_features() -> None:
+    """M4: ``bars_since_session_open >= 0`` is guaranteed by ``NonNegativeInt``
+    at the type level and cannot fail from any production change, so this
+    pins the actual value the helper produces instead."""
+
     snapshot = _snapshot(event_time=datetime(2026, 9, 21, 9, 0, tzinfo=UTC))
 
     assert snapshot.session is Session.LONDON
-    assert snapshot.bars_since_session_open >= 0
+    assert snapshot.bars_since_session_open == 0
 
 
 def test_a_snapshot_carries_the_prior_session_return_and_session_open_price() -> None:

@@ -302,6 +302,7 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "trades": (),  # filled in below: SimulatedTrade's own entry is not bound yet here
         "rejections": (),
         "bars_seen": 60,
+        "snapshots_skipped": 0,
         "net_pnl": Decimal("90"),
     },
 }

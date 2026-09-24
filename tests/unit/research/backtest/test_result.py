@@ -65,6 +65,7 @@ def _result(**overrides: object) -> BacktestResult:
         "trades": trades,
         "rejections": (),
         "bars_seen": 60,
+        "snapshots_skipped": 0,
         "net_pnl": net_pnl,
     }
     return BacktestResult(**{**defaults, **overrides})  # type: ignore[arg-type]

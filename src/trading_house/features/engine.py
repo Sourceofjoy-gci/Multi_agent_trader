@@ -16,7 +16,12 @@ from typing import Protocol
 from trading_house.core.errors import InsufficientHistoryError
 from trading_house.features.indicators.spread import median_spread_points as _median_spread
 from trading_house.features.indicators.volatility import wilder_atr
-from trading_house.features.sessions import preceding_session_window, session_bounds, session_of
+from trading_house.features.sessions import (
+    Session,
+    preceding_session_window,
+    session_bounds,
+    session_of,
+)
 from trading_house.marketdata.models import Bar, Coverage, Timeframe, duration
 
 WARMUP_MULTIPLE = 10
@@ -123,42 +128,59 @@ class FeatureEngine:
     def session_open_price(
         self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
     ) -> Decimal:
-        """Open of the first bar of the window containing ``as_of``."""
+        """Open of the first bar of the session containing the bar that
+        closed at ``as_of``."""
 
         return self._current_session_bars(instrument_id, timeframe, as_of=as_of)[0].open
 
     def bars_since_session_open(
         self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
     ) -> int:
-        """Zero on the window's first closed bar."""
+        """Zero on the session's first closed bar."""
 
         return len(self._current_session_bars(instrument_id, timeframe, as_of=as_of)) - 1
 
     def _current_session_bars(
         self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
     ) -> Sequence[Bar]:
-        """Bars of the window containing ``as_of``, known by ``as_of``.
+        """Bars of the session containing the bar that closed at ``as_of``.
 
-        Raises ``InsufficientHistoryError`` when the window is empty, or
-        when the store's coverage only starts partway through it -- a
-        covered tail is not the window's real opening bar, and
-        ``session_open_price`` has no sensible answer without one. A caller
+        Keyed off that bar's own ``event_time`` (``as_of - duration(timeframe)``),
+        not off ``as_of`` itself. ``as_of`` is the closing bar's
+        ``availability_time``, one timeframe later -- on a session's own
+        closing bar the two name different sessions, and keying off ``as_of``
+        would answer with the *next* session's window while the bar actually
+        being described still belongs to the one before it.
+        ``FeatureSnapshot.session`` is pinned to ``session_of(bar.event_time)``
+        for the same reason, so this agrees with it by construction rather
+        than by both sides remembering the same rule.
+
+        Raises ``InsufficientHistoryError`` for any of three reasons: the
+        window is empty (the store's whole history, or an interior gap,
+        leaves it with no closed bars yet -- not "every session", since a
+        session after the first in the store's history already has bars
+        behind it), the store's coverage only starts partway through it, or
+        the reference bar falls in ``Session.OFF``, which has no window at
+        all -- there is nothing ``session_bounds`` can answer with. A caller
         only asks this inside a window it is already in, which is a warm-up
         problem either way, the same family the guard in ``_window`` refuses
         for rather than inventing a placeholder answer.
         """
 
-        session = session_of(as_of)
-        start, end = session_bounds(as_of, session)
+        reference = as_of - duration(timeframe)
+        session = session_of(reference)
+        if session is Session.OFF:
+            raise InsufficientHistoryError
+        start, end = session_bounds(reference, session)
         coverage = self._store.coverage(instrument_id, timeframe)
         if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
             raise InsufficientHistoryError
         # Unlike prior_session_return's identical-looking filter, this one is
-        # redundant here: `_read` already ends at `as_of`, and `as_of < end`
-        # always holds for the window containing `as_of`. Kept for symmetry
-        # with prior_session_return, where the same clause is load-bearing
-        # (the preceding window's `end` can sit strictly before `as_of`) --
-        # so a later reader does not delete the one that matters.
+        # redundant here: `_read` already ends at `as_of`, and `event_time <
+        # end` always holds for the reference bar's own window. Kept for
+        # symmetry with prior_session_return, where the same clause is
+        # load-bearing (the preceding window's `end` can sit strictly before
+        # `as_of`) -- so a later reader does not delete the one that matters.
         bars = [
             bar
             for bar in self._read(instrument_id, timeframe, start=start, as_of=as_of)
