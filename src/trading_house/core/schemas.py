@@ -128,7 +128,12 @@ class TradeProposal(Stamped):
     # An R multiple, not a price. The engine prices it off the stop distance
     # it computed -- never off invalidation_price above -- so the strategy
     # cannot declare a target inconsistent with the stop actually applied.
-    target_r_multiple: Decimal | None = None
+    # gt=0: zero or negative would price the target at or behind the stop --
+    # a real loss the engine would hand back labelled ExitKind.TARGET. There
+    # is no upper bound: how far a target can sit is a question about a
+    # price being positive, which only the engine's own stop distance can
+    # answer, not a multiple ceiling picked in advance.
+    target_r_multiple: Annotated[Decimal, Field(gt=0)] | None = None
     rationale: NonEmptyStr | None = None
 
     @field_validator("win_probability")

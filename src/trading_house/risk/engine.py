@@ -60,6 +60,7 @@ class RejectionReason(str, Enum):  # noqa: UP042
     TICK_STALE = "tick_stale"
     BELOW_MIN_LOT = "below_min_lot"
     STOP_PRICE_NOT_POSITIVE = "stop_price_not_positive"
+    TARGET_PRICE_NOT_POSITIVE = "target_price_not_positive"
     INSUFFICIENT_FREE_MARGIN_HEADROOM = "insufficient_free_margin_headroom"
     EDGE_BELOW_FLOOR = "edge_below_floor"
     HOLDING_EXCEEDS_BOOK_LIMIT = "holding_exceeds_book_limit"
@@ -218,6 +219,42 @@ class RiskEngine:
         # shrink the position -- it never relaxes I-19.
         effective_distance = abs(proposal.entry_price_ref - stop_loss_price)
 
+        # The fixed target, priced off the stop distance actually emitted
+        # above -- never off proposal.invalidation_price, which is the
+        # strategy's own idea of where it is wrong, not the stop the
+        # constitution's multipliers and the contract's grid actually
+        # produced. None stays reachable when the strategy declares no
+        # multiple, which the baseline arm of a later A/B needs.
+        target_price: Decimal | None = None
+        if proposal.target_r_multiple is not None:
+            target_distance = effective_distance * proposal.target_r_multiple
+            raw_target_price = (
+                proposal.entry_price_ref + target_distance
+                if proposal.side is Side.BUY
+                else proposal.entry_price_ref - target_distance
+            )
+            # Checked here rather than inside quantise_up/quantise_down, so an
+            # unrepresentable target is a rejection the caller can read, not
+            # an exception escaping evaluate() -- the same shape as
+            # STOP_PRICE_NOT_POSITIVE above and for the same reason: this
+            # engine is pure over its arguments, and a crash is not a
+            # decision. target_r_multiple is gt=0, so only an oversized
+            # multiple on a SELL can drive this negative; a BUY target only
+            # ever moves further from zero.
+            if raw_target_price < contract.price_increment:
+                return self._reject(proposal, [RejectionReason.TARGET_PRICE_NOT_POSITIVE], passed)
+            passed.append(RejectionReason.TARGET_PRICE_NOT_POSITIVE)
+            # Rounded away from entry, the mirror image of stop_price's own
+            # rule: up for a BUY (harder to reach), down for a SELL -- the
+            # same two helpers stop_loss_price is rounded with, never a
+            # rounding that would make the target easier to hit than the R
+            # multiple declared.
+            target_price = (
+                quantise_up(raw_target_price, contract.price_increment)
+                if proposal.side is Side.BUY
+                else quantise_down(raw_target_price, contract.price_increment)
+            )
+
         # The book's own slice, not firm equity. Passing firm equity here would
         # over-risk the sleeve (capital_fraction 0.10) by ten times.
         book_equity = firm_equity * book.capital_fraction
@@ -254,48 +291,11 @@ class RiskEngine:
                 "constitution_version": self._constitution.version,
                 "approved_quantity": PositiveQuantity(amount=volume, unit="lots"),
                 "stop_loss_price": stop_loss_price,
-                "take_profit_price": self._target_price(
-                    side=proposal.side,
-                    entry_price_ref=proposal.entry_price_ref,
-                    stop_distance=effective_distance,
-                    target_r_multiple=proposal.target_r_multiple,
-                    contract=contract,
-                ),
+                "take_profit_price": target_price,
                 "risk_money": risk_money,
                 "risk_pct_of_book": risk_money / book_equity * Decimal(100),
             }
         )
-
-    @staticmethod
-    def _target_price(
-        *,
-        side: Side,
-        entry_price_ref: Decimal,
-        stop_distance: Decimal,
-        target_r_multiple: Decimal | None,
-        contract: InstrumentContract,
-    ) -> Decimal | None:
-        """The fixed target, priced off the engine's own stop distance.
-
-        Never off ``proposal.invalidation_price``: that is the strategy's own
-        idea of where it is wrong, not the stop actually emitted after the
-        constitution's multipliers and the contract's grid, and pricing a
-        target from it would let the two disagree.
-
-        The target sits on the side of entry opposite the stop, so grid
-        rounding is quantised away from entry in the mirror-image sense of
-        ``stop_price``: up for a BUY (harder to reach), down for a SELL --
-        the same two helpers ``stop_loss_price`` is rounded with, never a
-        rounding that would make the target easier to hit than the R
-        multiple declared.
-        """
-
-        if target_r_multiple is None:
-            return None
-        target_distance = stop_distance * target_r_multiple
-        if side is Side.BUY:
-            return quantise_up(entry_price_ref + target_distance, contract.price_increment)
-        return quantise_down(entry_price_ref - target_distance, contract.price_increment)
 
     @staticmethod
     def _side_permitted(side: Side, contract: InstrumentContract) -> bool:

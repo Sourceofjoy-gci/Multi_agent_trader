@@ -7,6 +7,9 @@ reader can verify it without running the code.
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from tests.unit.risk.conftest import NOW, _contract, _facts, _proposal
 from trading_house.constitution.models import Constitution
 from trading_house.core.clock import FixedClock
@@ -535,13 +538,21 @@ def test_a_proposal_declaring_an_r_multiple_gets_a_target_priced_off_the_engines
 
 
 def test_a_sell_target_sits_below_the_entry(constitution) -> None:
+    """fx_scalp, mirrored off the BUY case above.
+
+    distance (volatility dominates) = 1.2 x 0.00050  = 0.00060
+    stop   = ceil(1.10000 + 0.00060)                 = 1.10060
+    target = 1.10000 - 0.00060 x 2                   = 1.09880
+    """
+
     proposal = _proposal(
         side=Side.SELL, invalidation_price=Decimal("1.10050"), target_r_multiple=Decimal(2)
     )
     decision = _engine(constitution).evaluate(proposal, contract=_contract(), **_facts())
 
     assert isinstance(decision, ExecutableRiskDecision)
-    assert decision.take_profit_price is not None
+    assert decision.stop_loss_price == Decimal("1.10060")
+    assert decision.take_profit_price == Decimal("1.09880")
     assert decision.take_profit_price < proposal.entry_price_ref
 
 
@@ -555,6 +566,110 @@ def test_a_proposal_with_no_r_multiple_still_gets_no_target(constitution) -> Non
 
     assert isinstance(decision, ExecutableRiskDecision)
     assert decision.take_profit_price is None
+
+
+def test_a_non_positive_r_multiple_is_rejected_by_the_schema() -> None:
+    """gt=0: zero or negative would price the target at or behind the stop --
+    a real loss the engine would hand back labelled ExitKind.TARGET (see
+    resolve_exit's stop-before-target ordering in fills.py). This is refused
+    before a proposal can even be constructed, not discovered at evaluation."""
+
+    with pytest.raises(ValidationError, match="target_r_multiple"):
+        _proposal(target_r_multiple=Decimal(0))
+    with pytest.raises(ValidationError, match="target_r_multiple"):
+        _proposal(target_r_multiple=Decimal(-1))
+
+
+def test_an_oversized_target_on_a_sell_is_a_typed_rejection_not_a_crash(
+    constitution,
+) -> None:
+    """2000 is an ordinary large multiple, not an adversarial input -- and on
+    a SELL it drives the raw target below zero. ``evaluate`` is documented
+    pure over its arguments, so this must come back as a decision the caller
+    can read, not a ValueError escaping out of quantise_down.
+
+        distance (volatility dominates) = 1.2 x 0.00050          = 0.00060
+        raw target = 1.10000 - 0.00060 x 2000 = 1.10000 - 1.20000 = -0.10000
+    """
+
+    proposal = _proposal(
+        side=Side.SELL, invalidation_price=Decimal("1.10050"), target_r_multiple=Decimal(2000)
+    )
+    decision = _engine(constitution).evaluate(proposal, contract=_contract(), **_facts())
+
+    assert isinstance(decision, RejectedRiskDecision)
+    assert RejectionReason.TARGET_PRICE_NOT_POSITIVE in decision.reasons
+
+
+def test_an_off_grid_buy_target_rounds_away_from_entry(constitution) -> None:
+    """entry_price_ref carries no tick-grid constraint (see the off-grid stop
+    tests above), so a target distance built on it can land off-grid too.
+    Both quantise_up and quantise_down land ON grid for an already-exact
+    input -- the on-grid tests above cannot tell the two functions apart.
+    This one can, because 1.100035 sits exactly between two ticks.
+
+        entry         = 1.100005 -- half a tick off the 0.00001 grid
+        distance      = floor term (structural 0.000005 < floor 0.00001) = 0.00001
+        stop          = floor(1.100005 - 0.00001)       = 1.09999
+        effective     = 1.100005 - 1.09999              = 0.000015 (1.5 ticks)
+        raw target    = 1.100005 + 0.000015 x 2          = 1.100035 (half a tick off)
+        target        = ceil(1.100035)                  = 1.10004
+    """
+
+    proposal = _proposal(
+        entry_price_ref=Decimal("1.100005"),
+        invalidation_price=Decimal("1.100000"),
+        target_r_multiple=Decimal(2),
+    )
+
+    decision = _engine(constitution).evaluate(
+        proposal,
+        contract=_contract(),
+        **_facts(
+            atr=Decimal("0"),
+            median_spread_points=Decimal("0"),
+            tick_spread_points=Decimal("0"),
+        ),
+    )
+
+    assert isinstance(decision, ExecutableRiskDecision)
+    assert decision.stop_loss_price == Decimal("1.09999")
+    assert decision.take_profit_price == Decimal("1.10004")
+
+
+def test_an_off_grid_sell_target_rounds_away_from_entry(constitution) -> None:
+    """Mirrors the BUY case above; a SELL target rounds DOWN (away from
+    entry), the opposite function from the BUY case, so a single-sided
+    off-grid test would leave this half of the rule unpinned.
+
+        entry         = 1.100005 -- half a tick off the 0.00001 grid
+        distance      = floor term (structural 0.000005 < floor 0.00001) = 0.00001
+        stop          = ceil(1.100005 + 0.00001)         = 1.10002
+        effective     = 1.10002 - 1.100005                = 0.000015 (1.5 ticks)
+        raw target    = 1.100005 - 0.000015 x 2          = 1.099975 (half a tick off)
+        target        = floor(1.099975)                  = 1.09997
+    """
+
+    proposal = _proposal(
+        side=Side.SELL,
+        entry_price_ref=Decimal("1.100005"),
+        invalidation_price=Decimal("1.100010"),
+        target_r_multiple=Decimal(2),
+    )
+
+    decision = _engine(constitution).evaluate(
+        proposal,
+        contract=_contract(),
+        **_facts(
+            atr=Decimal("0"),
+            median_spread_points=Decimal("0"),
+            tick_spread_points=Decimal("0"),
+        ),
+    )
+
+    assert isinstance(decision, ExecutableRiskDecision)
+    assert decision.stop_loss_price == Decimal("1.10002")
+    assert decision.take_profit_price == Decimal("1.09997")
 
 
 class _Margin:
