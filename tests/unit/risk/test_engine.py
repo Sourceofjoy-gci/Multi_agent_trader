@@ -10,7 +10,7 @@ from decimal import Decimal
 from tests.unit.risk.conftest import NOW, _contract, _facts, _proposal
 from trading_house.constitution.models import Constitution
 from trading_house.core.clock import FixedClock
-from trading_house.core.schemas import RejectedRiskDecision
+from trading_house.core.schemas import ExecutableRiskDecision, RejectedRiskDecision, Side
 from trading_house.core.values import AssetClass
 from trading_house.risk.engine import RejectionReason, RiskEngine
 
@@ -508,6 +508,53 @@ def test_a_stop_that_cannot_land_above_zero_is_rejected(constitution) -> None:
     )
 
     assert RejectionReason.STOP_PRICE_NOT_POSITIVE in decision.reasons
+
+
+def test_a_proposal_declaring_an_r_multiple_gets_a_target_priced_off_the_engines_stop(
+    constitution,
+) -> None:
+    """The engine already computed the stop distance. Pricing the target from
+    the strategy's own idea of the stop (``invalidation_price``) would let the
+    two disagree -- so ``invalidation_price`` here is deliberately NOT the
+    default 1.09700, which happens to equal the emitted stop exactly and
+    would make that substitution invisible.
+
+        distance (volatility dominates) = 1.2 x 0.00050  = 0.00060
+        stop   = floor(1.10000 - 0.00060)                = 1.09940
+        target = 1.10000 + 0.00060 x 2                   = 1.10120
+    """
+
+    proposal = _proposal(invalidation_price=Decimal("1.09950"), target_r_multiple=Decimal(2))
+    decision = _engine(constitution).evaluate(proposal, contract=_contract(), **_facts())
+
+    assert isinstance(decision, ExecutableRiskDecision)
+    assert decision.stop_loss_price == Decimal("1.09940")
+    assert decision.take_profit_price == Decimal("1.10120")
+    distance = proposal.entry_price_ref - decision.stop_loss_price
+    assert decision.take_profit_price == proposal.entry_price_ref + distance * 2
+
+
+def test_a_sell_target_sits_below_the_entry(constitution) -> None:
+    proposal = _proposal(
+        side=Side.SELL, invalidation_price=Decimal("1.10050"), target_r_multiple=Decimal(2)
+    )
+    decision = _engine(constitution).evaluate(proposal, contract=_contract(), **_facts())
+
+    assert isinstance(decision, ExecutableRiskDecision)
+    assert decision.take_profit_price is not None
+    assert decision.take_profit_price < proposal.entry_price_ref
+
+
+def test_a_proposal_with_no_r_multiple_still_gets_no_target(constitution) -> None:
+    """The baseline arm of the A/B has no target at all, so None must remain
+    reachable -- otherwise the arm cannot be expressed."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(target_r_multiple=None), contract=_contract(), **_facts()
+    )
+
+    assert isinstance(decision, ExecutableRiskDecision)
+    assert decision.take_profit_price is None
 
 
 class _Margin:

@@ -125,6 +125,10 @@ class TradeProposal(Stamped):
     required_liquidity: PositiveQuantity
     regime_ref: NonEmptyStr
     features_snapshot_id: NonEmptyStr
+    # An R multiple, not a price. The engine prices it off the stop distance
+    # it computed -- never off invalidation_price above -- so the strategy
+    # cannot declare a target inconsistent with the stop actually applied.
+    target_r_multiple: Decimal | None = None
     rationale: NonEmptyStr | None = None
 
     @field_validator("win_probability")

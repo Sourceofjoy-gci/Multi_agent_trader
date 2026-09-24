@@ -29,6 +29,7 @@ from trading_house.risk.sizing import (
     compute_stop_distance,
     compute_volume,
     quantise_down,
+    quantise_up,
     stop_price,
 )
 
@@ -253,11 +254,48 @@ class RiskEngine:
                 "constitution_version": self._constitution.version,
                 "approved_quantity": PositiveQuantity(amount=volume, unit="lots"),
                 "stop_loss_price": stop_loss_price,
-                "take_profit_price": None,
+                "take_profit_price": self._target_price(
+                    side=proposal.side,
+                    entry_price_ref=proposal.entry_price_ref,
+                    stop_distance=effective_distance,
+                    target_r_multiple=proposal.target_r_multiple,
+                    contract=contract,
+                ),
                 "risk_money": risk_money,
                 "risk_pct_of_book": risk_money / book_equity * Decimal(100),
             }
         )
+
+    @staticmethod
+    def _target_price(
+        *,
+        side: Side,
+        entry_price_ref: Decimal,
+        stop_distance: Decimal,
+        target_r_multiple: Decimal | None,
+        contract: InstrumentContract,
+    ) -> Decimal | None:
+        """The fixed target, priced off the engine's own stop distance.
+
+        Never off ``proposal.invalidation_price``: that is the strategy's own
+        idea of where it is wrong, not the stop actually emitted after the
+        constitution's multipliers and the contract's grid, and pricing a
+        target from it would let the two disagree.
+
+        The target sits on the side of entry opposite the stop, so grid
+        rounding is quantised away from entry in the mirror-image sense of
+        ``stop_price``: up for a BUY (harder to reach), down for a SELL --
+        the same two helpers ``stop_loss_price`` is rounded with, never a
+        rounding that would make the target easier to hit than the R
+        multiple declared.
+        """
+
+        if target_r_multiple is None:
+            return None
+        target_distance = stop_distance * target_r_multiple
+        if side is Side.BUY:
+            return quantise_up(entry_price_ref + target_distance, contract.price_increment)
+        return quantise_down(entry_price_ref - target_distance, contract.price_increment)
 
     @staticmethod
     def _side_permitted(side: Side, contract: InstrumentContract) -> bool:
