@@ -271,6 +271,32 @@ def test_a_swing_proposal_whose_swap_eats_its_edge_is_refused(constitution) -> N
     assert RejectionReason.SWAP_EXCEEDS_EDGE_FRACTION in decision.reasons
 
 
+def test_a_swing_proposal_whose_swap_is_exactly_at_the_edge_fraction_cap_is_permitted(
+    constitution,
+) -> None:
+    """fx_swing permits swap up to 20% of expected edge. 0.4 bps of swap
+    against an edge of 2.0 (6.0 of return, 4.0 of cost) is exactly 20% --
+    the boundary belongs to the permitted side, same as the edge floor.
+
+    Mutation found this boundary was untested: flipping <= to < in
+    _swap_within_edge_fraction left every existing test passing, because
+    none of them landed exactly on the cap.
+    """
+
+    decision = _engine(constitution).evaluate(
+        _proposal(
+            book="fx_swing",
+            expected_return_bps=6.0,
+            expected_cost_bps=4.0,
+            expected_swap_cost_bps=0.4,
+        ),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert RejectionReason.SWAP_EXCEEDS_EDGE_FRACTION in decision.checks_passed
+
+
 def test_the_duration_cap_does_not_apply_to_a_swing_book(constitution) -> None:
     """max_position_duration_seconds is declared on ScalpLimits only. A swing
     proposal holding nine hours is not refused by a limit its book does not
