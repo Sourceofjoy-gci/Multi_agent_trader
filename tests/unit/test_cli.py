@@ -1052,8 +1052,12 @@ def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
         "--toy-every-n": "20",
         "--instrument": "fx.eurusd",
         "--timeframe": "M1",
-        "--start": "2026-09-21T09:00:00",
-        "--end": "2026-09-21T09:59:00",
+        # Matches conftest.ORIGIN (07:00, the London session's own start) --
+        # session_open_price/bars_since_session_open raise when the store's
+        # coverage begins after the current session window started, so this
+        # range must span the same window _ramp(60)'s bars actually cover.
+        "--start": "2026-09-21T07:00:00",
+        "--end": "2026-09-21T07:59:00",
         "--firm-equity": "100000",
         "--contract": str(_contract_file(tmp_path)),
         "--atr-period": "2",

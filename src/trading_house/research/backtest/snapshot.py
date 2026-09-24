@@ -12,11 +12,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Self
 
-from pydantic import field_validator, model_validator
+from pydantic import NonNegativeInt, field_validator, model_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
 from trading_house.core.values import CanonicalModel, InstrumentId
+from trading_house.features.sessions import Session, session_of
 from trading_house.marketdata.models import Bar, Timeframe, duration
 
 MIN_HORIZON_BARS: int = 10
@@ -34,6 +35,12 @@ class FeatureSnapshot(CanonicalModel):
     spread and ``availability_time`` -- a constructed invariant rather than a
     convention left to whichever caller builds a snapshot next, so the risk
     engine's spread-blowout gate always judges the same bar the strategy saw.
+
+    ``session`` is pinned the same way, to ``session_of(bar.event_time)``: it
+    is derived from the bar rather than asserted independently of it, so a
+    caller that computes the session itself and gets it wrong cannot hand the
+    strategy a snapshot that lies about when it is -- and the strategy's
+    whole entry condition is a session test.
     """
 
     as_of: datetime
@@ -44,6 +51,10 @@ class FeatureSnapshot(CanonicalModel):
     median_spread_points: Decimal
     tick_spread_points: Decimal
     tick_time: datetime
+    session: Session
+    prior_session_return: Decimal | None
+    session_open_price: Decimal
+    bars_since_session_open: NonNegativeInt
 
     @field_validator("as_of", "tick_time")
     @classmethod
@@ -61,6 +72,8 @@ class FeatureSnapshot(CanonicalModel):
             raise ValueError("tick_time must equal the closing bar's availability_time")
         if self.tick_time != self.as_of:
             raise ValueError("tick_time must equal as_of")
+        if self.session is not session_of(self.bar.event_time):
+            raise ValueError("session must equal the closing bar's own session")
         return self
 
 

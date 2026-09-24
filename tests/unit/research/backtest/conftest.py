@@ -34,8 +34,19 @@ from trading_house.risk.engine import RiskEngine
 
 CONFIG_DIR = Path(__file__).resolve().parents[4] / "config"
 
-ORIGIN = datetime(2026, 9, 21, 9, 0, tzinfo=UTC)
-"""Where ``_ramp``'s series starts: bar 0 opens here."""
+ORIGIN = datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+"""Where ``_ramp``'s series starts: bar 0 opens here.
+
+Pinned to 07:00 -- the London session's own start -- rather than some hour
+inside it. ``session_open_price``/``bars_since_session_open`` raise
+``InsufficientHistoryError`` when the store's coverage begins after the
+current session window started (engine.py's replay loop then skips the bar,
+the same as an ATR window still warming up). ``FakeBarReader``'s coverage is
+exactly this fixture's earliest bar, so anchoring the ramp inside the London
+hour rather than at its boundary would make every snapshot in every test
+below hit that guard and the strategy would never be asked anything. All
+`_ramp` calls below stay under 90 bars, so the series never runs past 16:00
+and never crosses into a second session."""
 
 POINT = Decimal("0.00001")
 RAMP_SPREAD_POINTS = 10

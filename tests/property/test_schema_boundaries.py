@@ -33,6 +33,7 @@ from trading_house.core.schemas import (
 )
 from trading_house.core.values import IntentState, PositiveQuantity, Quantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, Venue
+from trading_house.features.sessions import Session
 from trading_house.marketdata.models import (
     Bar,
     BarQuality,
@@ -263,6 +264,10 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "median_spread_points": Decimal("9"),
         "tick_spread_points": Decimal("9"),
         "tick_time": AWARE + timedelta(minutes=1),
+        "session": Session.LONDON,  # AWARE's hour is 9, inside London's 7-16
+        "prior_session_return": None,
+        "session_open_price": Decimal("1.10000"),
+        "bars_since_session_open": 0,
     },
     SimulatedTrade: {
         "proposal_id": "p-1",

@@ -2,7 +2,9 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
+from trading_house.features.sessions import Session, session_of
 from trading_house.marketdata.models import Bar, BarQuality, Timeframe, duration
 from trading_house.research.backtest.snapshot import (
     MIN_HORIZON_BARS,
@@ -15,14 +17,24 @@ NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
 def _snapshot(
     *,
-    spread: int,
+    spread: int = 17,
+    event_time: datetime | None = None,
     as_of: datetime | None = None,
     availability_time: datetime | None = None,
     tick_spread_points: Decimal | None = None,
     tick_time: datetime | None = None,
+    session: Session | None = None,
+    prior_session_return: Decimal | None = None,
+    session_open_price: Decimal | None = None,
+    bars_since_session_open: int = 0,
 ) -> FeatureSnapshot:
     timeframe = Timeframe.M1
-    resolved_availability_time = availability_time if availability_time is not None else NOW
+    if availability_time is not None:
+        resolved_availability_time = availability_time
+    elif event_time is not None:
+        resolved_availability_time = event_time + duration(timeframe)
+    else:
+        resolved_availability_time = NOW
     bar = Bar(
         instrument_id="fx.eurusd",
         timeframe=timeframe,
@@ -38,7 +50,7 @@ def _snapshot(
         quality=BarQuality.OK,
     )
     return FeatureSnapshot(
-        as_of=as_of if as_of is not None else NOW,
+        as_of=as_of if as_of is not None else resolved_availability_time,
         instrument_id="fx.eurusd",
         timeframe=timeframe,
         bar=bar,
@@ -48,6 +60,10 @@ def _snapshot(
             tick_spread_points if tick_spread_points is not None else Decimal(spread)
         ),
         tick_time=tick_time if tick_time is not None else bar.availability_time,
+        session=session if session is not None else session_of(bar.event_time),
+        prior_session_return=prior_session_return,
+        session_open_price=(session_open_price if session_open_price is not None else bar.open),
+        bars_since_session_open=bars_since_session_open,
     )
 
 
@@ -120,6 +136,47 @@ def test_a_snapshot_whose_tick_time_disagrees_with_as_of_is_refused() -> None:
             availability_time=NOW,
             tick_time=NOW,
         )
+
+
+def test_a_snapshot_whose_session_disagrees_with_its_bar_is_refused() -> None:
+    """The session label is derived from the bar, so it cannot be asserted
+    independently of it. A caller that computes the session itself and gets it
+    wrong would otherwise hand the strategy a snapshot that lies about when it
+    is -- and the strategy's whole entry condition is a session test."""
+
+    with pytest.raises(ValidationError):
+        _snapshot(
+            event_time=datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # London
+            session=Session.ASIAN,
+        )
+
+
+def test_a_snapshot_carries_the_session_features() -> None:
+    snapshot = _snapshot(event_time=datetime(2026, 9, 21, 9, 0, tzinfo=UTC))
+
+    assert snapshot.session is Session.LONDON
+    assert snapshot.bars_since_session_open >= 0
+
+
+def test_a_snapshot_carries_the_prior_session_return_and_session_open_price() -> None:
+    """Pins the wiring past the helper's own defaults: the values a caller
+    passes in are the values that land on the model, not some default that
+    happens to satisfy the other assertions above."""
+
+    snapshot = _snapshot(
+        prior_session_return=Decimal("0.0012"),
+        session_open_price=Decimal("1.09800"),
+        bars_since_session_open=4,
+    )
+
+    assert snapshot.prior_session_return == Decimal("0.0012")
+    assert snapshot.session_open_price == Decimal("1.09800")
+    assert snapshot.bars_since_session_open == 4
+
+
+def test_a_snapshot_refuses_a_negative_bars_since_session_open() -> None:
+    with pytest.raises(ValidationError):
+        _snapshot(bars_since_session_open=-1)
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ from tests.unit.research.backtest.conftest import (
 )
 from trading_house.core.errors import TimestampError
 from trading_house.core.schemas import RejectedRiskDecision
+from trading_house.features.sessions import session_of
 from trading_house.marketdata.models import BarQuality, Timeframe, duration
 from trading_house.research.backtest.engine import BacktestRefused, ReplayClock
 from trading_house.research.backtest.fills import ExitKind
@@ -339,6 +340,10 @@ def test_no_run_can_exit_on_a_target_while_the_risk_engine_produces_none() -> No
         median_spread_points=Decimal(warm.spread),
         tick_spread_points=Decimal(warm.spread),
         tick_time=warm.availability_time,
+        session=session_of(warm.event_time),
+        prior_session_return=None,
+        session_open_price=bars[0].open,
+        bars_since_session_open=FIRST_SNAPSHOT_BAR,
     )
     proposal = ToyStrategy(every_n=1).evaluate(snapshot)
     assert proposal is not None

@@ -41,6 +41,7 @@ from trading_house.core.errors import InsufficientHistoryError, TradingHouseErro
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import RejectedRiskDecision, Side
 from trading_house.features.engine import BarReader, FeatureEngine
+from trading_house.features.sessions import session_of
 from trading_house.marketdata.models import Bar, BarQuality, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel, commission_cost, swap_cost
 from trading_house.research.backtest.fills import Exit, ExitKind, Fill, entry_fill, resolve_exit
@@ -342,7 +343,20 @@ class Backtester:
         ``FeatureEngine`` refuses rather than guessing when it holds less
         history than an indicator's fixed window needs, and at the start of a
         range that is the normal case, not a fault. No features at an instant
-        means no decision at that instant.
+        means no decision at that instant. ``session_open_price`` and
+        ``bars_since_session_open`` extend the same rule to a session's own
+        opening bars: both raise ``InsufficientHistoryError`` -- never a bare
+        ``None`` or a guessed answer -- when the current window has no closed
+        bars yet, which happens at the very start of every session and is
+        exactly as ordinary as the ATR and spread windows warming up. This
+        loop treats all four the same way: skip the bar, try again next bar.
+        The alternative of refusing the whole run would make an otherwise
+        healthy multi-year replay fail at its very first session open, and
+        the alternative of inventing a placeholder session-open price would
+        be the guess the store's own author refused to make one call down.
+        ``prior_session_return`` never raises -- its own ``None`` already
+        distinguishes an outage from a flat night, so it is read
+        unconditionally.
         """
 
         try:
@@ -358,8 +372,17 @@ class Backtester:
                 window=request.spread_window,
                 as_of=as_of,
             )
+            session_open_price = self._features.session_open_price(
+                request.instrument_id, request.timeframe, as_of=as_of
+            )
+            bars_since_session_open = self._features.bars_since_session_open(
+                request.instrument_id, request.timeframe, as_of=as_of
+            )
         except InsufficientHistoryError:
             return None
+        prior_session_return = self._features.prior_session_return(
+            request.instrument_id, request.timeframe, as_of=as_of
+        )
         return FeatureSnapshot(
             as_of=as_of,
             instrument_id=request.instrument_id,
@@ -369,6 +392,10 @@ class Backtester:
             median_spread_points=median_spread_points,
             tick_spread_points=Decimal(bar.spread),
             tick_time=as_of,
+            session=session_of(bar.event_time),
+            prior_session_return=prior_session_return,
+            session_open_price=session_open_price,
+            bars_since_session_open=bars_since_session_open,
         )
 
     def _open(self, signal: _Signal, bar: Bar, request: BacktestRequest) -> _Position:
