@@ -473,9 +473,18 @@ Per bar, in this order, and the order is the design: a queued entry fills at
 position is resolved against this bar, the stop before the target (D-2) and the
 stop before the time stop; `as_of` becomes the bar's `availability_time`; a
 snapshot is built at that instant, or the bar is skipped because the feature
-windows are still cold; the strategy sees that snapshot and nothing else
-(I-17); the risk engine decides; an executable decision is queued to fill on the
-next bar.
+windows are still cold; under a chandelier exit policy an open position's stop
+is trailed from that snapshot's ATR; the strategy sees that snapshot and nothing
+else (I-17); the risk engine decides; an executable decision is queued to fill
+on the next bar.
+
+**The trail runs after the bar's own exits, not before them.** A stop set from a
+bar's high must not then be tested against that same bar's low: OHLC cannot say
+which came first, and reading it the other way flatters rather than punishes,
+because a raised long stop that the bar's low reaches fills *better* than the
+one it replaced. The level set at the end of bar *i* governs bar *i+1*, which is
+also what the live guard does — it reacts to a bar that has closed. A bar with
+no snapshot trails nothing.
 
 **What it does not promise, stated as plainly:**
 
@@ -517,14 +526,12 @@ next bar.
   stop fills at the next bar's open exactly as an entry does and crosses the
   half-spread a second time. Spec section 7 defines each case separately and
   the code follows it; this is a stated property, not an oversight.
-- **A fill is stamped one bar after the price it took.** `fills.py` prices at
-  `bar.open` but stamps `at=bar.availability_time`, which is that bar's close.
-  So `entry_at` and `exit_at` each report one bar later than the instant the
-  fill happened, `max_holding_seconds` is honoured as H plus one bar, and
-  `swap_cost` sees a date pair shifted by the same amount. This is
-  plan-mandated and every known-answer number in the phase was derived against
-  it; correcting the stamps would move all of them, so it is carried to Phase 7
-  and stated here so Phase 7 finds it rather than discovers it.
+- **A fill is stamped at the instant of its price** — `bar.event_time`, not
+  `bar.availability_time`. Phase 6 shipped the latter and this list carried the
+  defect forward as a stated non-promise; Phase 7 corrected it, so `entry_at`
+  and `exit_at` now name the instant the fill happened, `max_holding_seconds`
+  is honoured as H rather than H plus one bar, and `swap_cost` sees the right
+  date pair (D-9). Every known-answer number in the phase moved with it.
 
 **Four refusals, each rather than a plausible-looking number:**
 
