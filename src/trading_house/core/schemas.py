@@ -114,6 +114,12 @@ class TradeProposal(Stamped):
     expected_return_bps: FiniteFloat
     expected_return_stdev_bps: NonNegativeFiniteFloat
     expected_cost_bps: NonNegativeFiniteFloat
+    # The strategy's declared swap component, already included in
+    # expected_cost_bps above and carried separately here because
+    # max_swap_cost_pct_of_expected_edge needs it alone. A default of zero is
+    # not "no opinion" -- it is a claim an intraday strategy is entitled to
+    # make, and one the swap gate then checks rather than skips.
+    expected_swap_cost_bps: NonNegativeFiniteFloat = 0.0
     win_probability: Probability
     calibration_id: NonEmptyStr
     required_liquidity: PositiveQuantity

@@ -14,7 +14,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Protocol
 
-from trading_house.constitution.models import BookLimits, Constitution, ScalpLimits
+from trading_house.constitution.models import BookLimits, Constitution, ScalpLimits, SwingLimits
 from trading_house.core.clock import Clock, ensure_utc
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import (
@@ -60,6 +60,9 @@ class RejectionReason(str, Enum):  # noqa: UP042
     BELOW_MIN_LOT = "below_min_lot"
     STOP_PRICE_NOT_POSITIVE = "stop_price_not_positive"
     INSUFFICIENT_FREE_MARGIN_HEADROOM = "insufficient_free_margin_headroom"
+    EDGE_BELOW_FLOOR = "edge_below_floor"
+    HOLDING_EXCEEDS_BOOK_LIMIT = "holding_exceeds_book_limit"
+    SWAP_EXCEEDS_EDGE_FRACTION = "swap_exceeds_edge_fraction"
 
 
 class MarginPort(Protocol):
@@ -147,6 +150,24 @@ class RiskEngine:
         _record(
             self._tick_fresh(book, tick_time),
             RejectionReason.TICK_STALE,
+            reasons,
+            passed,
+        )
+        _record(
+            self._edge_clears_floor(book, proposal),
+            RejectionReason.EDGE_BELOW_FLOOR,
+            reasons,
+            passed,
+        )
+        _record(
+            self._holding_within_book_limit(book, proposal),
+            RejectionReason.HOLDING_EXCEEDS_BOOK_LIMIT,
+            reasons,
+            passed,
+        )
+        _record(
+            self._swap_within_edge_fraction(book, proposal),
+            RejectionReason.SWAP_EXCEEDS_EDGE_FRACTION,
             reasons,
             passed,
         )
@@ -241,6 +262,48 @@ class RiskEngine:
     @staticmethod
     def _side_permitted(side: Side, contract: InstrumentContract) -> bool:
         return contract.can_open_long if side is Side.BUY else contract.can_open_short
+
+    @staticmethod
+    def _edge_clears_floor(book: BookLimits, proposal: TradeProposal) -> bool:
+        """Declared return minus declared cost, against the book's floor.
+
+        The first gate in this system to read a proposal's declared economics.
+        Until Phase 7 a strategy could claim any expected return and nothing
+        looked -- which is why the numbers had no reason to be honest.
+
+        The bps fields on TradeProposal are FiniteFloat (analytics); the
+        constitution's limits are Decimal (money-adjacent). Converting through
+        str rather than comparing float to Decimal directly avoids binary
+        floating-point artefacts leaking into a money-adjacent comparison.
+        """
+
+        edge = Decimal(str(proposal.expected_return_bps)) - Decimal(str(proposal.expected_cost_bps))
+        return edge >= book.limits.min_expected_edge_after_cost_bps
+
+    @staticmethod
+    def _holding_within_book_limit(book: BookLimits, proposal: TradeProposal) -> bool:
+        """Scalp books cap a position's duration; swing books do not declare
+        one, so an isinstance guard -- not hasattr -- is what lets a swing
+        proposal pass a limit its book was never given."""
+
+        if not isinstance(book.limits, ScalpLimits):
+            return True
+        return proposal.max_holding_seconds <= book.limits.max_position_duration_seconds
+
+    @staticmethod
+    def _swap_within_edge_fraction(book: BookLimits, proposal: TradeProposal) -> bool:
+        """Swing books cap swap as a percentage of expected edge.
+
+        See _edge_clears_floor for why the conversion goes through str.
+        """
+
+        if not isinstance(book.limits, SwingLimits):
+            return True
+        edge = Decimal(str(proposal.expected_return_bps)) - Decimal(str(proposal.expected_cost_bps))
+        if edge <= 0:
+            return False
+        swap = Decimal(str(proposal.expected_swap_cost_bps))
+        return swap / edge * Decimal(100) <= book.limits.max_swap_cost_pct_of_expected_edge
 
     def _spread_within_ceiling(
         self, book: BookLimits, median_points: Decimal, tick_points: Decimal

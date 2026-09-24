@@ -212,6 +212,79 @@ def test_every_failing_gate_contributes_its_own_reason(constitution) -> None:
     assert RejectionReason.TICK_STALE in decision.reasons
 
 
+def test_a_proposal_below_the_books_edge_floor_is_refused(constitution) -> None:
+    """fx_swing's floor is 2.0 bps after cost. A proposal declaring 5.0 of
+    return against 4.0 of cost clears 1.0 bps, which is under it."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(book="fx_swing", expected_return_bps=5.0, expected_cost_bps=4.0),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert isinstance(decision, RejectedRiskDecision)
+    assert RejectionReason.EDGE_BELOW_FLOOR in decision.reasons
+
+
+def test_a_proposal_exactly_at_the_edge_floor_is_permitted(constitution) -> None:
+    """The boundary belongs to the permitted side, and asserting it is what
+    stops the comparison drifting between < and <=."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(book="fx_swing", expected_return_bps=6.0, expected_cost_bps=4.0),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert RejectionReason.EDGE_BELOW_FLOOR in decision.checks_passed
+
+
+def test_a_scalp_proposal_holding_longer_than_its_book_permits_is_refused(constitution) -> None:
+    """fx_scalp caps a position at 300 seconds."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(book="fx_scalp", max_holding_seconds=600),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert isinstance(decision, RejectedRiskDecision)
+    assert RejectionReason.HOLDING_EXCEEDS_BOOK_LIMIT in decision.reasons
+
+
+def test_a_swing_proposal_whose_swap_eats_its_edge_is_refused(constitution) -> None:
+    """fx_swing permits swap up to 20% of expected edge. 2.0 bps of swap
+    against 6.0 of return and 4.0 of cost is 2.0 over an edge of 2.0 -- 100%."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(
+            book="fx_swing",
+            expected_return_bps=6.0,
+            expected_cost_bps=4.0,
+            expected_swap_cost_bps=2.0,
+        ),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert isinstance(decision, RejectedRiskDecision)
+    assert RejectionReason.SWAP_EXCEEDS_EDGE_FRACTION in decision.reasons
+
+
+def test_the_duration_cap_does_not_apply_to_a_swing_book(constitution) -> None:
+    """max_position_duration_seconds is declared on ScalpLimits only. A swing
+    proposal holding nine hours is not refused by a limit its book does not
+    have -- and a hasattr-style check would wrongly skip the scalp case too."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(book="fx_swing", max_holding_seconds=32400),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert RejectionReason.HOLDING_EXCEEDS_BOOK_LIMIT not in decision.reasons
+
+
 def test_an_approved_decision_carries_the_realised_risk_not_the_budget(constitution) -> None:
     """fx_scalp: capital_fraction 0.30, risk_per_trade_pct 0.25.
 
