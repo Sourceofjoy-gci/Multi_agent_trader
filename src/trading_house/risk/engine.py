@@ -264,21 +264,32 @@ class RiskEngine:
         return contract.can_open_long if side is Side.BUY else contract.can_open_short
 
     @staticmethod
-    def _edge_clears_floor(book: BookLimits, proposal: TradeProposal) -> bool:
-        """Declared return minus declared cost, against the book's floor.
+    def _expected_edge_bps(proposal: TradeProposal) -> Decimal:
+        """Declared return minus declared cost, in bps.
+
+        The bps fields on TradeProposal are FiniteFloat (analytics); the
+        constitution's limits are Decimal (money-adjacent). Converting
+        through str rather than comparing float to Decimal directly avoids
+        binary floating-point artefacts leaking into a money-adjacent
+        comparison. A single helper, rather than this expression repeated at
+        each call site, is what makes the two callers agree by construction
+        instead of by both remembering the same rule -- the shape of a
+        Critical this phase already shipped once, in the session/snapshot
+        split.
+        """
+
+        return Decimal(str(proposal.expected_return_bps)) - Decimal(str(proposal.expected_cost_bps))
+
+    @classmethod
+    def _edge_clears_floor(cls, book: BookLimits, proposal: TradeProposal) -> bool:
+        """The expected edge, against the book's floor.
 
         The first gate in this system to read a proposal's declared economics.
         Until Phase 7 a strategy could claim any expected return and nothing
         looked -- which is why the numbers had no reason to be honest.
-
-        The bps fields on TradeProposal are FiniteFloat (analytics); the
-        constitution's limits are Decimal (money-adjacent). Converting through
-        str rather than comparing float to Decimal directly avoids binary
-        floating-point artefacts leaking into a money-adjacent comparison.
         """
 
-        edge = Decimal(str(proposal.expected_return_bps)) - Decimal(str(proposal.expected_cost_bps))
-        return edge >= book.limits.min_expected_edge_after_cost_bps
+        return cls._expected_edge_bps(proposal) >= book.limits.min_expected_edge_after_cost_bps
 
     @staticmethod
     def _holding_within_book_limit(book: BookLimits, proposal: TradeProposal) -> bool:
@@ -290,16 +301,16 @@ class RiskEngine:
             return True
         return proposal.max_holding_seconds <= book.limits.max_position_duration_seconds
 
-    @staticmethod
-    def _swap_within_edge_fraction(book: BookLimits, proposal: TradeProposal) -> bool:
+    @classmethod
+    def _swap_within_edge_fraction(cls, book: BookLimits, proposal: TradeProposal) -> bool:
         """Swing books cap swap as a percentage of expected edge.
 
-        See _edge_clears_floor for why the conversion goes through str.
+        See _expected_edge_bps for why the conversion goes through str.
         """
 
         if not isinstance(book.limits, SwingLimits):
             return True
-        edge = Decimal(str(proposal.expected_return_bps)) - Decimal(str(proposal.expected_cost_bps))
+        edge = cls._expected_edge_bps(proposal)
         if edge <= 0:
             return False
         swap = Decimal(str(proposal.expected_swap_cost_bps))

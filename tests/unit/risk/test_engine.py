@@ -252,6 +252,21 @@ def test_a_scalp_proposal_holding_longer_than_its_book_permits_is_refused(consti
     assert RejectionReason.HOLDING_EXCEEDS_BOOK_LIMIT in decision.reasons
 
 
+def test_a_scalp_proposal_holding_exactly_at_its_book_limit_is_permitted(constitution) -> None:
+    """fx_scalp caps a position at 300 seconds. max_holding_seconds is set to
+    that cap explicitly here, rather than relying on it matching whatever
+    ``_proposal()``'s own default happens to be -- the boundary must stay
+    protected even if that fixture default ever changes."""
+
+    decision = _engine(constitution).evaluate(
+        _proposal(book="fx_scalp", max_holding_seconds=300),
+        contract=_contract(),
+        **_facts(),
+    )
+
+    assert RejectionReason.HOLDING_EXCEEDS_BOOK_LIMIT in decision.checks_passed
+
+
 def test_a_swing_proposal_whose_swap_eats_its_edge_is_refused(constitution) -> None:
     """fx_swing permits swap up to 20% of expected edge. 2.0 bps of swap
     against 6.0 of return and 4.0 of cost is 2.0 over an edge of 2.0 -- 100%."""
