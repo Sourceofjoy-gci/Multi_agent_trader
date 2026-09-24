@@ -8,24 +8,28 @@ from tests.unit.research.backtest.conftest import (
     HALF_SPREAD,
     ORIGIN,
     POINT,
-    AlwaysAffordableMargin,
     PeekingStrategy,
     ToyStrategy,
-    _constitution,
+    _bar,
     _contract,
     _ramp,
     _run,
     ramp_price,
 )
 from trading_house.core.errors import TimestampError
-from trading_house.core.schemas import RejectedRiskDecision
-from trading_house.features.sessions import session_of
+from trading_house.core.schemas import Side
 from trading_house.marketdata.models import BarQuality, Timeframe, duration
-from trading_house.research.backtest.engine import BacktestRefused, ReplayClock
+from trading_house.research.backtest.engine import (
+    BacktestRefused,
+    trail_candidate,
+)
 from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import RefusalKind
-from trading_house.research.backtest.snapshot import FeatureSnapshot
-from trading_house.risk.engine import RiskEngine
+from trading_house.research.backtest.strategy import (
+    ChandelierPolicy,
+    FixedTargetPolicy,
+    NoExitPolicy,
+)
 
 
 def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
@@ -376,64 +380,113 @@ def test_a_strategy_that_peeks_is_refused() -> None:
     assert caught.value.kind is RefusalKind.LOOKAHEAD
 
 
-def test_no_run_can_exit_on_a_target_while_the_risk_engine_produces_none() -> None:
-    """``ExitKind.TARGET`` is unreachable through the engine today, and this
-    says so out loud so the day it changes, something fails.
+def test_the_fixed_target_arm_exits_on_its_target_end_to_end() -> None:
+    """The arm Phase 6 could only describe. ``resolve_exit`` has implemented
+    target fills on both sides since Phase 6 and never once executed, because
+    ``RiskEngine`` returned ``None`` for every take-profit; Phase 7 gave it
+    ``target_r_multiple`` to price one from, and this is the first run in which
+    ``ExitKind.TARGET`` actually occurs.
 
-    ``RiskEngine`` hard-codes ``take_profit_price`` to ``None`` on every
-    executable decision, so ``_Signal.target`` is always ``None`` and
-    ``resolve_exit``'s target branch never fires in a real run. D-2 --
-    stop before target, this phase's headline pessimism rule -- is therefore
-    proven only in ``test_fills.py`` and never end to end.
-
-    The cause is asserted, not just the consequence. Over this ramp a
-    take-profit set any realistic distance away would not be reached inside
-    the toy's twelve-bar hold, so "no trade exited on a target" would keep
-    passing after the risk engine started producing them -- vacuously, and
-    for a reason unrelated to its claim. The decision's own
-    ``take_profit_price`` is what actually changes in Phase 7, so that is
-    what is pinned.
+    Every number is derived, not read off the simulator. The risk engine prices
+    the target off the stop distance IT emitted: the structural term is the
+    widest of section 8.2's four, so that distance is 0.00100 from the
+    reference price ``ramp_price(20)``, and 0.05R of it is 5 points. Target
+    = 1.10020 + 0.00005 = 1.10025, rounded away from entry onto the tick grid,
+    which it already sits on. The ramp's bar *i* highs reach one point above
+    ``ramp_price(i)``, so the first bar whose high touches 1.10025 is bar 24 --
+    eight bars inside the toy's eleven-bar hold, which is what keeps the time
+    stop from taking this trade instead.
     """
 
     bars = _ramp(60)
-    result = _run(bars=bars, strategy=ToyStrategy(every_n=20))
-
-    assert result.trades
-    assert ExitKind.TARGET not in {trade.exit_kind for trade in result.trades}
-
-    # The cause, read off the same call the loop makes at the same instant.
-    warm = bars[FIRST_SNAPSHOT_BAR]
-    snapshot = FeatureSnapshot(
-        as_of=warm.availability_time,
-        instrument_id="fx.eurusd",
-        timeframe=Timeframe.M1,
-        bar=warm,
-        atr=Decimal("0.00002"),  # every bar's true range is exactly two points
-        median_spread_points=Decimal(warm.spread),
-        tick_spread_points=Decimal(warm.spread),
-        tick_time=warm.availability_time,
-        session=session_of(warm.event_time),
-        prior_session_return=None,
-        session_open_price=bars[0].open,
-        bars_since_session_open=FIRST_SNAPSHOT_BAR,
-    )
-    proposal = ToyStrategy(every_n=1).evaluate(snapshot)
-    assert proposal is not None
-    decision = RiskEngine(
-        _constitution(), ReplayClock(instant=snapshot.as_of)
-    ).evaluate_for_execution(
-        proposal,
-        margin=AlwaysAffordableMargin(),
-        contract=_contract(),
-        firm_equity=Decimal("100000"),
-        atr=snapshot.atr,
-        median_spread_points=snapshot.median_spread_points,
-        tick_spread_points=snapshot.tick_spread_points,
-        tick_time=snapshot.tick_time,
+    result = _run(
+        bars=bars,
+        strategy=ToyStrategy(
+            every_n=1000,
+            target_r_multiple=Decimal("0.05"),
+            policy=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("0.05")),
+        ),
     )
 
-    assert not isinstance(decision, RejectedRiskDecision)
-    assert decision.take_profit_price is None
+    assert [trade.exit_kind for trade in result.trades] == [ExitKind.TARGET]
+    assert result.trades[0].exit_price == Decimal("1.10025")
+    assert result.trades[0].exit_at == bars[24].event_time
+
+
+def test_a_target_the_risk_engine_priced_is_ignored_unless_the_arm_names_it() -> None:
+    """The A/B's integrity. One strategy is meant to run three times with three
+    policies, so the natural shape is a proposal that always carries its
+    ``target_r_multiple`` and a policy that says which arm this run is. If the
+    loop took whatever take-profit the risk decision happened to hold, the
+    baseline and chandelier arms would both quietly acquire a target and the
+    comparison would be between three things that all have one.
+
+    Same bars and the same proposals as the test above -- the risk engine
+    prices the identical 1.10025 target on both runs -- and only the declared
+    arm differs. This one must reach its time stop instead.
+    """
+
+    result = _run(
+        bars=_ramp(60),
+        strategy=ToyStrategy(
+            every_n=1000,
+            target_r_multiple=Decimal("0.05"),
+            policy=NoExitPolicy(kind="none"),
+        ),
+    )
+
+    assert [trade.exit_kind for trade in result.trades] == [ExitKind.TIME]
+
+
+def test_a_chandelier_run_stops_out_at_the_level_the_previous_bar_set() -> None:
+    """The trail, wired, and the bar-ordering rule that keeps it honest.
+
+    Over the ramp the clamp binds every bar -- 3 ATRs is 6 points while the
+    broker floor is 20 -- so the stop tracks exactly 20 points under each
+    close. Entry is bar 21; by bar 30 the stop stands at
+    ``ramp_price(30) - 0.00020`` = 1.10010, against the risk engine's original
+    1.09920.
+
+    Bar 31 is then replaced by a spike: it dips to 1.10005 and rallies to close
+    at 1.10150. That single bar separates three implementations.
+
+    * No trail: 1.10005 never reaches 1.09920, so the position survives to the
+      time stop on bar 32 -- which the companion assertion below runs, on the
+      same bars, to prove the difference belongs to the policy.
+    * Trailing AFTER the bar's exits are resolved, which is what this engine
+      does: the stop is the one bar 30 set, 1.10010, and the exit fills there.
+    * Trailing BEFORE them, which the brief asked for: bar 31's own close would
+      first drag the stop up to 1.10130, and the exit would fill at the bar's
+      open, 1.10031 -- 21 points better, on a bar whose low the market may well
+      have reached first. A bar cannot order its own extremes; that is the same
+      fact D-2 exists to respect, and reading it the flattering way is the
+      defect this assertion pins.
+    """
+
+    bars = _ramp(40)
+    spike = bars[31].model_copy(
+        update={"high": Decimal("1.10200"), "low": Decimal("1.10005"), "close": Decimal("1.10150")}
+    )
+    bars = (*bars[:31], spike, *bars[32:])
+
+    trailed = _run(
+        bars=bars,
+        strategy=ToyStrategy(
+            every_n=1000,
+            policy=ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal(3), min_step_points=Decimal(1)
+            ),
+        ),
+    )
+    baseline = _run(bars=bars, strategy=ToyStrategy(every_n=1000))
+
+    assert [trade.exit_kind for trade in trailed.trades] == [ExitKind.STOP]
+    assert trailed.trades[0].exit_at == spike.event_time
+    assert trailed.trades[0].exit_price == Decimal("1.10010")
+    # The same bars, the same proposals, the baseline arm: no stop is reached
+    # and the position runs to its deadline on bar 32.
+    assert [trade.exit_kind for trade in baseline.trades] == [ExitKind.TIME]
+    assert baseline.trades[0].exit_at == bars[32].event_time
 
 
 @pytest.mark.parametrize("field_name", ["start", "end"])
@@ -477,3 +530,92 @@ def test_a_request_normalises_an_offset_aware_range_to_utc() -> None:
 
     assert offset.run_id == utc.run_id
     assert offset.digest() == utc.digest()
+
+
+def test_a_chandelier_stop_only_ever_moves_toward_profit() -> None:
+    """I-8. A falling high must not drag a long's stop back down."""
+
+    policy = ChandelierPolicy(
+        kind="chandelier", atr_multiple=Decimal(3), min_step_points=Decimal(1)
+    )
+    high = _bar(high=Decimal("1.10500"))
+    low = _bar(high=Decimal("1.10100"))
+
+    raised = trail_candidate(
+        side=Side.BUY,
+        current_stop=Decimal("1.09900"),
+        bar=high,
+        atr=Decimal("0.00010"),
+        contract=_contract(),
+        policy=policy,
+    )
+    assert raised is not None
+    assert raised > Decimal("1.09900")
+
+    assert (
+        trail_candidate(
+            side=Side.BUY,
+            current_stop=raised,
+            bar=low,
+            atr=Decimal("0.00010"),
+            contract=_contract(),
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_a_candidate_inside_the_minimum_step_is_ignored() -> None:
+    """Without hysteresis the stop is re-modified on every bar, which in live
+    trading is a request per tick to the broker.
+
+    ``current_stop`` is placed so that the candidate genuinely IMPROVES on it,
+    by 2 points against a 100-point step. Only hysteresis can refuse this one:
+    the monotonic check would have let it through, which the second half
+    demonstrates by asking the same question with a one-point step and getting
+    a candidate back. Without that half the ``None`` would prove nothing --
+    every rule in the function returns ``None``.
+    """
+
+    def ask(step: Decimal) -> Decimal | None:
+        return trail_candidate(
+            side=Side.BUY,
+            current_stop=Decimal("1.10450"),
+            bar=_bar(high=Decimal("1.10500")),
+            atr=Decimal("0.00010"),
+            contract=_contract(),
+            policy=ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal(3), min_step_points=step
+            ),
+        )
+
+    assert ask(Decimal(100)) is None
+    assert ask(Decimal(1)) == Decimal("1.10470")
+
+
+def test_a_candidate_closer_than_the_brokers_minimum_distance_is_clamped() -> None:
+    """A stop inside the freeze distance is rejected by MT5 outright, so the
+    simulator must not produce one or it reports fills the venue would refuse.
+
+    The ATR multiple is small enough that the raw Chandelier level sits one
+    tenth of a point under the close -- far inside the floor -- so the clamp
+    is the only thing that can put the returned stop outside it.
+    """
+
+    policy = ChandelierPolicy(
+        kind="chandelier", atr_multiple=Decimal("0.01"), min_step_points=Decimal(1)
+    )
+    bar = _bar(high=Decimal("1.10500"), close=Decimal("1.10500"))
+    contract = _contract()
+
+    candidate = trail_candidate(
+        side=Side.BUY,
+        current_stop=Decimal("1.09900"),
+        bar=bar,
+        atr=Decimal("0.00010"),
+        contract=contract,
+        policy=policy,
+    )
+
+    assert candidate is not None
+    assert bar.close - candidate >= max(contract.min_stop_distance, contract.freeze_distance)

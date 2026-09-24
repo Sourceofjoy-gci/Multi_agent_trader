@@ -29,7 +29,7 @@ from trading_house.research.backtest.engine import (
 )
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.snapshot import FeatureSnapshot
-from trading_house.research.backtest.strategy import TrailPolicy
+from trading_house.research.backtest.strategy import ExitPolicy, NoExitPolicy
 from trading_house.risk.engine import RiskEngine
 
 CONFIG_DIR = Path(__file__).resolve().parents[4] / "config"
@@ -131,6 +131,43 @@ def _cost_model(**overrides: object) -> CostModel:
         "stress_multiplier": Decimal(1),
     }
     return CostModel(**{**defaults, **overrides})  # type: ignore[arg-type]
+
+
+def _bar(
+    *,
+    high: Decimal,
+    low: Decimal | None = None,
+    close: Decimal | None = None,
+    event_time: datetime | None = None,
+    spread: int = RAMP_SPREAD_POINTS,
+) -> Bar:
+    """One standalone bar, for the tests that ask a pure function about a price
+    rather than replaying a series.
+
+    ``close`` defaults to ``high`` rather than to some lower price on purpose.
+    ``trail_candidate`` clamps against the close, so a default below the high
+    would make the CLAMP -- not the monotonic check -- the reason a falling bar
+    returns ``None``, and the monotonicity test would pass without ever
+    reaching the rule it names. ``low`` then defaults below both, so the bar
+    stays coherent whatever the caller passes for ``close``.
+    """
+
+    settled = close if close is not None else high
+    return Bar(
+        instrument_id="fx.eurusd",
+        timeframe=Timeframe.M1,
+        event_time=event_time if event_time is not None else ORIGIN,
+        availability_time=(event_time if event_time is not None else ORIGIN)
+        + duration(Timeframe.M1),
+        open=settled,
+        high=high,
+        low=low if low is not None else min(high, settled) - POINT,
+        close=settled,
+        tick_volume=0,
+        spread=spread,
+        real_volume=0,
+        quality=BarQuality.OK,
+    )
 
 
 def _ramp(n: int, *, start: datetime | None = None) -> tuple[Bar, ...]:
@@ -255,6 +292,18 @@ class ToyStrategy:
     diverge, and the engine must honour the proposal's -- which is exactly
     what a strategy stating one number cannot show."""
 
+    policy: ExitPolicy = field(default_factory=lambda: NoExitPolicy(kind="none"))
+    """The declared arm. ``none`` is the baseline the other two are measured
+    against, so it is the default here for the same reason it is the default
+    in a strategy spec: nothing is trailed and no target is honoured unless a
+    run says so out loud."""
+
+    target_r_multiple: Decimal | None = None
+    """Stamped on the proposal for the risk engine to price a target from.
+    Deliberately independent of ``policy``: a run that sets this WITHOUT
+    naming ``fixed_target`` is what proves the engine gates the target on the
+    arm rather than on whatever the risk decision happened to carry."""
+
     id: str = "toy"
     version: str = "1"
     book: str = "fx_swing"
@@ -266,8 +315,8 @@ class ToyStrategy:
             return None
         return self._proposal(snapshot)
 
-    def trail_policy(self) -> TrailPolicy | None:
-        return TrailPolicy(kind="none")
+    def exit_policy(self) -> ExitPolicy:
+        return self.policy
 
     def _stamps(self, snapshot: FeatureSnapshot) -> dict[str, object]:
         return {
@@ -293,6 +342,7 @@ class ToyStrategy:
             # widest of section 8.2's four and the stop distance is exactly
             # 0.00100 -- which is what makes the lot size hand-computable.
             invalidation_price=entry - Decimal("0.00100"),
+            target_r_multiple=self.target_r_multiple,
             max_holding_seconds=self.proposal_holding_seconds or self.max_holding_seconds,
             expected_return_bps=5.0,
             expected_return_stdev_bps=2.0,

@@ -32,7 +32,7 @@ from trading_house.features.engine import BarReader, FeatureEngine
 from trading_house.marketdata.models import Timeframe, duration
 from trading_house.research.backtest.engine import Backtester, ReplayClock
 from trading_house.research.backtest.snapshot import MIN_HORIZON_BARS, FeatureSnapshot
-from trading_house.research.backtest.strategy import Strategy, TrailPolicy
+from trading_house.research.backtest.strategy import ExitPolicy, NoExitPolicy, Strategy
 from trading_house.risk.engine import MARGIN_HEADROOM_MULTIPLE, RiskEngine
 
 TOY_STRATEGY_ID: Final[str] = "toy"
@@ -110,8 +110,8 @@ class ToyStrategy:
             return None
         return self._proposal(snapshot)
 
-    def trail_policy(self) -> TrailPolicy | None:
-        return TrailPolicy(kind="none")
+    def exit_policy(self) -> ExitPolicy:
+        return NoExitPolicy(kind="none")
 
     def _proposal(self, snapshot: FeatureSnapshot) -> TradeProposal:
         as_of = snapshot.as_of

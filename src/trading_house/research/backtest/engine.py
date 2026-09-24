@@ -13,6 +13,13 @@ doing the right things in the wrong sequence. Per bar:
    ``ReplayClock`` is advanced to it.
 4. A ``FeatureSnapshot`` is built at that ``as_of``, or the bar is skipped
    because the feature windows have no history yet.
+4a. Under a chandelier policy, an open position's stop is trailed from the
+   snapshot's ATR and this bar's extreme. Deliberately here and not at step 2:
+   a stop set from a bar's own high must not be tested against that same bar's
+   low, because the bar cannot say which came first. The level set here governs
+   the NEXT bar, which is also what the live guard does -- it reacts to a
+   closed bar. A bar with no snapshot trails nothing, the same rule step 4
+   already applies to entries.
 5. ``strategy.evaluate`` sees that snapshot and nothing else.
 6. A proposal claiming availability later than the snapshot refuses the run.
 7. With a position open or an entry queued, the proposal is dropped: one
@@ -47,8 +54,13 @@ from trading_house.research.backtest.costs import CostModel, commission_cost, sw
 from trading_house.research.backtest.fills import Exit, ExitKind, Fill, entry_fill, resolve_exit
 from trading_house.research.backtest.result import BacktestResult, RefusalKind, SimulatedTrade
 from trading_house.research.backtest.snapshot import FeatureSnapshot, horizon_is_simulatable
-from trading_house.research.backtest.strategy import Strategy
+from trading_house.research.backtest.strategy import (
+    ChandelierPolicy,
+    FixedTargetPolicy,
+    Strategy,
+)
 from trading_house.risk.engine import MarginPort, RiskEngine
+from trading_house.risk.sizing import quantise_down, quantise_up
 
 _BEFORE_ANY_BAR: datetime = datetime.min.replace(tzinfo=UTC)
 """``ReplayClock``'s starting instant: a time no market ever traded at."""
@@ -165,11 +177,78 @@ class _Signal:
     max_holding_seconds: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _Position:
+    """An open position, and the one mutable thing in this module besides the
+    clock: ``stop`` starts at the risk engine's level and is the only field a
+    trail is allowed to move. ``signal.stop`` keeps the original for the record,
+    so a trailed run can still say where the validated stop was."""
+
     signal: _Signal
     entry: Fill
     deadline: datetime
+    stop: Decimal
+
+
+def trail_candidate(
+    *,
+    side: Side,
+    current_stop: Decimal,
+    bar: Bar,
+    atr: Decimal,
+    contract: InstrumentContract,
+    policy: ChandelierPolicy,
+) -> Decimal | None:
+    """Where a Chandelier trail would move this position's stop, or ``None``.
+
+    The pure analogue of spec section 9.3's ``maybe_trail``, minus everything
+    that needs a broker: no ticket, no retcodes, no rate limit. What survives
+    is the arithmetic and, more importantly, its ORDER.
+
+    1. **Clamp** the raw level to the broker's minimum distance from the
+       current price -- ``max(min_stop_distance, freeze_distance)``, D-6's
+       pair, because a stop inside the freeze band is legal to place and
+       illegal to MODIFY, which is the one thing a trail does on every bar.
+    2. **Hysteresis.** A candidate nearer the current stop than
+       ``min_step_points`` is ignored.
+    3. **Monotonic (I-8).** The stop never moves away from profit.
+
+    Clamping FIRST is the part worth stating. The clamp pushes the candidate
+    away from price; run after the monotonic check, it could take a level that
+    had just been proved an improvement and push it back past the current stop,
+    producing exactly the backwards move step 3 exists to forbid. Steps 2 and 3
+    are both filters over the same clamped number and so commute with each
+    other; step 1 commutes with neither.
+
+    The reference price is the bar's close, which is this simulator's "current
+    price": a bar carries no tick, and the close is the last price the bar can
+    honestly be said to have traded at.
+
+    Returns the trailed stop, already on the contract's tick grid -- rounded
+    AWAY from price on both sides, the same direction ``stop_price`` rounds,
+    so the rounding can only widen the distance the clamp just guaranteed and
+    never narrow it back inside the floor.
+    """
+
+    floor = max(contract.min_stop_distance, contract.freeze_distance)
+    if side is Side.BUY:
+        raw = bar.high - policy.atr_multiple * atr
+        clamped = min(raw, bar.close - floor)
+        # A long's stop below zero is not a price. It can only arise from an
+        # absurd multiple, and quantise_down refuses a negative outright, so
+        # it is answered here as "no candidate" rather than as an exception
+        # escaping a pure function.
+        if clamped <= 0:
+            return None
+        candidate = quantise_down(clamped, contract.price_increment)
+    else:
+        raw = bar.low + policy.atr_multiple * atr
+        candidate = quantise_up(max(raw, bar.close + floor), contract.price_increment)
+
+    if abs(candidate - current_stop) < policy.min_step_points * contract.point_size:
+        return None
+    improves = candidate > current_stop if side is Side.BUY else candidate < current_stop
+    return candidate if improves else None
 
 
 class Backtester:
@@ -200,6 +279,12 @@ class Backtester:
             raise BacktestRefused(RefusalKind.HORIZON)
         self._refuse_outside_coverage(request)
 
+        # Read once. A strategy's exit policy is a declaration made before the
+        # run (design section 9.2: no sweeps), not a per-bar decision, and
+        # asking it every bar would let one drift mid-run and make the result
+        # describe no single arm.
+        policy = strategy.exit_policy()
+
         trades: list[SimulatedTrade] = []
         rejections: list[tuple[str, ...]] = []
         position: _Position | None = None
@@ -227,6 +312,17 @@ class Backtester:
             if snapshot is None:
                 snapshots_skipped += 1
                 continue
+            if position is not None and isinstance(policy, ChandelierPolicy):
+                raised = trail_candidate(
+                    side=position.signal.side,
+                    current_stop=position.stop,
+                    bar=bar,
+                    atr=snapshot.atr,
+                    contract=self._contract,
+                    policy=policy,
+                )
+                if raised is not None:
+                    position.stop = raised
             proposal = strategy.evaluate(snapshot)
             if proposal is None:
                 continue
@@ -256,18 +352,17 @@ class Backtester:
                 side=proposal.side,
                 lots=decision.approved_quantity.amount,
                 stop=decision.stop_loss_price,
-                # Dormant, and deliberately wired anyway. ``RiskEngine``
-                # hard-codes ``take_profit_price`` to ``None`` on every
-                # executable decision (risk/engine.py), so this is always
-                # ``None`` and ``ExitKind.TARGET`` cannot occur in any run this
-                # phase can perform -- D-2's stop-before-target pessimism is
-                # proven in ``resolve_exit``'s unit tests and nowhere end to
-                # end. The wiring stays because the day the risk engine starts
-                # producing take-profits is the day the simulator must honour
-                # them; ``test_engine.py`` pins the dormancy so that day
-                # announces itself. Producing them is Phase 7's, not this
-                # phase's.
-                target=decision.take_profit_price,
+                # Gated on the declared arm rather than taken whenever the
+                # risk engine produced one. The engine prices a target from
+                # the proposal's own ``target_r_multiple``, so a strategy that
+                # stamps one on every proposal -- the natural way to write one
+                # strategy and run it three times -- would otherwise carry a
+                # live target into the chandelier and baseline arms too, and
+                # the A/B would compare three things that all have targets.
+                # The policy is what names the arm; this reads it.
+                target=(
+                    decision.take_profit_price if isinstance(policy, FixedTargetPolicy) else None
+                ),
                 max_holding_seconds=proposal.max_holding_seconds,
             )
 
@@ -416,6 +511,7 @@ class Backtester:
             signal=signal,
             entry=fill,
             deadline=fill.at + timedelta(seconds=signal.max_holding_seconds),
+            stop=signal.stop,
         )
 
     def _close_if_done(
@@ -426,13 +522,23 @@ class Backtester:
         The stop and the target are asked first and the time stop second, so a
         bar that could have done either is charged the stop -- the same
         pessimism ``resolve_exit`` applies within a bar (D-2).
+
+        ``position.stop``, not ``signal.stop``: under a chandelier policy this
+        is the trailed level, which the loop moved at the END of an earlier
+        bar. That ordering is the honest one. Trailing from THIS bar's high and
+        then testing THIS bar's low against the result would let a bar that
+        swept down and then rallied report an exit at a stop the market never
+        traded through in that order -- and it flatters rather than punishes,
+        because a raised long stop that the bar's low reaches exits at a BETTER
+        price than the original. A bar's OHLC cannot order its own extremes,
+        which is the same fact D-2 exists to respect.
         """
 
         signal = position.signal
         closed = resolve_exit(
             bar=bar,
             side=signal.side,
-            stop=signal.stop,
+            stop=position.stop,
             target=signal.target,
             contract=self._contract,
             model=request.cost_model,
