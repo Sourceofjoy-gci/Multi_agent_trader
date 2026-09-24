@@ -96,12 +96,19 @@ class FeatureEngine:
         """Close-to-close return of the window that ended at or before ``as_of``.
 
         ``None`` when that window holds no completed bars -- a holiday, a
-        data gap, or the first window in the store -- which is distinct from
-        a return of zero: a strategy must be able to tell a feed outage from
-        a flat night, or it stands down for the wrong reason.
+        data gap, the first window in the store, or a store whose coverage
+        only starts partway through the window -- which is distinct from a
+        return of zero: a strategy must be able to tell a feed outage from a
+        flat night, or it stands down for the wrong reason. A partially
+        covered window is not one this can answer about: computing a return
+        over only its covered tail would misreport a shorter move as the
+        whole session's.
         """
 
         _session, start, end = preceding_session_window(as_of)
+        coverage = self._store.coverage(instrument_id, timeframe)
+        if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
+            return None
         # start is the window's own lower bound, so the store is asked for no
         # bar the `event_time < end` filter below would discard anyway.
         bars = [
@@ -132,15 +139,26 @@ class FeatureEngine:
     ) -> Sequence[Bar]:
         """Bars of the window containing ``as_of``, known by ``as_of``.
 
-        Raises ``InsufficientHistoryError`` when empty: ``session_open_price``
-        has no sensible answer without a bar, and a caller only asks this
-        inside a window it is already in -- a window with nothing knowable
-        yet is a warm-up problem, the same family the guard in ``_window``
-        refuses for rather than inventing a placeholder answer.
+        Raises ``InsufficientHistoryError`` when the window is empty, or
+        when the store's coverage only starts partway through it -- a
+        covered tail is not the window's real opening bar, and
+        ``session_open_price`` has no sensible answer without one. A caller
+        only asks this inside a window it is already in, which is a warm-up
+        problem either way, the same family the guard in ``_window`` refuses
+        for rather than inventing a placeholder answer.
         """
 
         session = session_of(as_of)
         start, end = session_bounds(as_of, session)
+        coverage = self._store.coverage(instrument_id, timeframe)
+        if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
+            raise InsufficientHistoryError
+        # Unlike prior_session_return's identical-looking filter, this one is
+        # redundant here: `_read` already ends at `as_of`, and `as_of < end`
+        # always holds for the window containing `as_of`. Kept for symmetry
+        # with prior_session_return, where the same clause is load-bearing
+        # (the preceding window's `end` can sit strictly before `as_of`) --
+        # so a later reader does not delete the one that matters.
         bars = [
             bar
             for bar in self._read(instrument_id, timeframe, start=start, as_of=as_of)

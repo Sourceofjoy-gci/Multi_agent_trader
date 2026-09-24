@@ -365,6 +365,24 @@ def _flat_asian_then_london() -> tuple[Bar, ...]:
     )
 
 
+def _partial_asian_coverage() -> tuple[Bar, ...]:
+    """Coverage begins mid-Asian-session (03:00) -- after the window's own
+    start (00:00) -- as if collection had only just begun. The store can
+    see a covered tail of the session, not the whole thing."""
+
+    return (
+        _m15_bar(datetime(2026, 9, 21, 3, 0, tzinfo=UTC), Decimal("1.10050")),
+        _m15_bar(datetime(2026, 9, 21, 6, 45, tzinfo=UTC), Decimal("1.10110")),
+    )
+
+
+def _partial_london_coverage() -> tuple[Bar, ...]:
+    """Coverage begins after the London window's own start (07:00) -- the
+    store missed the session's actual opening bar."""
+
+    return (_m15_bar(datetime(2026, 9, 21, 7, 30, tzinfo=UTC), Decimal("1.10200")),)
+
+
 def test_the_prior_session_return_is_close_to_close_over_the_preceding_window() -> None:
     """At the London open the preceding window is the Asian session."""
 
@@ -415,3 +433,79 @@ def test_the_session_open_price_and_bar_count_at_the_open() -> None:
 
     assert engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of) == Decimal("1.10120")
     assert engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of) == 0
+
+
+def test_session_open_price_refuses_at_the_windows_own_start() -> None:
+    """As of 07:00 exactly, the London window's first bar has not closed --
+    the same fact that made the test above use 07:15. This exercises the
+    original ``not bars`` refusal in ``_current_session_bars``, which had no
+    test even though an ordinary caller reaches it on any session-boundary
+    ``as_of``."""
+
+    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.session_open_price(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+
+
+def test_bars_since_session_open_refuses_at_the_windows_own_start() -> None:
+    engine = FeatureEngine(FakeBarReader(_asian_then_london()))
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.bars_since_session_open(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+
+
+def test_a_partially_covered_preceding_window_returns_none_not_a_partial_return() -> None:
+    """Coverage starting mid-Asian-session must not be silently sliced into
+    a shorter return over just its covered tail -- that would misreport a
+    few hours' move as the whole overnight session's, which is worse than a
+    crash because it looks like a real answer."""
+
+    engine = FeatureEngine(FakeBarReader(_partial_asian_coverage()))
+
+    assert (
+        engine.prior_session_return(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+        is None
+    )
+
+
+def test_session_open_price_refuses_on_partial_coverage_not_coverage_error() -> None:
+    """Coverage starting after the window's own start must surface as the
+    engine's own refusal, not the store's ``CoverageError`` leaking through
+    -- clamping ``start`` to coverage and reading anyway would compute a
+    plausible-looking but wrong open price instead."""
+
+    engine = FeatureEngine(FakeBarReader(_partial_london_coverage()))
+    as_of = datetime(2026, 9, 21, 7, 45, tzinfo=UTC)
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of)
+
+
+def test_bars_since_session_open_refuses_on_partial_coverage_not_coverage_error() -> None:
+    engine = FeatureEngine(FakeBarReader(_partial_london_coverage()))
+    as_of = datetime(2026, 9, 21, 7, 45, tzinfo=UTC)
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of)
+
+
+def test_prior_session_return_on_an_entirely_empty_store_returns_none() -> None:
+    """The degenerate case of "the first window in the store": no coverage
+    at all, not even a partial one. Reading directly would hit the store's
+    own ``CoverageError`` for a key that has never been backfilled."""
+
+    engine = FeatureEngine(FakeBarReader(()))
+
+    assert (
+        engine.prior_session_return(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+        is None
+    )
