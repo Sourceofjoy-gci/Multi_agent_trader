@@ -133,20 +133,27 @@ def _cost_model(**overrides: object) -> CostModel:
     return CostModel(**{**defaults, **overrides})  # type: ignore[arg-type]
 
 
-def _ramp(n: int) -> tuple[Bar, ...]:
+def _ramp(n: int, *, start: datetime | None = None) -> tuple[Bar, ...]:
     """``n`` consecutive M1 bars rising by exactly one point per bar.
 
     Bar *i* opens and closes at ``ramp_price(i)`` with its high one point
     above and its low one point below, so the true range of every bar is
     exactly two points and Wilder's ATR over the series is exactly 0.00002.
+
+    ``start`` defaults to ``ORIGIN`` (the London session's own boundary). A
+    caller that wants a store whose coverage begins partway through its first
+    session -- the case ``session_open_price``/``bars_since_session_open``
+    raise ``InsufficientHistoryError`` for -- passes a later ``start`` still
+    inside the same session window.
     """
 
+    origin = start if start is not None else ORIGIN
     return tuple(
         Bar(
             instrument_id="fx.eurusd",
             timeframe=Timeframe.M1,
-            event_time=ORIGIN + timedelta(minutes=index),
-            availability_time=ORIGIN + timedelta(minutes=index) + duration(Timeframe.M1),
+            event_time=origin + timedelta(minutes=index),
+            availability_time=origin + timedelta(minutes=index) + duration(Timeframe.M1),
             open=ramp_price(index),
             high=ramp_price(index) + POINT,
             low=ramp_price(index) - POINT,

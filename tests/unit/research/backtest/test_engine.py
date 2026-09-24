@@ -6,6 +6,7 @@ import pytest
 from tests.unit.research.backtest.conftest import (
     FIRST_SNAPSHOT_BAR,
     HALF_SPREAD,
+    ORIGIN,
     POINT,
     AlwaysAffordableMargin,
     PeekingStrategy,
@@ -123,6 +124,32 @@ def test_the_strategy_is_asked_once_per_bar_at_the_loops_own_position() -> None:
     assert [snapshot.bar.event_time for snapshot in strategy.seen] == [
         bar.event_time for bar in bars[FIRST_SNAPSHOT_BAR:]
     ]
+
+
+def test_a_session_the_store_only_partly_covers_is_skipped_not_refused() -> None:
+    """The replay loop's decision for the ``InsufficientHistoryError`` that
+    ``session_open_price``/``bars_since_session_open`` raise at a session's
+    opening instant: skip the bar and try the next one, exactly like an ATR
+    or spread window still warming up. Refusing the whole run would fail an
+    otherwise healthy multi-year replay at its very first session open.
+
+    The ramp starts two minutes into the London session rather than at 07:00,
+    its own boundary, so every bar's current-session window has a true start
+    the store never covers -- ``_current_session_bars`` raises for all of
+    them, every time. The run must still complete without that exception
+    escaping, and the strategy -- which reads only what ``FeatureSnapshot``
+    hands it -- must never be asked anything, because no snapshot exists to
+    ask it about.
+    """
+
+    bars = _ramp(30, start=ORIGIN + timedelta(minutes=2))
+    strategy = ToyStrategy(every_n=1)
+
+    result = _run(bars=bars, strategy=strategy)
+
+    assert strategy.seen == []
+    assert result.trades == ()
+    assert result.bars_seen == 30
 
 
 def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop() -> None:
