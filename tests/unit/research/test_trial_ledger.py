@@ -34,6 +34,29 @@ def test_deflation_count_is_never_the_shortlist() -> None:
     assert deflation_trial_count(trials) != len(completed)
 
 
+def test_a_failed_trial_still_counts_toward_deflation() -> None:
+    """A crashed run is still a draw from the search space, and the DSR
+    denominator may not quietly exclude it."""
+
+    assert deflation_trial_count([_trial(1, TrialStatus.FAILED)]) == 1
+
+
+def test_trial_with_the_same_fields_still_validates() -> None:
+    """The phase 8 contracts are additive; the existing Trial shape is untouched."""
+
+    trial = Trial(
+        trial_id="t-1",
+        spec_id="s-1",
+        agent_run_id="r-1",
+        status=TrialStatus.COMPLETED,
+        sharpe=1.0,
+        registered_at_sequence=1,
+    )
+
+    assert trial.trial_id == "t-1"
+    assert trial.sharpe == 1.0
+
+
 def test_a_completed_trial_requires_a_sharpe() -> None:
     with pytest.raises(ValidationError, match="sharpe"):
         Trial(
