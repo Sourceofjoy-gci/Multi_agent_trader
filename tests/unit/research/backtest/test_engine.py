@@ -11,6 +11,7 @@ from tests.unit.research.backtest.conftest import (
     HALF_SPREAD,
     ORIGIN,
     POINT,
+    FakeBarReader,
     PeekingStrategy,
     ToyStrategy,
     _bar,
@@ -87,6 +88,22 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     # Only the hand-computed absolute can fail.
     assert result.net_pnl == Decimal("-40.44")
     assert result.bars_seen == 60
+
+
+def test_an_assembled_run_materializes_the_source_once_and_keeps_the_known_answer() -> None:
+    bars = _ramp(60)
+    source = FakeBarReader(bars)
+
+    result = _run(
+        bars=bars,
+        strategy=ToyStrategy(every_n=20),
+        reader=source,
+    )
+
+    assert (source.coverage_calls, source.bars_calls) == (1, 1)
+    assert result.trades[0].entry_price == ramp_price(21) + HALF_SPREAD
+    assert result.trades[0].exit_price == ramp_price(32) - HALF_SPREAD
+    assert result.net_pnl == Decimal("-40.44")
 
 
 def test_one_position_at_a_time_and_an_exit_frees_the_slot_on_its_own_bar() -> None:
@@ -280,10 +297,18 @@ def test_a_rejected_decision_is_recorded_with_its_reasons() -> None:
 
 
 def test_a_horizon_under_ten_bars_refuses_the_run() -> None:
+    bars = _ramp(30)
+    source = FakeBarReader(bars)
+
     with pytest.raises(BacktestRefused) as caught:
-        _run(bars=_ramp(30), strategy=ToyStrategy(every_n=5, horizon_seconds=60))
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(every_n=5, horizon_seconds=60),
+            reader=source,
+        )
 
     assert caught.value.kind is RefusalKind.HORIZON
+    assert (source.coverage_calls, source.bars_calls) == (0, 0)
 
 
 def test_a_defective_bar_in_the_range_refuses_the_run() -> None:
@@ -512,44 +537,52 @@ def test_a_range_outside_the_stores_coverage_refuses_the_run() -> None:
     """Simulating across data we do not have is the worst kind of silent lie:
     the equity curve simply has fewer bars than the period claims."""
 
+    bars = _ramp(30)
+    source = FakeBarReader(bars)
+
     with pytest.raises(BacktestRefused) as caught:
         _run(
-            bars=_ramp(30),
+            bars=bars,
             strategy=ToyStrategy(every_n=5),
-            start=_ramp(30)[0].event_time - timedelta(days=30),
+            start=bars[0].event_time - timedelta(days=30),
+            reader=source,
         )
 
     assert caught.value.kind is RefusalKind.COVERAGE
+    assert (source.coverage_calls, source.bars_calls) == (1, 0)
 
 
 def test_a_range_ending_past_the_stores_last_bar_refuses_the_run() -> None:
     """The other half of the coverage boundary, and the half that does work.
 
-    A start reaching further back than anything held is refused twice over:
-    the store raises ``CoverageError`` on it anyway. A too-far end is not --
-    the store answers with fewer bars than the period claims and says nothing,
-    which is the short equity curve with no one to blame.
+    A range reaching outside held coverage is refused before any bar is read.
+    Without that boundary a too-far end would answer with fewer bars than the
+    period claims, which is the short equity curve with no one to blame.
     """
 
     bars = _ramp(30)
+    source = FakeBarReader(bars)
 
     with pytest.raises(BacktestRefused) as caught:
         _run(
             bars=bars,
             strategy=ToyStrategy(every_n=5),
             end=bars[-1].event_time + timedelta(days=1),
+            reader=source,
         )
 
     assert caught.value.kind is RefusalKind.COVERAGE
+    assert (source.coverage_calls, source.bars_calls) == (1, 0)
 
 
 def test_an_end_before_the_start_refuses_the_run() -> None:
-    """A backwards range reaches no bar in any store. Both coverage
-    comparisons pass, the loop never runs, and the result is bars_seen=0 with
-    no trades and no refusal -- indistinguishable from a strategy that proposed
-    nothing. The same silent lie, through a different door."""
+    """A backwards range reaches no bar in any store. The loop never runs, and
+    the result would be bars_seen=0 with no trades and no refusal --
+    indistinguishable from a strategy that proposed nothing. The same silent
+    lie, through a different door."""
 
     bars = _ramp(30)
+    source = FakeBarReader(bars)
 
     with pytest.raises(BacktestRefused) as caught:
         _run(
@@ -557,9 +590,11 @@ def test_an_end_before_the_start_refuses_the_run() -> None:
             strategy=ToyStrategy(every_n=5),
             start=bars[-1].event_time,
             end=bars[0].event_time,
+            reader=source,
         )
 
     assert caught.value.kind is RefusalKind.COVERAGE
+    assert (source.coverage_calls, source.bars_calls) == (0, 0)
 
 
 @pytest.mark.parametrize("equity", [Decimal(0), Decimal("-1"), 100000.0])

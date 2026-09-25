@@ -1,10 +1,13 @@
-from dataclasses import dataclass
+import bisect
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from trading_house.core.errors import CoverageError, InsufficientHistoryError
+from trading_house.features import engine as feature_engine
 from trading_house.features.engine import SPAN_SAFETY, WARMUP_MULTIPLE, FeatureEngine
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 
@@ -267,6 +270,9 @@ class FakeBarReader:
     """
 
     held: tuple[Bar, ...]
+    coverage_calls: int = 0
+    bars_calls: int = 0
+    bar_requests: list[tuple[bool, datetime, datetime, datetime]] = field(default_factory=list)
 
     def bars(
         self,
@@ -282,7 +288,9 @@ class FakeBarReader:
         store's contract, including its ``CoverageError`` on a start that
         reaches further back than anything held."""
 
-        coverage = self.coverage(instrument_id, timeframe)
+        self.bars_calls += 1
+        self.bar_requests.append((include_defective, start, end, as_of))
+        coverage = self._coverage(instrument_id, timeframe)
         if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
             raise CoverageError
         return tuple(
@@ -296,6 +304,10 @@ class FakeBarReader:
         )
 
     def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
+        self.coverage_calls += 1
+        return self._coverage(instrument_id, timeframe)
+
+    def _coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
         matching = [
             bar
             for bar in self.held
@@ -310,6 +322,164 @@ class FakeBarReader:
             clean_bars=sum(1 for bar in matching if bar.quality is BarQuality.OK),
             defective_bars=sum(1 for bar in matching if bar.quality is not BarQuality.OK),
         )
+
+
+def _materialized(source: FakeBarReader) -> feature_engine.MaterializedBarReader:
+    coverage = source.coverage("fx.eurusd", Timeframe.M1)
+    source.coverage_calls = 0
+    return feature_engine.MaterializedBarReader(source, coverage)
+
+
+def test_materialization_uses_its_coverage_and_bulk_reads_once_with_defective_bars() -> None:
+    defective = _bar(1).model_copy(update={"quality": BarQuality.OHLC_INCOHERENT})
+    expected = (_bar(0), defective, _bar(2))
+    source = FakeBarReader((expected[2], expected[1], expected[0]))
+    end = BASE + timedelta(minutes=3)
+
+    materialized = _materialized(source)
+
+    assert source.coverage_calls == 0
+    assert source.bars_calls == 1
+    assert source.bar_requests == [(True, BASE, end, end)]
+    assert (
+        materialized.bars(
+            "fx.eurusd",
+            Timeframe.M1,
+            start=BASE,
+            end=end,
+            as_of=end,
+            include_defective=True,
+        )
+        == expected
+    )
+
+
+def test_materialized_reader_preserves_source_coverage() -> None:
+    source = FakeBarReader((_bar(0), _bar(1)))
+    expected = source.coverage("fx.eurusd", Timeframe.M1)
+
+    materialized = _materialized(source)
+
+    assert materialized.coverage("fx.eurusd", Timeframe.M1) == expected
+
+
+def test_materialized_reader_refuses_another_instrument() -> None:
+    materialized = _materialized(FakeBarReader((_bar(0),)))
+
+    with pytest.raises(CoverageError):
+        materialized.coverage("metal.xauusd", Timeframe.M1)
+    with pytest.raises(CoverageError):
+        materialized.bars(
+            "metal.xauusd",
+            Timeframe.M1,
+            start=BASE,
+            end=BASE + timedelta(minutes=1),
+            as_of=BASE + timedelta(minutes=1),
+        )
+
+
+def test_materialized_reader_refuses_another_timeframe() -> None:
+    materialized = _materialized(FakeBarReader((_bar(0),)))
+
+    with pytest.raises(CoverageError):
+        materialized.coverage("fx.eurusd", Timeframe.M15)
+    with pytest.raises(CoverageError):
+        materialized.bars(
+            "fx.eurusd",
+            Timeframe.M15,
+            start=BASE,
+            end=BASE + timedelta(minutes=1),
+            as_of=BASE + timedelta(minutes=1),
+        )
+
+
+def test_materialized_reader_preserves_half_open_event_time_ranges() -> None:
+    expected = (_bar(1), _bar(2))
+    source = FakeBarReader((_bar(0), _bar(1), _bar(2)))
+    materialized = _materialized(source)
+
+    result = materialized.bars(
+        "fx.eurusd",
+        Timeframe.M1,
+        start=expected[0].event_time,
+        end=BASE + timedelta(minutes=3),
+        as_of=BASE + timedelta(days=1),
+        include_defective=True,
+    )
+
+    assert result == expected
+
+
+def test_materialized_reader_preserves_point_in_time_visibility() -> None:
+    bars = (_bar(0), _bar(1), _bar(2))
+    materialized = _materialized(FakeBarReader(bars))
+
+    result = materialized.bars(
+        "fx.eurusd",
+        Timeframe.M1,
+        start=BASE,
+        end=BASE + timedelta(minutes=3),
+        as_of=bars[1].availability_time,
+        include_defective=True,
+    )
+
+    assert result == bars[:2]
+
+
+def test_materialized_reader_excludes_defective_bars_unless_requested() -> None:
+    defective = _bar(1).model_copy(update={"quality": BarQuality.OHLC_INCOHERENT})
+    bars = (_bar(0), defective, _bar(2))
+    materialized = _materialized(FakeBarReader(bars))
+
+    result = materialized.bars(
+        "fx.eurusd",
+        Timeframe.M1,
+        start=BASE,
+        end=BASE + timedelta(minutes=3),
+        as_of=BASE + timedelta(minutes=3),
+    )
+
+    assert result == (bars[0], bars[2])
+
+
+def test_materialized_reader_preserves_the_lower_coverage_refusal() -> None:
+    materialized = _materialized(FakeBarReader((_bar(0), _bar(1))))
+
+    with pytest.raises(CoverageError):
+        materialized.bars(
+            "fx.eurusd",
+            Timeframe.M1,
+            start=BASE - timedelta(minutes=1),
+            end=BASE + timedelta(minutes=2),
+            as_of=BASE + timedelta(minutes=2),
+        )
+
+
+def test_materialized_reader_uses_bisect_for_range_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bars = (_bar(0), _bar(1), _bar(2), _bar(3))
+    materialized = _materialized(FakeBarReader(bars))
+    lookups: list[datetime] = []
+
+    def counting_bisect_left(values: Sequence[datetime], value: datetime) -> int:
+        lookups.append(value)
+        return bisect.bisect_left(values, value)
+
+    monkeypatch.setattr(feature_engine, "bisect_left", counting_bisect_left, raising=False)
+    start = bars[1].event_time
+    end = bars[3].event_time
+
+    result = materialized.bars(
+        "fx.eurusd",
+        Timeframe.M1,
+        start=start,
+        end=end,
+        as_of=BASE + timedelta(days=1),
+    )
+
+    assert result == bars[1:3]
+    assert lookups == [start, end]
 
 
 def _m15_bar(event_time: datetime, price: Decimal) -> Bar:

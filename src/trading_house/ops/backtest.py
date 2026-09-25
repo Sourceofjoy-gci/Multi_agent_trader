@@ -27,7 +27,7 @@ from trading_house.constitution.loader import LoadedConstitution
 from trading_house.core.exits import ExitPolicy, Strategy
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import Side
-from trading_house.features.engine import BarReader, FeatureEngine
+from trading_house.features.engine import BarReader
 from trading_house.research.backtest.engine import Backtester, ReplayClock
 from trading_house.risk.engine import MARGIN_HEADROOM_MULTIPLE, RiskEngine
 from trading_house.strategies.registry import registered
@@ -80,7 +80,6 @@ def build_backtester(
     clock = ReplayClock()
     return Backtester(
         bars=bars,
-        features=FeatureEngine(bars),
         risk=RiskEngine(constitution.constitution, clock),
         margin=NeverBindingMargin(),
         contract=contract,

@@ -8,12 +8,13 @@ structural rather than conventional.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from trading_house.core.errors import InsufficientHistoryError
+from trading_house.core.errors import CoverageError, InsufficientHistoryError
 from trading_house.features.indicators.spread import median_spread_points as _median_spread
 from trading_house.features.indicators.volatility import wilder_atr
 from trading_house.features.sessions import (
@@ -22,7 +23,7 @@ from trading_house.features.sessions import (
     session_bounds,
     session_of,
 )
-from trading_house.marketdata.models import Bar, Coverage, Timeframe, duration
+from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 
 WARMUP_MULTIPLE = 10
 """How many periods of history an indicator is given.
@@ -59,6 +60,64 @@ class BarReader(Protocol):
     ) -> tuple[Bar, ...]: ...
 
     def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage: ...
+
+
+class MaterializedBarReader:
+    def __init__(self, source: BarReader, coverage: Coverage) -> None:
+        self._instrument_id = coverage.instrument_id
+        self._timeframe = coverage.timeframe
+        self._coverage = coverage
+        self._event_times: tuple[datetime, ...] = ()
+        earliest = coverage.earliest_event_time
+        latest = coverage.latest_event_time
+        if earliest is None or latest is None:
+            self._bars: tuple[Bar, ...] = ()
+            return
+        end = latest + duration(self._timeframe)
+        as_of = coverage.latest_availability_time or end
+        self._bars = tuple(
+            sorted(
+                source.bars(
+                    self._instrument_id,
+                    self._timeframe,
+                    start=earliest,
+                    end=end,
+                    as_of=as_of,
+                    include_defective=True,
+                ),
+                key=lambda bar: bar.event_time,
+            )
+        )
+        self._event_times = tuple(bar.event_time for bar in self._bars)
+
+    def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
+        if instrument_id != self._instrument_id or timeframe is not self._timeframe:
+            raise CoverageError
+        return self._coverage
+
+    def bars(
+        self,
+        instrument_id: str,
+        timeframe: Timeframe,
+        *,
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        include_defective: bool = False,
+    ) -> tuple[Bar, ...]:
+        if instrument_id != self._instrument_id or timeframe is not self._timeframe:
+            raise CoverageError
+        earliest = self._coverage.earliest_event_time
+        if earliest is None or start < earliest:
+            raise CoverageError
+        left = bisect_left(self._event_times, start)
+        right = bisect_left(self._event_times, end)
+        return tuple(
+            bar
+            for bar in self._bars[left:right]
+            if bar.availability_time <= as_of
+            and (include_defective or bar.quality is BarQuality.OK)
+        )
 
 
 class FeatureEngine:

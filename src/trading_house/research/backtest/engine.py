@@ -51,9 +51,9 @@ from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import InsufficientHistoryError, TradingHouseError
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import RejectedRiskDecision, Side
-from trading_house.features.engine import BarReader, FeatureEngine
+from trading_house.features.engine import BarReader, FeatureEngine, MaterializedBarReader
 from trading_house.features.sessions import session_of
-from trading_house.marketdata.models import Bar, BarQuality, Timeframe, duration
+from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel, commission_cost, swap_cost
 from trading_house.research.backtest.fills import Exit, ExitKind, Fill, entry_fill, resolve_exit
 from trading_house.research.backtest.result import BacktestResult, RefusalKind, SimulatedTrade
@@ -127,8 +127,7 @@ class BacktestRequest:
     canonical model in the package. So the three checks the model's own
     annotations would have made -- ``PositiveDecimal``, UTC-awareness on both
     stamps, and an ordered range -- are made here by hand. ``end < start`` is
-    refused in ``run`` rather than raised here, beside the other range
-    refusals; see ``_refuse_outside_coverage``.
+    refused by ``run`` before any source access, beside the horizon refusal.
     """
 
     strategy: Strategy
@@ -298,7 +297,6 @@ class Backtester:
         self,
         *,
         bars: BarReader,
-        features: FeatureEngine,
         risk: RiskEngine,
         margin: MarginPort,
         contract: InstrumentContract,
@@ -306,7 +304,6 @@ class Backtester:
         constitution_sha256: str,
     ) -> None:
         self._bars = bars
-        self._features = features
         self._risk = risk
         self._margin = margin
         self._contract = contract
@@ -320,8 +317,13 @@ class Backtester:
             horizon_seconds=strategy.horizon_seconds, timeframe=request.timeframe
         ):
             raise BacktestRefused(RefusalKind.HORIZON)
-        self._refuse_outside_coverage(request)
-        replay_bars = self._replay_bars(request)
+        if request.end < request.start:
+            raise BacktestRefused(RefusalKind.COVERAGE)
+        coverage = self._bars.coverage(request.instrument_id, request.timeframe)
+        self._refuse_outside_coverage(request, coverage)
+        reader = MaterializedBarReader(self._bars, coverage)
+        features = FeatureEngine(reader)
+        replay_bars = self._replay_bars(request, reader)
         tolerance_fraction = Fraction(request.defective_bar_tolerance)
         defective_bars = sum(1 for bar in replay_bars if bar.quality is not BarQuality.OK)
         if defective_bars:
@@ -359,7 +361,7 @@ class Backtester:
 
             as_of = bar.availability_time
             self._clock.instant = as_of
-            snapshot = self._snapshot(request, bar, as_of)
+            snapshot = self._snapshot(request, bar, as_of, features)
             if snapshot is None:
                 snapshots_skipped += 1
                 continue
@@ -441,7 +443,7 @@ class Backtester:
             snapshots_skipped=snapshots_skipped,
         )
 
-    def _refuse_outside_coverage(self, request: BacktestRequest) -> None:
+    def _refuse_outside_coverage(self, request: BacktestRequest, coverage: Coverage) -> None:
         """Coverage is a boundary, not a list of holes.
 
         ``Coverage`` exposes ``earliest_event_time``, ``latest_event_time`` and
@@ -452,20 +454,15 @@ class Backtester:
         be useless. This is what section 8's "coverage gap" means in the only
         terms the store can actually answer.
 
-        Checked before any bar is read, so a run that cannot be simulated
-        honestly never starts.
+        ``run`` refuses an unsimulatable horizon and a backwards range before
+        any source access, then reads ``Coverage`` once and calls this before
+        constructing the materialized reader. An out-of-range request therefore
+        never triggers a bulk source bars read.
 
-        A backwards range is refused here too, for the same reason and with the
-        same kind. ``end < start`` reaches no bar in any store: the loop never
-        runs and the result is ``bars_seen=0`` with no trades, which is
-        indistinguishable from a strategy that proposed nothing. That is the
-        silent lie this refusal exists to prevent, reached through a different
-        door. ``start == end`` is a legal one-bar run -- both are inclusive.
+        ``end < start`` reaches no bar in any store, and ``start == end`` is a
+        legal one-bar run -- both range endpoints are inclusive.
         """
 
-        if request.end < request.start:
-            raise BacktestRefused(RefusalKind.COVERAGE)
-        coverage = self._bars.coverage(request.instrument_id, request.timeframe)
         if coverage.earliest_event_time is None or coverage.latest_event_time is None:
             raise BacktestRefused(RefusalKind.COVERAGE)
         if request.start < coverage.earliest_event_time:
@@ -473,7 +470,7 @@ class Backtester:
         if request.end > coverage.latest_event_time:
             raise BacktestRefused(RefusalKind.COVERAGE)
 
-    def _replay_bars(self, request: BacktestRequest) -> tuple[Bar, ...]:
+    def _replay_bars(self, request: BacktestRequest, bars: BarReader) -> tuple[Bar, ...]:
         """Every bar in the requested range, defective ones included.
 
         Included so a defective bar can be refused as it is read rather than
@@ -488,7 +485,7 @@ class Backtester:
         """
 
         horizon = request.end + duration(request.timeframe)
-        return self._bars.bars(
+        return bars.bars(
             request.instrument_id,
             request.timeframe,
             start=request.start,
@@ -498,7 +495,11 @@ class Backtester:
         )
 
     def _snapshot(
-        self, request: BacktestRequest, bar: Bar, as_of: datetime
+        self,
+        request: BacktestRequest,
+        bar: Bar,
+        as_of: datetime,
+        features: FeatureEngine,
     ) -> FeatureSnapshot | None:
         """The point-in-time read, or ``None`` while the feature windows are
         still warming up.
@@ -527,27 +528,27 @@ class Backtester:
         """
 
         try:
-            atr = self._features.atr(
+            atr = features.atr(
                 request.instrument_id,
                 request.timeframe,
                 period=request.atr_period,
                 as_of=as_of,
             )
-            median_spread_points = self._features.median_spread_points(
+            median_spread_points = features.median_spread_points(
                 request.instrument_id,
                 request.timeframe,
                 window=request.spread_window,
                 as_of=as_of,
             )
-            session_open_price = self._features.session_open_price(
+            session_open_price = features.session_open_price(
                 request.instrument_id, request.timeframe, as_of=as_of
             )
-            bars_since_session_open = self._features.bars_since_session_open(
+            bars_since_session_open = features.bars_since_session_open(
                 request.instrument_id, request.timeframe, as_of=as_of
             )
         except InsufficientHistoryError:
             return None
-        prior_session_return = self._features.prior_session_return(
+        prior_session_return = features.prior_session_return(
             request.instrument_id, request.timeframe, as_of=as_of
         )
         return FeatureSnapshot(

@@ -19,7 +19,7 @@ from trading_house.core.errors import CoverageError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.schemas import Side, TradeProposal
 from trading_house.core.values import AssetClass
-from trading_house.features.engine import WARMUP_MULTIPLE, FeatureEngine
+from trading_house.features.engine import WARMUP_MULTIPLE
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import (
@@ -241,6 +241,8 @@ class FakeBarReader:
     """
 
     held: tuple[Bar, ...]
+    coverage_calls: int = 0
+    bars_calls: int = 0
 
     def bars(
         self,
@@ -256,7 +258,8 @@ class FakeBarReader:
         store's contract, including its ``CoverageError`` on a start that
         reaches further back than anything held."""
 
-        coverage = self.coverage(instrument_id, timeframe)
+        self.bars_calls += 1
+        coverage = self._coverage(instrument_id, timeframe)
         if coverage.earliest_event_time is None or start < coverage.earliest_event_time:
             raise CoverageError
         return tuple(
@@ -270,6 +273,10 @@ class FakeBarReader:
         )
 
     def coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
+        self.coverage_calls += 1
+        return self._coverage(instrument_id, timeframe)
+
+    def _coverage(self, instrument_id: str, timeframe: Timeframe) -> Coverage:
         matching = [
             bar
             for bar in self.held
@@ -408,8 +415,9 @@ def _run(
     constitution_sha256: str | None = None,
     atr_period: int = ATR_PERIOD,
     spread_window: int = SPREAD_WINDOW,
+    reader: FakeBarReader | None = None,
 ) -> BacktestResult:
-    reader = FakeBarReader(bars)
+    source = reader if reader is not None else FakeBarReader(bars)
     # One clock, shared: the risk engine's tick-freshness gate compares its own
     # clock to the snapshot's tick_time, so the backtester must advance the
     # very clock the risk engine reads. A wall clock would make every stored
@@ -417,8 +425,7 @@ def _run(
     clock = ReplayClock(instant=bars[0].availability_time)
     selected_contract = contract if contract is not None else _contract()
     tester = Backtester(
-        bars=reader,
-        features=FeatureEngine(reader),
+        bars=source,
         risk=RiskEngine(_constitution(), clock),
         margin=AlwaysAffordableMargin(),
         contract=selected_contract,
