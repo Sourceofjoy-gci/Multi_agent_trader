@@ -490,10 +490,10 @@ no snapshot trails nothing.
   closing bar's own spread and `tick_time` is that bar's `availability_time` —
   constructed invariants, not a convention. Any strategy whose edge lives in the
   difference between the two is one D-1 refuses anyway.
-- **No strategy has a demonstrated edge yet.** Phase 7 registers Session
-  Momentum and fixes its three-arm experiment, but the evidence run is still a
-  separate operator action. The strategy's economics are declared priors, not
-  measured results.
+- **No strategy has a demonstrated edge yet.** Phase 7 registered Session
+  Momentum and completed its three-arm evidence run. All three arms lost money
+  after costs; that negative result completes Phase 7 and does not trigger
+  tuning or promotion.
 - **Market impact is not modelled.** Fills assume the requested size was always
   available at the price the model computed. A size that would move the book
   fills exactly as a small one does.
@@ -574,8 +574,11 @@ different states and neither produces a proposal.
 The rule is forced onto EURUSD M15 and the `fx_swing` book. Its structural
 invalidation is a pre-declared 10 pips from entry; `RiskEngine` may widen the
 executable stop for volatility, spread, contract, and broker-distance
-constraints. Expected return, cost, and win probability are priors awaiting the
-evidence run. Expected swap is explicitly zero because the position is flat
+constraints. The declared economics were evaluated by the completed three-arm
+run. Every arm lost money after costs, so the thesis is invalidated and no
+tuning or promotion follows. The pre-run expected-return, cost, and
+win-probability values remain recorded for provenance; this evidence does not
+recalibrate them. Expected swap is explicitly zero because the position is flat
 before the daily rollover; omission would not mean zero.
 
 ### Session features
@@ -620,7 +623,37 @@ options: exposing them would invite a sweep, and every extra trial would weaken
 the Deflated Sharpe that later consumes this evidence. A rerun after seeing any
 result is another trial and must be counted.
 
-### Defective bars and evidence
+### Completed evidence
+
+The backfill was `TRUNCATED` at the broker history wall. It stored the span
+`2022-09-16T01:30:00Z` through `2026-09-25T03:15:00Z` for `fx.eurusd` on the
+FBS demo terminal: 99,988 clean M15 bars, 0 defective bars, 6 duplicates, and
+0 conflicts. The backfill run ID is
+`ce9fb2af-a640-471b-9ffb-93bbf39172ad`.
+
+| Arm | Trades | Net P&L after costs | Defective fraction | Run ID | Result digest |
+|---|---:|---:|---:|---|---|
+| `none` | 1035 | `-1174.29200000015850` | `0/99988` | `d5a77ec90521cad5706d1caf0b45a6e4cc26c8291c5bb9739520bb31331af895` | `a10b0fa43fc4ddb0185b3a376caab7c9369ec49e3e347d13171d31ab989f022b` |
+| `fixed_target` (1.0R) | 1035 | `-15578.74700000010180` | `0/99988` | `af7f728e84cca8101a3a10f4698d72f35da85fc6b069333f66588d0bbb150d73` | `fe5efadef7f5ea2448957e0bec507f2133755df676ade140b05a120cfb5fbc6b` |
+| `chandelier` (3.0 ATR, 10-point step) | 1035 | `-25120.06200000013010` | `0/99988` | `4708f33cba5ee0f08c4b28ef56a79673d44209988d9576c899500f335b085051` | `69867de09ef3993e5aabca78b225b21bb1ef82a4aa4fbcd63a9fd52dfe2e0c54` |
+
+Ranking: `none > fixed_target > chandelier`. The actual trail decision is
+`trail=none`, and the trial count is `3`. All three arms lost money after costs;
+this negative result completes Phase 7. It does not trigger tuning or
+promotion.
+
+Recorded run assumptions:
+
+- Contract digest: `59121ba95a21afb81e48f4de9c9358705375c678954fa2249dbbd80b41b86f90`;
+  verified constitution SHA-256:
+  `a87e63fb8c46912b1bc21bae3e55535b88ae4abc613cb87988399c4c28e5d58b`.
+- Firm equity `100000`; ATR period `14`; spread window `20`.
+- Commission `0.0` per lot per side (official FBS publishes no commission);
+  slippage `0.4` points per side (predeclared prior); swap long `-7.7` and
+  short `+2.0` points/day (terminal audit).
+- Triple swap on Wednesday; stress multiplier `1`; defective-bar tolerance
+  `0`.
+
 
 `--defective-bar-tolerance` is a finite decimal fraction in `[0, 1]`, parsed as
 `Decimal` and compared as an exact rational. Its default is zero. A run skips
@@ -629,10 +662,8 @@ fraction exceeds the declared ceiling. This keeps real broker data usable
 without selecting clean date ranges after seeing outcomes.
 
 The command is deliberately fixed to EURUSD M15: neither scope is a CLI option.
-Run each arm once, record net P&L after costs, trade count, defective-bar
-fraction, and ranking, then update the registered `StrategySpec`. If all three
-lose money after costs, that is a completed phase—not a reason to tune until the
-answer changes.
+The saved evidence contains one run per arm; it is not a prompt to rerun, tune,
+or promote the strategy.
 
 ### Commands
 
@@ -640,17 +671,17 @@ answer changes.
 uv run trading-house backtest run \
   --strategy session_momentum_eurusd \
   --exit-policy none \
-  --start 2026-09-21T00:00:00 --end 2026-09-21T16:00:00 \
+  --start 2022-09-16T01:30:00 --end 2026-09-25T03:15:00 \
   --firm-equity 100000 --contract contract.json \
   --atr-period 14 --spread-window 20 \
-  --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4 \
-  --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30 \
-  --triple-swap-weekday 2 \
+  --commission-per-lot-per-side 0.0 --slippage-points-per-side 0.4 \
+  --swap-long-points-per-day -7.7 --swap-short-points-per-day 2.0 \
+  --triple-swap-weekday 2 --stress-multiplier 1 \
   --defective-bar-tolerance 0
 ```
 
-Run the command once with `fixed_target` and once with `chandelier` to complete
-the three-arm evidence set.
+For `fixed_target` and `chandelier`, use the corresponding predeclared arm; the
+saved result digests and run IDs above are the evidence of those three runs.
 
 - **Every cost is required and none is defaulted** (D-5). `InstrumentContract`
   has no commission field and `FinancingModel` is an enum tag with no rate

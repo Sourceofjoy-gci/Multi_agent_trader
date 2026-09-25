@@ -29,20 +29,31 @@ SESSION_MOMENTUM_SPEC: Final[StrategySpec] = StrategySpec(
     ),
     exit_rule="Use the risk-engine stop, the 16:00 UTC time stop, and the selected exit arm.",
     cost_model_description=(
-        "Declare spread, commission, slippage, and swap; no cost is left at an implicit default."
+        "Commission 0.0 per lot per side (official FBS publishes no commission); "
+        "slippage 0.4 points per side (predeclared prior); "
+        "swap long -7.7 points/day and short +2.0 points/day (terminal audit); "
+        "triple swap Wednesday; stress multiplier 1; defective tolerance 0."
     ),
     capacity_model="Capacity is not modelled and is explicitly a non-promise.",
     invalidation=(
-        "Rolling out-of-sample monitoring invalidates the thesis when its edge disappears."
+        "Invalidated: the completed three-arm trial lost money after costs in every arm "
+        "(none -1174.29200000015850; fixed_target(1.0R) -15578.74700000010180; "
+        "chandelier(3.0 ATR, 10-point step) -25120.06200000013010); "
+        "no tuning or promotion."
     ),
     regime_constraints=(
         "The risk spread, spread-to-stop, and tick-staleness gates apply; UTC session windows are "
         "fixed and therefore carry the stated DST limitation."
     ),
-    trail_decision="The A/B has not yet run; the trail decision is pending.",
+    trail_decision="none",
     trial_count=3,
     versioning=(
-        "Record the strategy id and version, constitution hash, contract digest, and result digest."
+        "strategy=session_momentum_eurusd; version=1; "
+        "constitution_sha256=a87e63fb8c46912b1bc21bae3e55535b88ae4abc613cb87988399c4c28e5d58b; "
+        "contract_sha256=59121ba95a21afb81e48f4de9c9358705375c678954fa2249dbbd80b41b86f90; "
+        "none_digest=a10b0fa43fc4ddb0185b3a376caab7c9369ec49e3e347d13171d31ab989f022b; "
+        "fixed_target_digest=fe5efadef7f5ea2448957e0bec507f2133755df676ade140b05a120cfb5fbc6b; "
+        "chandelier_digest=69867de09ef3993e5aabca78b225b21bb1ef82a4aa4fbcd63a9fd52dfe2e0c54"
     ),
 )
 
@@ -50,7 +61,8 @@ SESSION_MOMENTUM_SPEC: Final[StrategySpec] = StrategySpec(
 class SessionMomentum:
     """The first real strategy: carry the prior session's sign into London.
 
-    The declared economics are priors awaiting the first run; measured values replace them.
+    The completed three-arm evidence invalidated the thesis: every arm lost money
+    after costs, so no tuning or promotion follows.
     """
 
     def __init__(self, exit_policy: ExitPolicy | None = None) -> None:
