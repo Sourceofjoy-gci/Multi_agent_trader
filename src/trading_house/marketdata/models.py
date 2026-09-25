@@ -112,8 +112,8 @@ class Bar(CanonicalModel):
 
         if self.quality is BarQuality.OK and min(self.open, self.high, self.low, self.close) <= 0:
             raise ValueError("a clean bar cannot carry a non-positive price")
-        if self.availability_time <= self.event_time:
-            raise ValueError("a bar is available only after it closes")
+        if self.availability_time != availability_of(self.timeframe, self.event_time):
+            raise ValueError("availability_time must equal the bar's timeframe close")
         return self
 
 

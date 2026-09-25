@@ -21,7 +21,9 @@
 - The system connects to a **demo account only**.
 - **The constitution is already amended and re-signed** at commit `247ba55`: `min_expected_edge_after_cost_bps` is now on `SwingLimits` as well as `ScalpLimits`, set to `2.0` in all three swing books. **Do not re-sign the constitution.** The Ed25519 private key is not in this worktree and no task needs it. A task that believes it needs to change `config/risk_constitution.yaml` should stop and report instead.
 - **Commit before mutating, never after.** A mutation workflow assumes a committed base; with an uncommitted one, `git checkout --` turns "restore" into "delete".
+- **Do not create commits without explicit user authorization.** Commit steps below are retained as historical checkpoints; when authorization is absent, preserve the intended file state and report the uncommitted diff.
 - **Every new test earns its place by mutation.** Break the code it protects, confirm that test and only that test fails, restore. Fourteen tests in this repository have passed for reasons unrelated to their claims.
+- **Task 8 review scope:** retain the fixed-target/proposal consistency refusal and non-positive Chandelier refusal; remove the unapproved `+1R` MFE lifecycle gate, which references design sections that do not exist and breaks the accepted trailing-order test.
 
 ## Baseline
 
@@ -170,7 +172,7 @@ git commit -m "fix: three Phase 6 models accepted naive datetimes, and the guard
 
 **The defect.** `entry_fill` prices at `bar.open` but stamps `at=bar.availability_time`, one bar duration later. Three consequences: `SimulatedTrade.entry_at`/`exit_at` misreport the fill instant; `engine.py`'s deadline is computed from that stamp and compared against `bar.event_time`, so `max_holding_seconds` is honoured as **H plus one bar**; and `swap_cost` receives a date pair shifted by one bar, moving the rollover count at day boundaries.
 
-There is no point-in-time argument for the late stamp: the entry bar's `event_time` equals the producing snapshot's `as_of`, so `event_time` is already sound.
+`Fill.at` is the instant of the price used: entry and exit fills price the bar open, so the stamp is that fill bar's `event_time`. The producing snapshot's `as_of` records when the signal became available; it is not the reason the fill stamp is sound.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -199,7 +201,7 @@ Expected: FAIL — `at` is `availability_time`.
 
 - [ ] **Step 3: Correct both fill sites**
 
-In `fills.py`, every `Fill(...)` construction takes `at=bar.event_time`. Replace the comment that defers this to Phase 7 with one stating what `at` now means and why `event_time` is sound (the entry bar's `event_time` equals the producing snapshot's `as_of`).
+In `fills.py`, every `Fill(...)` construction takes `at=bar.event_time`. Replace the comment that defers this to Phase 7 with one stating what `at` now means: the fill is stamped at the event time of the bar whose open supplied the fill price, independently of the producing snapshot's `as_of`.
 
 - [ ] **Step 4: Correct the deadline arithmetic**
 
@@ -990,7 +992,7 @@ Clamp first, then hysteresis, then monotonic — in that order, with a docstring
 
 - [ ] **Step 6: Wire it into the loop and add the target branch**
 
-In `_close_if_done`, the open position's stop is updated from `trail_candidate` before the exit checks, and `resolve_exit` receives the strategy's target when the policy is `fixed_target`. Keep the existing order: the stop is asked before the target, and the target before the time stop.
+In `_close_if_done`, resolve the current bar's stop and target first. Only after that bar remains open may `trail_candidate` derive a new stop from the bar's extreme for the next bar. This prevents an OHLC bar from being read in the flattering order that raises its own stop and then claims its earlier low triggered that new level.
 
 - [ ] **Step 7: Run everything**
 
@@ -1007,6 +1009,77 @@ Remove the monotonic check so any clamped candidate is returned. Confirm both th
 git add src/trading_house/research/backtest/ src/trading_house/ops/backtest.py tests/
 git commit -m "feat(backtest): an exit policy with a target and a monotonic trail"
 ```
+
+### Task 8 review amendment: safety refusals without an MFE lifecycle
+
+**Files:**
+- Modify: `src/trading_house/research/backtest/result.py`
+- Modify: `src/trading_house/research/backtest/engine.py`
+- Test: `tests/unit/research/backtest/test_engine.py`
+
+**Interfaces:**
+- Produces: `RefusalKind.EXIT_POLICY`.
+- Preserves: `ExitPolicy` is split once with an exhaustive match; fixed-target arms require proposal agreement; a non-positive Chandelier level refuses instead of silently behaving as `none`.
+- Removes: the unapproved `_Position.mfe`, `observe`, `may_trail`, `_TRAIL_TRIGGER_R`, and the `position.may_trail()` loop gate.
+
+- [ ] **Step 1: Lock the two safety refusals with failing tests**
+
+```python
+def test_a_fixed_target_arm_refuses_a_proposal_without_the_declared_target() -> None:
+    with pytest.raises(BacktestRefused) as caught:
+        _run(
+            bars=_ramp(40),
+            strategy=ToyStrategy(
+                every_n=1000,
+                target_r_multiple=None,
+                policy=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1")),
+            ),
+        )
+
+    assert caught.value.kind is RefusalKind.EXIT_POLICY
+
+
+def test_a_non_positive_chandelier_level_refuses_the_run() -> None:
+    with pytest.raises(BacktestRefused) as caught:
+        trail_candidate(
+            side=Side.BUY,
+            current_stop=Decimal("1.09900"),
+            bar=_bar(high=Decimal("1.10500"), close=Decimal("1.10000")),
+            atr=Decimal("0.00010"),
+            contract=_contract(min_stop_distance=Decimal("2")),
+            policy=ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal(3), min_step_points=Decimal(1)
+            ),
+        )
+
+    assert caught.value.kind is RefusalKind.EXIT_POLICY
+```
+
+- [ ] **Step 2: Prove the amendment's current state**
+
+Run: `UV_SYSTEM_CERTS=1 uv run pytest tests/unit/research/backtest/test_engine.py -q --no-cov -k "chandelier_run or fixed_target_arm_refuses or non_positive"`
+
+Expected: the accepted chandelier ordering test fails under the unapproved MFE gate, while the two new tests cannot resolve `RefusalKind.EXIT_POLICY`. Mypy also reports the missing enum member at the two refusal sites.
+
+- [ ] **Step 3: Keep only the approved safety behavior**
+
+Add `EXIT_POLICY = "exit_policy"` to `RefusalKind`. Retain the exhaustive `_exit_arms` match, the fixed-target/proposal equality refusal, and the non-positive Chandelier refusal. Remove `_Position.observe`, `mfe`, `may_trail`, `_TRAIL_TRIGGER_R`, and the `position.may_trail()` condition so an eligible trail updates the stop after the current bar's exits and governs the next bar.
+
+- [ ] **Step 4: Verify the amendment**
+
+Run:
+
+```text
+UV_SYSTEM_CERTS=1 uv run pytest tests/unit/research/backtest tests/property/test_trailing.py -q --no-cov
+UV_SYSTEM_CERTS=1 uv run ruff check src/trading_house/research/backtest tests/unit/research/backtest
+UV_SYSTEM_CERTS=1 uv run mypy
+```
+
+Expected: all pass, including the existing chandelier stop-order known-answer test.
+
+- [ ] **Step 5: Preserve the checkpoint**
+
+Do not commit unless the user explicitly authorizes a commit. Otherwise leave the two source files and the focused test diff visible for the next task.
 
 ---
 
@@ -1114,7 +1187,7 @@ git commit -m "feat(backtest): a declared tolerance for defective bars"
 
 **Why that distinction is the whole of this rule's arithmetic.** `engine.py:22` queues a signal "to fill on the next bar", `engine.py:381` sets `deadline = fill.at + max_holding_seconds`, and `fill.at` is the fill bar's `event_time`. A snapshot whose bar opens at 07:00 is read at `as_of = 07:15` — the bar's own `availability_time`, because a bar cannot be known at the instant it opens — and the entry fills on the next bar, at 07:15. Measuring the horizon from 07:00 therefore sets a deadline of 16:15 and holds one bar past the London close the rule exists to stop at.
 
-On M15 the correct value is `16:00 − 07:15 = 31500` seconds. Derive it from the fill bar rather than hard-coding it, so a different timeframe stays correct. The spec's §4.2 states the right basis ("the entry bar") and then gives 32400, which is the same error one document earlier; the basis is what binds.
+On M15 the correct value is `16:00 − 07:15 = 31500` seconds. Derive it from the fill bar rather than hard-coding it, so a different timeframe stays correct. The approved spec was corrected during self-review to state this same basis and value.
 
 **Import boundary.** `strategies/` may import `core/`, `features/` and `risk/` only. In particular it may **not** import `research/` — so `FeatureSnapshot` and `ExitPolicy`, which live in `research/backtest/`, are a problem. **Resolve it by moving both to `core/`** as part of this task: `FeatureSnapshot` to `src/trading_house/core/snapshot.py` and the `ExitPolicy` union to `src/trading_house/core/exits.py`, re-exported from their old locations so nothing else breaks. Report this as the structural consequence it is; if you judge a different resolution better, say so with reasoning before implementing it.
 
@@ -1353,3 +1426,5 @@ Any rerun after seeing the numbers is a new trial and gets counted.
 **2. Placeholder scan.** No "TBD", no "add error handling", no "similar to Task N". Three tasks deliberately ask the implementer to read a name off the code rather than trust this plan — `ExecutableRiskDecision`'s entry-reference field (Task 7), `InstrumentContract`'s minimum-distance field (Task 8), and whether `proposal_id` is derived or random (Task 10). Each says to report what was found, because a plan that guesses an identifier and is wrong sends an implementer to make the code match the guess.
 
 **3. Type consistency.** `Session` (Task 3) is used identically in Tasks 4, 5 and 10. `prior_session_return` is `Decimal | None` everywhere it appears. `ExitPolicy` is the name from Task 8 onward, never `TrailPolicy`. `expected_swap_cost_bps` is introduced in Task 6 and consumed in Task 10. `defective_bar_tolerance` and `defective_bars` keep their names in Tasks 9 and 11. **One consistency problem found and resolved in Task 10:** `strategies/` may not import `research/`, but `FeatureSnapshot` and `ExitPolicy` live there — so Task 10 moves both to `core/` with re-exports, and says so rather than leaving an implementer to discover the boundary violation at import time.
+
+**4. Execution amendment.** The uncommitted Task 8 review patch mixed two valid setup-error refusals with an unapproved MFE lifecycle gate and cited nonexistent design sections. The amendment above keeps the refusals, removes the MFE state, and pins the accepted next-bar trailing order. The approved spec and Task 10 now agree on the 31,500-second holding horizon and the `core/` relocation of shared snapshot/exit contracts.

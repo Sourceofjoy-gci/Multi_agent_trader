@@ -20,7 +20,7 @@ from pydantic import SecretStr
 
 from tests.conftest import printed_strings
 from tests.integration.marketdata.conftest import seed
-from tests.unit.research.backtest.conftest import _contract, _ramp
+from tests.unit.research.backtest.conftest import _contract, _session_ramp
 from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.store import PostgresBarStore
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-BARS = 60
+BARS = 65
 SECRET_IN_THE_DSN = "integration-runtime-password"  # noqa: S105
 
 
@@ -43,7 +43,7 @@ class Fixture(NamedTuple):
 def seeded(
     database: DatabaseHarness, tmp_path_factory: pytest.TempPathFactory
 ) -> Iterator[Fixture]:
-    """A real store holding the same 60-bar ramp the engine tests replay.
+    """A real store holding the same 65-bar ramp the engine tests replay.
 
     Truncated afterwards on purpose: the database is session-scoped and
     ``tests/integration/marketdata`` asserts on what the store holds, so bars
@@ -51,7 +51,7 @@ def seeded(
     """
 
     store = PostgresBarStore(lambda: open_runtime_connection(SecretStr(database.runtime_dsn)))
-    seed(store, _ramp(BARS))
+    seed(store, _session_ramp(BARS))
     contract = tmp_path_factory.mktemp("backtest") / "contract.json"
     contract.write_text(_contract().model_dump_json(), encoding="utf-8")
     try:
@@ -73,7 +73,7 @@ def _run_cli(seeded: Fixture, *, hash_seed: str) -> str:
     a process listing could show.
     """
 
-    bars = _ramp(BARS)
+    bars = _session_ramp(BARS)
     completed = subprocess.run(  # noqa: S603
         [
             sys.executable,
@@ -82,13 +82,9 @@ def _run_cli(seeded: Fixture, *, hash_seed: str) -> str:
             "backtest",
             "run",
             "--strategy",
-            "toy",
-            "--toy-every-n",
-            "20",
-            "--instrument",
-            "fx.eurusd",
-            "--timeframe",
-            "M1",
+            "session_momentum_eurusd",
+            "--exit-policy",
+            "fixed_target",
             "--start",
             bars[0].event_time.strftime("%Y-%m-%dT%H:%M:%S"),
             "--end",
@@ -111,6 +107,8 @@ def _run_cli(seeded: Fixture, *, hash_seed: str) -> str:
             "0.30",
             "--triple-swap-weekday",
             "2",
+            "--defective-bar-tolerance",
+            "0",
         ],
         env={
             **os.environ,

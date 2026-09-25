@@ -32,7 +32,12 @@ from trading_house.core.errors import (
     SignatureVerificationError,
     TradingHouseError,
 )
-from trading_house.marketdata.models import IngestOutcome, IngestRun
+from trading_house.core.exits import (
+    ChandelierPolicy,
+    FixedTargetPolicy,
+    NoExitPolicy,
+)
+from trading_house.marketdata.models import Bar, BarQuality, IngestOutcome, IngestRun, Timeframe
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -1037,6 +1042,12 @@ def _contract_file(tmp_path: Path) -> Path:
     return path
 
 
+def _session_bars() -> tuple[Bar, ...]:
+    from tests.unit.research.backtest.conftest import _session_ramp
+
+    return _session_ramp()
+
+
 def _printed_strings(result: Any) -> str:
     """This file's spelling of the shared helper: a ``CliRunner`` result has
     two streams, and only one of them is ever populated."""
@@ -1046,18 +1057,34 @@ def _printed_strings(result: Any) -> str:
     return printed_strings(result.stdout, result.stderr)
 
 
+def _assert_redacted_configuration_error(result: Any) -> None:
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert result.stdout == ""
+    assert result.stderr == '{"detail": "configuration invalid", "status": "error"}\n'
+
+
+def _backtest_run_command() -> Any:
+    from typer.main import get_command
+
+    root = get_command(cli.app)
+    return root.commands["backtest"].commands["run"]
+
+
+def test_backtest_exit_policy_is_a_required_three_choice_parameter() -> None:
+    command = _backtest_run_command()
+    parameter = next(parameter for parameter in command.params if parameter.name == "exit_policy")
+
+    assert parameter.required is True
+    assert parameter.default is None
+    assert parameter.type.choices == ("none", "fixed_target", "chandelier")
+
+
 def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
     options: dict[str, str] = {
-        "--strategy": "toy",
-        "--toy-every-n": "20",
-        "--instrument": "fx.eurusd",
-        "--timeframe": "M1",
-        # Matches conftest.ORIGIN (07:00, the London session's own start) --
-        # session_open_price/bars_since_session_open raise when the store's
-        # coverage begins after the current session window started, so this
-        # range must span the same window _ramp(60)'s bars actually cover.
-        "--start": "2026-09-21T07:00:00",
-        "--end": "2026-09-21T07:59:00",
+        "--strategy": "session_momentum_eurusd",
+        "--exit-policy": "none",
+        "--start": "2026-09-21T00:00:00",
+        "--end": "2026-09-21T16:00:00",
         "--firm-equity": "100000",
         "--contract": str(_contract_file(tmp_path)),
         "--atr-period": "2",
@@ -1067,15 +1094,209 @@ def _backtest_args(tmp_path: Path, **overrides: str) -> list[str]:
         "--swap-long-points-per-day": "-0.80",
         "--swap-short-points-per-day": "0.30",
         "--triple-swap-weekday": "2",
+        "--defective-bar-tolerance": "0",
     }
     options.update(overrides)
     return ["backtest", "run", *[value for pair in options.items() for value in pair]]
 
 
+@pytest.mark.parametrize("arm", ["none", "fixed_target", "chandelier"])
+@pytest.mark.usefixtures("_dsn")
+def test_each_ab_arm_runs_and_produces_a_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    from tests.unit.research.backtest.conftest import FakeBarReader
+
+    bars = _session_bars()
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(bars))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--exit-policy": arm}))
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)["result"]
+    assert payload["bars_seen"] == len(bars)
+    assert payload["instrument_id"] == "fx.eurusd"
+    assert payload["timeframe"] == "M15"
+
+
+@pytest.mark.parametrize(
+    ("arm", "expected"),
+    [
+        ("none", NoExitPolicy(kind="none")),
+        (
+            "fixed_target",
+            FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
+        ),
+        (
+            "chandelier",
+            ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
+            ),
+        ),
+    ],
+)
+@pytest.mark.usefixtures("_dsn")
+def test_each_cli_arm_builds_its_exact_predeclared_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+    expected: NoExitPolicy | FixedTargetPolicy | ChandelierPolicy,
+) -> None:
+    from tests.unit.research.backtest.conftest import FakeBarReader
+    from trading_house.ops.backtest import build_strategy
+
+    captured: list[NoExitPolicy | FixedTargetPolicy | ChandelierPolicy] = []
+
+    def capture(
+        strategy_id: str,
+        *,
+        exit_policy: NoExitPolicy | FixedTargetPolicy | ChandelierPolicy,
+    ) -> Any:
+        captured.append(exit_policy)
+        return build_strategy(strategy_id, exit_policy=exit_policy)
+
+    monkeypatch.setattr(cli, "build_strategy", capture)
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_session_bars()))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--exit-policy": arm}))
+
+    assert result.exit_code == 0, result.stderr
+    assert captured == [expected]
+
+
+def test_the_arms_parameters_are_not_command_line_options() -> None:
+    result = runner.invoke(cli.app, ["backtest", "run", "--help"])
+
+    assert result.exit_code == 0
+    for option in (
+        "--target-r-multiple",
+        "--atr-multiple",
+        "--min-step-points",
+        "--toy-every-n",
+        "--instrument",
+        "--timeframe",
+    ):
+        assert option not in result.stdout
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_requires_an_explicit_exit_policy(tmp_path: Path) -> None:
+    args = _backtest_args(tmp_path)
+    policy_index = args.index("--exit-policy")
+    del args[policy_index : policy_index + 2]
+
+    result = runner.invoke(cli.app, args)
+
+    _assert_redacted_configuration_error(result)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_an_invalid_exit_policy(tmp_path: Path) -> None:
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--exit-policy": "not-an-arm"}))
+
+    _assert_redacted_configuration_error(result)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_does_not_echo_an_invalid_exit_policy(tmp_path: Path) -> None:
+    sensitive_value = "sensitive-invalid-token"
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--exit-policy": sensitive_value}))
+
+    _assert_redacted_configuration_error(result)
+    assert sensitive_value not in result.stdout + result.stderr
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_redacts_an_option_missing_its_value(tmp_path: Path) -> None:
+    args = _backtest_args(tmp_path)
+    option_index = args.index("--firm-equity")
+    del args[option_index + 1]
+
+    result = runner.invoke(cli.app, args)
+
+    _assert_redacted_configuration_error(result)
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_redacts_an_invalid_start_without_echoing_it(tmp_path: Path) -> None:
+    sensitive_value = "sensitive-invalid-token"
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--start": sensitive_value}))
+
+    _assert_redacted_configuration_error(result)
+    assert sensitive_value not in result.stdout + result.stderr
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_redacts_an_unknown_option_without_echoing_it(tmp_path: Path) -> None:
+    sensitive_value = "sensitive-unknown-token"
+    result = runner.invoke(cli.app, [*_backtest_args(tmp_path), f"--{sensitive_value}"])
+
+    _assert_redacted_configuration_error(result)
+    assert sensitive_value not in result.stdout + result.stderr
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_forwards_the_approved_defective_bar_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.research.backtest.conftest import FakeBarReader
+
+    bars = _session_bars()
+    bars = (
+        *bars[:10],
+        bars[10].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}),
+        *bars[11:],
+    )
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(bars))
+
+    result = runner.invoke(
+        cli.app, _backtest_args(tmp_path, **{"--defective-bar-tolerance": "0.02"})
+    )
+
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)["result"]
+    assert payload["defective_bars"] == 1
+    assert payload["bars_seen"] == len(bars) - 1
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_equivalent_decimal_tolerance_spellings_have_one_canonical_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.research.backtest.conftest import FakeBarReader
+
+    bars = _session_bars()
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(bars))
+
+    first = runner.invoke(
+        cli.app, _backtest_args(tmp_path, **{"--defective-bar-tolerance": "0.0100"})
+    )
+    second = runner.invoke(
+        cli.app, _backtest_args(tmp_path, **{"--defective-bar-tolerance": "0.01"})
+    )
+
+    assert first.exit_code == second.exit_code == 0
+    assert first.stdout == second.stdout
+
+
+@pytest.mark.parametrize("tolerance", ["abc", "NaN", "Infinity", "-0.1", "1.1"])
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_an_invalid_defective_bar_tolerance(
+    tmp_path: Path, tolerance: str
+) -> None:
+    result = runner.invoke(
+        cli.app, _backtest_args(tmp_path, **{"--defective-bar-tolerance": tolerance})
+    )
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
 @pytest.mark.usefixtures("_dsn")
 def test_backtest_rejects_an_unregistered_strategy(tmp_path: Path) -> None:
-    """Phase 6 has one registrable strategy. An unknown id is a typed
-    configuration failure rather than a silent run of the toy."""
+    """An unknown strategy id is a typed configuration failure."""
 
     result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--strategy": "momentum"}))
 
@@ -1230,10 +1451,10 @@ def test_backtest_prints_the_result_its_digest_and_the_margin_disclosure(
     other object without needing an update on every legitimate change.
     """
 
-    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+    from tests.unit.research.backtest.conftest import FakeBarReader
     from trading_house.research.backtest.result import BacktestResult
 
-    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_session_bars()))
 
     result = runner.invoke(cli.app, _backtest_args(tmp_path))
 
@@ -1249,48 +1470,19 @@ def test_backtest_prints_the_result_its_digest_and_the_margin_disclosure(
 
 
 @pytest.mark.usefixtures("_dsn")
-def test_backtest_refuses_a_contract_for_a_different_instrument(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The silent-empty-run shape, closed at the composition root.
+def test_backtest_refuses_a_contract_outside_its_forced_scope(tmp_path: Path) -> None:
+    from tests.unit.research.backtest.conftest import _contract
 
-    Nothing downstream compares ``--contract``'s ``instrument_id`` to
-    ``--instrument``. The risk engine does reject the mismatch -- but as a
-    ``RejectedRiskDecision``, which the replay loop records and continues past,
-    so the command exits 0 with zero trades, N rejections and a payload that
-    looks like a strategy that simply never fired. ``ops/backtest.py`` calls
-    that "the worst failure shape available" and closes it for the clock; this
-    closes the same shape reached one argument over.
+    contract = tmp_path / "gbpusd-contract.json"
+    contract.write_text(_contract(instrument_id="fx.gbpusd").model_dump_json(), encoding="utf-8")
 
-    The store is seeded under BOTH instrument ids, and that is the whole
-    fixture. Seeded under ``fx.eurusd`` alone, ``--instrument fx.gbpusd``
-    exits CONFIGURATION with or without this guard -- as a ``coverage``
-    refusal, because the store holds no gbpusd bars -- so the test would pass
-    against code that never compares the two. Mutation-checked: the guard was
-    removed and this version failed while that version did not.
-
-    The assertions that carry it are the exit code AND the absence of a
-    ``refusal`` key. ``BacktestRefused`` is the only error that carries one,
-    so its absence separates "refused at the composition root" from every
-    refusal reachable inside ``run``.
-    """
-
-    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
-
-    ramp = _ramp(60)
-    both = (*ramp, *(bar.model_copy(update={"instrument_id": "fx.gbpusd"}) for bar in ramp))
-    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(both))
-
-    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--instrument": "fx.gbpusd"}))
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--contract": str(contract)}))
 
     assert result.exit_code == cli.ExitCode.CONFIGURATION
     payload = json.loads(result.stderr)
     assert payload["status"] == "error"
     assert "correlation_id" not in payload
     assert "refusal" not in payload
-    # Guard the guard: the very same invocation with the matching instrument
-    # succeeds, so what is refused above is the mismatch and not the fixture.
-    assert runner.invoke(cli.app, _backtest_args(tmp_path)).exit_code == 0
 
 
 @pytest.mark.parametrize("option", ["--firm-equity", "--commission-per-lot-per-side"])
@@ -1333,9 +1525,9 @@ def test_the_magnitude_ceiling_leaves_ordinary_money_alone(
     must still run. A ceiling that refused real money would be caught here
     rather than by an operator."""
 
-    from tests.unit.research.backtest.conftest import FakeBarReader, _ramp
+    from tests.unit.research.backtest.conftest import FakeBarReader
 
-    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_ramp(60)))
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_session_bars()))
 
     result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "1e12"}))
 

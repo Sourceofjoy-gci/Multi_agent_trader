@@ -39,9 +39,13 @@ position's ``entry_at`` and the proposal's ``max_holding_seconds``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from fractions import Fraction
+from typing import assert_never
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import InsufficientHistoryError, TradingHouseError
@@ -56,7 +60,9 @@ from trading_house.research.backtest.result import BacktestResult, RefusalKind, 
 from trading_house.research.backtest.snapshot import FeatureSnapshot, horizon_is_simulatable
 from trading_house.research.backtest.strategy import (
     ChandelierPolicy,
+    ExitPolicy,
     FixedTargetPolicy,
+    NoExitPolicy,
     Strategy,
 )
 from trading_house.risk.engine import MarginPort, RiskEngine
@@ -134,6 +140,7 @@ class BacktestRequest:
     cost_model: CostModel
     atr_period: int
     spread_window: int
+    defective_bar_tolerance: Decimal = Decimal(0)
 
     def __post_init__(self) -> None:
         # The boundary carrying the money. A float here would survive every
@@ -144,6 +151,14 @@ class BacktestRequest:
             raise ValueError("firm_equity must be a Decimal")
         if self.firm_equity <= 0:
             raise ValueError("firm_equity must be positive")
+        if not isinstance(self.defective_bar_tolerance, Decimal):
+            raise ValueError("defective_bar_tolerance must be a Decimal")
+        if (
+            not self.defective_bar_tolerance.is_finite()
+            or self.defective_bar_tolerance < 0
+            or self.defective_bar_tolerance > 1
+        ):
+            raise ValueError("defective_bar_tolerance must be between 0 and 1")
         # The same guard ``ReplayClock`` applies twenty lines up, for the same
         # reason: a naive ``start`` reached ``_refuse_outside_coverage``'s
         # comparison against an aware ``Coverage`` stamp and raised
@@ -190,6 +205,27 @@ class _Position:
     stop: Decimal
 
 
+def _exit_arms(policy: ExitPolicy) -> tuple[ChandelierPolicy | None, FixedTargetPolicy | None]:
+    """The declared arm, split into the two things the loop asks about.
+
+    A ``match`` with ``assert_never`` rather than two ``isinstance`` checks at
+    the call sites. Positive ``isinstance`` tests are silently inert for a
+    variant nobody has taught them about, so a fourth ``ExitPolicy`` member
+    would run as a baseline and report a number under its own name; this way
+    mypy refuses to compile until the new arm is handled.
+    """
+
+    match policy:
+        case NoExitPolicy():
+            return None, None
+        case FixedTargetPolicy():
+            return None, policy
+        case ChandelierPolicy():
+            return policy, None
+        case _:  # pragma: no cover - mypy proves this unreachable
+            assert_never(policy)
+
+
 def trail_candidate(
     *,
     side: Side,
@@ -228,19 +264,23 @@ def trail_candidate(
     AWAY from price on both sides, the same direction ``stop_price`` rounds,
     so the rounding can only widen the distance the clamp just guaranteed and
     never narrow it back inside the floor.
+
+    Refuses, rather than returning ``None``, when the candidate is not a
+    positive price. ``None`` means "this bar moves nothing", and an arm whose
+    every candidate is negative -- ``atr_multiple`` has no upper bound and
+    cannot have a useful one, since absurdity is a function of the multiple AND
+    the ATR -- would then report a number indistinguishable from the baseline
+    under the chandelier's name. ``ChandelierPolicy`` already refuses a zero
+    multiple loudly; this is the same refusal at the other end.
     """
 
     floor = max(contract.min_stop_distance, contract.freeze_distance)
     if side is Side.BUY:
         raw = bar.high - policy.atr_multiple * atr
         clamped = min(raw, bar.close - floor)
-        # A long's stop below zero is not a price. It can only arise from an
-        # absurd multiple, and quantise_down refuses a negative outright, so
-        # it is answered here as "no candidate" rather than as an exception
-        # escaping a pure function.
-        if clamped <= 0:
-            return None
-        candidate = quantise_down(clamped, contract.price_increment)
+        candidate = quantise_down(max(clamped, Decimal(0)), contract.price_increment)
+        if candidate <= 0:
+            raise BacktestRefused(RefusalKind.EXIT_POLICY)
     else:
         raw = bar.low + policy.atr_multiple * atr
         candidate = quantise_up(max(raw, bar.close + floor), contract.price_increment)
@@ -263,6 +303,7 @@ class Backtester:
         margin: MarginPort,
         contract: InstrumentContract,
         clock: ReplayClock,
+        constitution_sha256: str,
     ) -> None:
         self._bars = bars
         self._features = features
@@ -270,6 +311,8 @@ class Backtester:
         self._margin = margin
         self._contract = contract
         self._clock = clock
+        self._constitution_sha256 = constitution_sha256
+        self._contract_sha256 = contract.digest()
 
     def run(self, request: BacktestRequest) -> BacktestResult:
         strategy = request.strategy
@@ -278,12 +321,20 @@ class Backtester:
         ):
             raise BacktestRefused(RefusalKind.HORIZON)
         self._refuse_outside_coverage(request)
+        replay_bars = self._replay_bars(request)
+        tolerance_fraction = Fraction(request.defective_bar_tolerance)
+        defective_bars = sum(1 for bar in replay_bars if bar.quality is not BarQuality.OK)
+        if defective_bars:
+            defective_fraction = Fraction(defective_bars, len(replay_bars))
+            if defective_fraction > tolerance_fraction:
+                raise BacktestRefused(RefusalKind.DEFECTIVE_BAR)
 
         # Read once. A strategy's exit policy is a declaration made before the
         # run (design section 9.2: no sweeps), not a per-bar decision, and
         # asking it every bar would let one drift mid-run and make the result
         # describe no single arm.
         policy = strategy.exit_policy()
+        trail, target_arm = _exit_arms(policy)
 
         trades: list[SimulatedTrade] = []
         rejections: list[tuple[str, ...]] = []
@@ -292,9 +343,9 @@ class Backtester:
         bars_seen = 0
         snapshots_skipped = 0
 
-        for bar in self._replay_bars(request):
+        for bar in replay_bars:
             if bar.quality is not BarQuality.OK:
-                raise BacktestRefused(RefusalKind.DEFECTIVE_BAR)
+                continue
             bars_seen += 1
 
             if queued is not None:
@@ -312,14 +363,14 @@ class Backtester:
             if snapshot is None:
                 snapshots_skipped += 1
                 continue
-            if position is not None and isinstance(policy, ChandelierPolicy):
+            if trail is not None and position is not None:
                 raised = trail_candidate(
                     side=position.signal.side,
                     current_stop=position.stop,
                     bar=bar,
                     atr=snapshot.atr,
                     contract=self._contract,
-                    policy=policy,
+                    policy=trail,
                 )
                 if raised is not None:
                     position.stop = raised
@@ -328,6 +379,16 @@ class Backtester:
                 continue
             if proposal.availability_time > snapshot.as_of:
                 raise BacktestRefused(RefusalKind.LOOKAHEAD)
+            if target_arm is not None and proposal.target_r_multiple != target_arm.r_multiple:
+                # Checking agreement, not computing a price: the engine still
+                # prices the only take-profit in the run, so D-3 holds. A
+                # declared arm and a proposal configured from different sources
+                # is a setup error, not a market condition -- and it would be
+                # recorded as a result under the wrong policy's name, which is
+                # worse than no result. Includes the case where the arm names a
+                # multiple and the proposal carries none, which would otherwise
+                # run the fixed-target arm as a silent baseline.
+                raise BacktestRefused(RefusalKind.EXIT_POLICY)
             if position is not None or queued is not None:
                 continue
 
@@ -360,9 +421,7 @@ class Backtester:
                 # live target into the chandelier and baseline arms too, and
                 # the A/B would compare three things that all have targets.
                 # The policy is what names the arm; this reads it.
-                target=(
-                    decision.take_profit_price if isinstance(policy, FixedTargetPolicy) else None
-                ),
+                target=decision.take_profit_price if target_arm is not None else None,
                 max_holding_seconds=proposal.max_holding_seconds,
             )
 
@@ -376,6 +435,9 @@ class Backtester:
             trades=tuple(trades),
             rejections=tuple(rejections),
             bars_seen=bars_seen,
+            defective_bars=defective_bars,
+            tolerance_fraction=tolerance_fraction,
+            exit_policy=policy,
             snapshots_skipped=snapshots_skipped,
         )
 
@@ -625,27 +687,41 @@ class Backtester:
         trades: tuple[SimulatedTrade, ...],
         rejections: tuple[tuple[str, ...], ...],
         bars_seen: int,
+        defective_bars: int,
+        tolerance_fraction: Fraction,
+        exit_policy: ExitPolicy,
         snapshots_skipped: int,
     ) -> BacktestResult:
         return BacktestResult(
-            run_id=self._run_id(request),
+            run_id=self._run_id(request, exit_policy, tolerance_fraction),
             strategy_id=request.strategy.id,
             strategy_version=request.strategy.version,
+            exit_policy=exit_policy,
+            constitution_sha256=self._constitution_sha256,
+            contract_sha256=self._contract_sha256,
             instrument_id=request.instrument_id,
             timeframe=request.timeframe,
             start=request.start,
             end=request.end,
             firm_equity=request.firm_equity,
             cost_model=request.cost_model,
+            atr_period=request.atr_period,
+            spread_window=request.spread_window,
+            defective_bar_tolerance=tolerance_fraction,
             trades=trades,
             rejections=rejections,
             bars_seen=bars_seen,
+            defective_bars=defective_bars,
             snapshots_skipped=snapshots_skipped,
             net_pnl=sum((trade.net_pnl for trade in trades), Decimal(0)),
         )
 
-    @staticmethod
-    def _run_id(request: BacktestRequest) -> str:
+    def _run_id(
+        self,
+        request: BacktestRequest,
+        exit_policy: ExitPolicy,
+        tolerance_fraction: Fraction,
+    ) -> str:
         """Derived from the request, never minted.
 
         Phase 8 hashes ``BacktestResult.digest()`` into a trial ledger beside a
@@ -654,13 +730,19 @@ class Backtester:
         the ledger exists to provide.
         """
 
-        return ":".join(
-            (
-                request.strategy.id,
-                request.strategy.version,
-                request.instrument_id,
-                request.timeframe.value,
-                request.start.isoformat(),
-                request.end.isoformat(),
-            )
-        )
+        identity = {
+            "strategy_id": request.strategy.id,
+            "strategy_version": request.strategy.version,
+            "exit_policy": exit_policy.model_dump(mode="json"),
+            "constitution_sha256": self._constitution_sha256,
+            "contract_sha256": self._contract_sha256,
+            "instrument_id": request.instrument_id,
+            "timeframe": request.timeframe.value,
+            "start": request.start.isoformat(),
+            "end": request.end.isoformat(),
+            "atr_period": request.atr_period,
+            "spread_window": request.spread_window,
+            "defective_bar_tolerance": str(tolerance_fraction),
+        }
+        canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
+        return hashlib.sha256(canonical.encode()).hexdigest()

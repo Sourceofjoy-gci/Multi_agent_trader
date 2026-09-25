@@ -100,14 +100,14 @@ class FeatureEngine:
     ) -> Decimal | None:
         """Close-to-close return of the window that ended at or before ``as_of``.
 
-        ``None`` when that window holds no completed bars -- a holiday, a
-        data gap, the first window in the store, or a store whose coverage
-        only starts partway through the window -- which is distinct from a
-        return of zero: a strategy must be able to tell a feed outage from a
-        flat night, or it stands down for the wrong reason. A partially
-        covered window is not one this can answer about: computing a return
-        over only its covered tail would misreport a shorter move as the
-        whole session's.
+        ``None`` when that window is empty or missing any expected bar --
+        a holiday, a data gap, the first window in the store, or a store
+        whose coverage only starts partway through the window -- which is
+        distinct from a return of zero: a strategy must be able to tell a
+        feed outage from a flat night, or it stands down for the wrong
+        reason. A partially covered window is not one this can answer about:
+        computing a return from whichever bars happen to remain would
+        misreport a shorter move as the whole session's.
         """
 
         _session, start, end = preceding_session_window(as_of)
@@ -122,6 +122,8 @@ class FeatureEngine:
             if bar.event_time < end
         ]
         if not bars:
+            return None
+        if not self._window_is_complete(bars, start, end - duration(timeframe), timeframe):
             return None
         return (bars[-1].close - bars[0].close) / bars[0].close
 
@@ -140,6 +142,21 @@ class FeatureEngine:
 
         return len(self._current_session_bars(instrument_id, timeframe, as_of=as_of)) - 1
 
+    @staticmethod
+    def _window_is_complete(
+        bars: Sequence[Bar],
+        start: datetime,
+        through: datetime,
+        timeframe: Timeframe,
+    ) -> bool:
+        step = duration(timeframe)
+        expected = start
+        for bar in bars:
+            if bar.event_time != expected:
+                return False
+            expected += step
+        return expected == through + step
+
     def _current_session_bars(
         self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
     ) -> Sequence[Bar]:
@@ -155,16 +172,14 @@ class FeatureEngine:
         for the same reason, so this agrees with it by construction rather
         than by both sides remembering the same rule.
 
-        Raises ``InsufficientHistoryError`` for any of three reasons: the
-        window is empty (the store's whole history, or an interior gap,
-        leaves it with no closed bars yet -- not "every session", since a
-        session after the first in the store's history already has bars
-        behind it), the store's coverage only starts partway through it, or
-        the reference bar falls in ``Session.OFF``, which has no window at
-        all -- there is nothing ``session_bounds`` can answer with. A caller
-        only asks this inside a window it is already in, which is a warm-up
-        problem either way, the same family the guard in ``_window`` refuses
-        for rather than inventing a placeholder answer.
+        Raises ``InsufficientHistoryError`` when the window is empty or
+        missing any expected bar, when the store's coverage only starts
+        partway through it, or when the reference bar falls in
+        ``Session.OFF``, which has no window at all -- there is nothing
+        ``session_bounds`` can answer with. A caller only asks this inside a
+        window it is already in, which is a warm-up problem either way, the
+        same family the guard in ``_window`` refuses for rather than
+        inventing a placeholder answer.
         """
 
         reference = as_of - duration(timeframe)
@@ -187,6 +202,8 @@ class FeatureEngine:
             if bar.event_time < end
         ]
         if not bars:
+            raise InsufficientHistoryError
+        if not self._window_is_complete(bars, start, reference, timeframe):
             raise InsufficientHistoryError
         return bars
 

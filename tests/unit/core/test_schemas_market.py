@@ -43,6 +43,7 @@ def valid_proposal(stamp: dict[str, object]) -> dict[str, object]:
         "expected_return_bps": 10.0,
         "expected_return_stdev_bps": 5.0,
         "expected_cost_bps": 1.0,
+        "expected_swap_cost_bps": 0.0,
         "win_probability": 0.6,
         "calibration_id": "calibration-1",
         "required_liquidity": PositiveQuantity(amount=Decimal("0.1"), unit="lots"),
@@ -79,6 +80,31 @@ def test_stamped_requires_non_empty_source(stamp: dict[str, object], identifier:
     stamp["source"] = identifier
     with pytest.raises(ValidationError):
         Stamped(**stamp)
+
+
+def test_trade_proposal_requires_an_explicit_swap_declaration(
+    valid_proposal: dict[str, object],
+) -> None:
+    payload = {
+        key: value for key, value in valid_proposal.items() if key != "expected_swap_cost_bps"
+    }
+
+    with pytest.raises(ValidationError, match="expected_swap_cost_bps"):
+        TradeProposal(**payload)
+
+
+@pytest.mark.parametrize("swap", [1.0, 0.25])
+def test_trade_proposal_accepts_swap_included_in_total_cost(
+    valid_proposal: dict[str, object], swap: float
+) -> None:
+    proposal = TradeProposal(**{**valid_proposal, "expected_swap_cost_bps": swap})
+
+    assert proposal.expected_swap_cost_bps == swap
+
+
+def test_trade_proposal_rejects_swap_above_total_cost(valid_proposal: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="expected_swap_cost_bps"):
+        TradeProposal(**{**valid_proposal, "expected_swap_cost_bps": 1.01})
 
 
 def test_trade_proposal_forbids_volume(valid_proposal: dict[str, object]) -> None:

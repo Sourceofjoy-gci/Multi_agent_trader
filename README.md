@@ -1,19 +1,17 @@
-# Trading House — Phase 6 Backtester and Cost Model
+# Trading House — Phase 7 Session Momentum
 
 > **This repository can place orders, and only ever against a demo account.**
-> Phases 1.5 to 5 shipped the parts the opening of this file used to say were
-> absent: market-data ingest, the signed risk constitution and the sizing it
-> governs, an idempotent order path with an intent ledger, and a position
-> guard that keeps protective stops attached. Phase 6 adds a backtester that
-> replays stored bars through that same risk engine.
+> Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
+> sizing, an idempotent order path, a position guard, and a deterministic
+> backtester that replays stored bars through the same risk engine. Phase 7
+> registers the first real strategy and the three-arm runner that measures it.
 >
-> **The one thing that is still absent is a funded account.** The MT5 gateway
-> refuses to start against anything but a demo login, MetaTrader 5 is
-> reachable from exactly one module, and both properties are enforced by
-> `tests/acceptance/test_architecture.py` and `test_phase1.py` rather than by
-> this paragraph. There is still no LLM agent and no strategy with an edge:
-> `--strategy toy` is the entire registry, and Phase 7 brings the first real
-> one.
+> **There is still no funded account, LLM agent, or demonstrated edge.** The
+> MT5 gateway refuses every non-demo login, and MetaTrader 5 is reachable from
+> exactly one module; both properties are enforced by
+> `tests/acceptance/test_architecture.py` and `test_phase1.py`. Session
+> Momentum is a falsifiable hypothesis, not a claim of profit. A negative
+> result is a completed phase and is passed to the next one unchanged.
 
 Phase 0 establishes five guarantees:
 
@@ -492,10 +490,10 @@ no snapshot trails nothing.
   closing bar's own spread and `tick_time` is that bar's `availability_time` —
   constructed invariants, not a convention. Any strategy whose edge lives in the
   difference between the two is one D-1 refuses anyway.
-- **No strategy with an edge exists.** `--strategy toy` is the entire registry.
-  The toy buys every *n*-th snapshot at a fixed structural stop; it has no edge
-  and is not meant to acquire one. Whatever P&L it reports is the shape of the
-  data it was pointed at. Phase 7 brings the real registry.
+- **No strategy has a demonstrated edge yet.** Phase 7 registers Session
+  Momentum and fixes its three-arm experiment, but the evidence run is still a
+  separate operator action. The strategy's economics are declared priors, not
+  measured results.
 - **Market impact is not modelled.** Fills assume the requested size was always
   available at the price the model computed. A size that would move the book
   fills exactly as a small one does.
@@ -533,12 +531,13 @@ no snapshot trails nothing.
   is honoured as H rather than H plus one bar, and `swap_cost` sees the right
   date pair (D-9). Every known-answer number in the phase moved with it.
 
-**Four refusals, each rather than a plausible-looking number:**
+**Five refusals, each rather than a plausible-looking number:**
 
 | Kind | Refused because |
 |---|---|
 | `coverage` | The requested range reaches outside what the store holds — or runs backwards, which reaches no bar at all and would otherwise report an empty run |
-| `defective_bar` | A bar in the range is not `BarQuality.OK`. Dropping it silently would leave the run shorter than the period it claims |
+| `defective_bar` | Defective bars exceed the request's declared fraction; tolerated bars are counted in the result and skipped rather than silently shortening the run |
+| `exit_policy` | The proposal and declared arm disagree, or a Chandelier candidate cannot be a positive price; neither may run under the wrong arm's name |
 | `lookahead` | A proposal claimed availability later than the snapshot that produced it |
 | `horizon` | The strategy's horizon is shorter than ten bars of the timeframe (D-1), below which the number being measured is the simulator's own pessimism |
 
@@ -561,27 +560,106 @@ output. It does not establish that the digest survives an unrelated edit:
 compare by value, so `Decimal("93")` and `Decimal("93.00")` both validate and
 hash differently. That question is open.
 
+## Phase 7 — Session Momentum and the exit A/B
+
+### Strategy and rationale
+
+`session_momentum_eurusd` is the registry's only strategy. Its hypothesis is
+narrow: information repriced in thin overnight EURUSD conditions can continue to
+be absorbed when London liquidity returns. On the first closed M15 bar at the
+London open, it trades the sign of the prior completed session's return and
+holds until 16:00 UTC. A missing prior window and an exactly flat return are
+different states and neither produces a proposal.
+
+The rule is forced onto EURUSD M15 and the `fx_swing` book. Its structural
+invalidation is a pre-declared 10 pips from entry; `RiskEngine` may widen the
+executable stop for volatility, spread, contract, and broker-distance
+constraints. Expected return, cost, and win probability are priors awaiting the
+evidence run. Expected swap is explicitly zero because the position is flat
+before the daily rollover; omission would not mean zero.
+
+### Session features
+
+`FeatureSnapshot` adds four point-in-time fields, all computed from closed bars:
+
+- `session`: the window containing the bar's event time.
+- `prior_session_return`: close-to-close return of the immediately preceding
+  completed window, or `None` when that window has no complete data.
+- `session_open_price`: the current window's first open.
+- `bars_since_session_open`: zero on its first closed bar.
+
+The windows are fixed UTC ranges: Asian `00:00–07:00`, London `07:00–16:00`,
+New York `12:00–21:00`, and `OFF` elsewhere; London wins their overlap. Fixed
+UTC is deliberate: timezone-aware definitions would make results depend on a
+machine's tzdata. The cost is an explicit DST limitation—these windows do not
+follow the exchange's local-time clock changes.
+
+### Risk gates
+
+The existing spread, spread-to-stop, and tick-staleness gates still bind every
+proposal. Phase 7 adds three proposal-level comparisons from the signed
+constitution: `min_expected_edge_after_cost_bps`,
+`max_position_duration_seconds`, and `max_swap_cost_pct_of_expected_edge`. Each
+applicable book limit must clear before the real risk engine can size a
+proposal.
+
+### Three arms, three trials
+
+`--exit-policy` is required and accepts exactly three predeclared arms:
+
+| Arm | Fixed parameters |
+|---|---|
+| `none` | Engine stop plus the 16:00 UTC time stop |
+| `fixed_target` | `r_multiple = 1.0` |
+| `chandelier` | `atr_multiple = 3.0`, `min_step_points = 10` |
+
+The fixed-target strategy proposal carries `target_r_multiple = 1.0`; the other
+two carry `None`. `RiskEngine`, not the strategy or simulator, computes the target
+price from the stop distance it actually emitted. These parameters are not CLI
+options: exposing them would invite a sweep, and every extra trial would weaken
+the Deflated Sharpe that later consumes this evidence. A rerun after seeing any
+result is another trial and must be counted.
+
+### Defective bars and evidence
+
+`--defective-bar-tolerance` is a finite decimal fraction in `[0, 1]`, parsed as
+`Decimal` and compared as an exact rational. Its default is zero. A run skips
+tolerated defective bars, reports their count, and refuses when their exact
+fraction exceeds the declared ceiling. This keeps real broker data usable
+without selecting clean date ranges after seeing outcomes.
+
+The command is deliberately fixed to EURUSD M15: neither scope is a CLI option.
+Run each arm once, record net P&L after costs, trade count, defective-bar
+fraction, and ranking, then update the registered `StrategySpec`. If all three
+lose money after costs, that is a completed phase—not a reason to tune until the
+answer changes.
+
 ### Commands
 
 ```bash
-uv run trading-house backtest run --strategy toy --toy-every-n 20 \
-  --instrument fx.eurusd --timeframe M1 \
-  --start 2026-09-21T09:00:00 --end 2026-09-21T09:59:00 \
+uv run trading-house backtest run \
+  --strategy session_momentum_eurusd \
+  --exit-policy none \
+  --start 2026-09-21T00:00:00 --end 2026-09-21T16:00:00 \
   --firm-equity 100000 --contract contract.json \
   --atr-period 14 --spread-window 20 \
   --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4 \
   --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30 \
-  --triple-swap-weekday 2
+  --triple-swap-weekday 2 \
+  --defective-bar-tolerance 0
 ```
 
-- **Every cost is required and none is defaulted** (D-5). The repo has no
-  `commission` field anywhere and `FinancingModel` is an enum tag with no rate
+Run the command once with `fixed_target` and once with `chandelier` to complete
+the three-arm evidence set.
+
+- **Every cost is required and none is defaulted** (D-5). `InstrumentContract`
+  has no commission field and `FinancingModel` is an enum tag with no rate
   table, so each cost is a declared input taken from the broker's published
   contract specification and recorded in the result. Two options default and
   neither is a cost: `--stress-multiplier`, the 1.5x–2x sensitivity knob
-  section 12 asks for — a scenario, not a cost — and `--toy-every-n`, which
-  belongs to the toy rather than to the cost model. `--stress-multiplier` is
-  bounded strictly above zero, because at zero every cost in the equation
+  section 12 asks for, and `--defective-bar-tolerance`, whose strict default is
+  zero. `--stress-multiplier` is bounded strictly above zero, because at zero
+  every cost in the equation
   vanishes and below zero every one becomes a credit — which is the
   zero-commission backtest D-5 forbids, reached through the one option D-5's
   own guard exempts. Values below 1 are permitted, as the legitimate
@@ -598,32 +676,19 @@ uv run trading-house backtest run --strategy toy --toy-every-n 20 \
   nothing in this repo can produce an `InstrumentContract` without a live
   MetaTrader 5 terminal, and a research command that needs one cannot be
   replayed. The facts come from a vetted file, never from flags.
-- **Bad input leaves by seven doors and all seven are typed.** A refusal out of
-  the run prints
+- **Bad input remains typed at the boundary.** The five run-level refusals print
   `{"status": "error", "detail": "backtest refused", "refusal": "<kind>"}` on
-  stderr. A money option that is not a finite number — `abc`, but also `NaN`
-  and `Infinity`, which both *construct* as `Decimal`s — or whose magnitude is
-  past `1e30` — `1e1000000` is finite, is positive, and raises
-  `decimal.Overflow` from inside the risk engine's sizing if nothing stops it
-  — is refused where it is parsed. An equity the request rejects as
-  non-positive is refused around the request's construction. A `--contract`
-  whose `instrument_id` is not the one `--instrument` names is refused before
-  the run starts, because the risk engine would otherwise catch it as one
-  rejection per proposal and the command would exit 0 with an empty,
-  plausible-looking result. A `--contract` that cannot be read, cannot be
-  decoded, or is not valid JSON is refused at the file; that one matters most,
-  because `--contract` is the only input to this command with no producer
-  anywhere in the repository, so every operator hand-writes it. And a contract
-  or a cost value that parses but does not satisfy its model is refused by the
-  same schema handler every other command in this system uses. An unknown
-  `--strategy` is refused where the strategy is built, which is a seventh cause
-  rather than a seventh handler: it raises the same error the money and contract
-  doors raise and leaves by the one every command shares. All seven exit 2 with
-  key-sorted JSON on stderr. None reaches the operator as a correlation id —
-  which is what this system prints when *it* is broken, not when the input is —
-  and none carries free text a DSN, a path or a broker message could ride out
-  on. `--atr-period`, `--spread-window` and `--toy-every-n` are refused below 1
-  by the option parser, before the command body runs, with the same exit code.
+  stderr. Non-finite or excessively large money values, non-positive equity, an
+  invalid tolerance, a contract outside the forced EURUSD scope, an unreadable or
+  malformed contract, a schema-invalid contract or cost, and an unknown strategy
+  all leave through the command's stable configuration error with key-sorted
+  JSON and no correlation id. The tolerance parser rejects `NaN`, `Infinity`,
+  values below zero, and values above one as `Decimal` input before the run.
+  The `backtest run` command normalizes a missing or invalid `--exit-policy` at
+  its parser boundary to the same fixed JSON error without echoing the supplied
+  value; unrelated commands retain their normal parser behavior. Typer rejects
+  numeric options below one. No boundary failure carries free text from a DSN,
+  path, or broker message.
 
 ## Operator commands
 
@@ -639,7 +704,7 @@ uv run trading-house --help
 | `trading-house db check` | Confirm the database is reachable and at the expected revision |
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
-| `trading-house backtest run` | Replay one strategy over stored bars and print the result and its digest |
+| `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on

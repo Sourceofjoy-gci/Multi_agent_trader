@@ -57,6 +57,21 @@ def test_a_bar_is_available_only_once_it_has_closed() -> None:
     assert availability_of(Timeframe.H4, opened) == datetime(2026, 8, 25, 13, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("quality", [BarQuality.OK, BarQuality.NON_POSITIVE_PRICE])
+def test_a_bar_is_available_exactly_when_its_timeframe_closes(quality: BarQuality) -> None:
+    opened = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+
+    with pytest.raises(ValidationError, match="availability_time"):
+        _bar(availability_time=opened + timedelta(minutes=2), quality=quality)
+
+
+def test_a_bar_cannot_be_available_before_its_timeframe_closes() -> None:
+    opened = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+
+    with pytest.raises(ValidationError, match="availability_time"):
+        _bar(event_time=opened, availability_time=opened - timedelta(seconds=1))
+
+
 def test_alignment_is_judged_in_the_brokers_frame_not_utc() -> None:
     """FBS runs UTC+3, so its H4 bars open at 21:00, 01:00, 05:00 UTC. A naive
     modulo against UTC would reject every one of them."""

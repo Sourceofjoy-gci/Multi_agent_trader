@@ -78,6 +78,7 @@ def _proposal(**overrides: object) -> TradeProposal:
         "expected_return_bps": 5.0,
         "expected_return_stdev_bps": 2.0,
         "expected_cost_bps": 1.0,
+        "expected_swap_cost_bps": 0.0,
         "win_probability": 0.55,
         "calibration_id": "c-1",
         "required_liquidity": {"amount": Decimal("1"), "unit": "lots"},

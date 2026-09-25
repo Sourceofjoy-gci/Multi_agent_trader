@@ -57,6 +57,11 @@ def test_a_cost_model_cannot_be_constructed_without_stating_its_costs() -> None:
         CostModel(slippage_points_per_side=Decimal("0.5"))  # type: ignore[call-arg]
 
 
+def test_slippage_points_per_side_must_be_nonnegative() -> None:
+    with pytest.raises(ValidationError):
+        _model(slippage_points_per_side=Decimal("-0.1"))
+
+
 def test_commission_is_charged_on_both_sides() -> None:
     """A round trip pays twice. Charging once understates cost by half, which
     is exactly the size of error that turns a losing strategy into a winner."""

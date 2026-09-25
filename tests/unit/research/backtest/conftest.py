@@ -13,7 +13,7 @@ from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
-from trading_house.constitution.loader import load_constitution
+from trading_house.constitution.loader import LoadedConstitution, load_constitution
 from trading_house.constitution.models import Constitution
 from trading_house.core.errors import CoverageError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
@@ -83,13 +83,16 @@ def ramp_price(index: int) -> Decimal:
 
 
 @cache
-def _constitution() -> Constitution:
-    loaded = load_constitution(
+def _loaded_constitution() -> LoadedConstitution:
+    return load_constitution(
         CONFIG_DIR / "risk_constitution.yaml",
         CONFIG_DIR / "risk_constitution.yaml.sig",
         CONFIG_DIR / "risk_constitution.public.pem",
     )
-    return loaded.constitution
+
+
+def _constitution() -> Constitution:
+    return _loaded_constitution().constitution
 
 
 def _contract(**overrides: object) -> InstrumentContract:
@@ -196,6 +199,29 @@ def _ramp(n: int, *, start: datetime | None = None) -> tuple[Bar, ...]:
             low=ramp_price(index) - POINT,
             close=ramp_price(index),
             tick_volume=0,
+            spread=RAMP_SPREAD_POINTS,
+            real_volume=0,
+            quality=BarQuality.OK,
+        )
+        for index in range(n)
+    )
+
+
+def _session_ramp(n: int = 65) -> tuple[Bar, ...]:
+    """M15 bars spanning the Asian session, London open, and 16:00 close."""
+
+    origin = datetime(2026, 9, 21, 0, 0, tzinfo=UTC)
+    return tuple(
+        Bar(
+            instrument_id="fx.eurusd",
+            timeframe=Timeframe.M15,
+            event_time=origin + timedelta(minutes=15 * index),
+            availability_time=origin + timedelta(minutes=15 * (index + 1)),
+            open=Decimal("1.10000") + index * POINT * 2,
+            high=Decimal("1.10000") + index * POINT * 2 + POINT,
+            low=Decimal("1.10000") + index * POINT * 2 - POINT,
+            close=Decimal("1.10000") + index * POINT * 2,
+            tick_volume=100,
             spread=RAMP_SPREAD_POINTS,
             real_volume=0,
             quality=BarQuality.OK,
@@ -347,6 +373,7 @@ class ToyStrategy:
             expected_return_bps=5.0,
             expected_return_stdev_bps=2.0,
             expected_cost_bps=1.0,
+            expected_swap_cost_bps=0.0,
             win_probability=0.55,
             calibration_id="c-1",
             required_liquidity={"amount": Decimal("1"), "unit": "lots"},  # type: ignore[arg-type]
@@ -376,6 +403,11 @@ def _run(
     firm_equity: Decimal = Decimal("100000"),
     start: datetime | None = None,
     end: datetime | None = None,
+    defective_bar_tolerance: Decimal | None = None,
+    contract: InstrumentContract | None = None,
+    constitution_sha256: str | None = None,
+    atr_period: int = ATR_PERIOD,
+    spread_window: int = SPREAD_WINDOW,
 ) -> BacktestResult:
     reader = FakeBarReader(bars)
     # One clock, shared: the risk engine's tick-freshness gate compares its own
@@ -383,13 +415,24 @@ def _run(
     # very clock the risk engine reads. A wall clock would make every stored
     # bar stale and reject every proposal in the run.
     clock = ReplayClock(instant=bars[0].availability_time)
+    selected_contract = contract if contract is not None else _contract()
     tester = Backtester(
         bars=reader,
         features=FeatureEngine(reader),
         risk=RiskEngine(_constitution(), clock),
         margin=AlwaysAffordableMargin(),
-        contract=_contract(),
+        contract=selected_contract,
         clock=clock,
+        constitution_sha256=(
+            constitution_sha256
+            if constitution_sha256 is not None
+            else _loaded_constitution().constitution_sha256
+        ),
+    )
+    tolerance_kwargs = (
+        {}
+        if defective_bar_tolerance is None
+        else {"defective_bar_tolerance": defective_bar_tolerance}
     )
     return tester.run(
         BacktestRequest(
@@ -400,7 +443,8 @@ def _run(
             end=end if end is not None else bars[-1].event_time,
             firm_equity=firm_equity,
             cost_model=_cost_model(),
-            atr_period=ATR_PERIOD,
-            spread_window=SPREAD_WINDOW,
+            atr_period=atr_period,
+            spread_window=spread_window,
+            **tolerance_kwargs,
         )
     )

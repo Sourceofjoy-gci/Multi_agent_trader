@@ -4,6 +4,8 @@ Every distance is in price units. Points are an MT5 encoding and are the
 adapter's business, not the contract's.
 """
 
+import hashlib
+import json
 from enum import Enum
 from typing import Self
 
@@ -62,3 +64,9 @@ class InstrumentContract(CanonicalModel):
         if self.quantity_min % self.quantity_increment != 0:
             raise ValueError("quantity_min must be a multiple of quantity_increment")
         return self
+
+    def digest(self) -> str:
+        payload = self.model_dump(mode="json")
+        payload["supported_fills"] = sorted(policy.value for policy in self.supported_fills)
+        canonical = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()

@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, cast
 from uuid import uuid4
@@ -27,6 +28,8 @@ from uuid import uuid4
 import typer
 from alembic.config import Config
 from pydantic import JsonValue, ValidationError
+from typer._click.exceptions import UsageError
+from typer.core import TyperCommand
 
 from trading_house import __version__
 from trading_house.audit.repository import PostgresAuditLedger
@@ -58,6 +61,12 @@ from trading_house.core.errors import (
     TimestampError,
     TradingHouseError,
     UnresolvedIntentsError,
+)
+from trading_house.core.exits import (
+    ChandelierPolicy,
+    ExitPolicy,
+    FixedTargetPolicy,
+    NoExitPolicy,
 )
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import (
@@ -100,6 +109,28 @@ DEFAULT_PUBLIC_KEY = Path("config/risk_constitution.public.pem")
 DEFAULT_BINDING = Path("config/venue_binding.mt5.yaml")
 DEFAULT_BINDING_SIGNATURE = Path("config/venue_binding.mt5.yaml.sig")
 DEFAULT_ALEMBIC_CONFIG = Path("alembic.ini")
+_BACKTEST_INSTRUMENT = "fx.eurusd"
+_BACKTEST_TIMEFRAME = Timeframe.M15
+
+
+class ExitPolicyName(StrEnum):
+    NONE = "none"
+    FIXED_TARGET = "fixed_target"
+    CHANDELIER = "chandelier"
+
+
+_EXIT_POLICIES: dict[ExitPolicyName, ExitPolicy] = {
+    ExitPolicyName.NONE: NoExitPolicy(kind="none"),
+    ExitPolicyName.FIXED_TARGET: FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
+    ExitPolicyName.CHANDELIER: ChandelierPolicy(
+        kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
+    ),
+}
+
+
+def _exit_policy(arm: ExitPolicyName) -> ExitPolicy:
+    return _EXIT_POLICIES[arm]
+
 
 EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     TimestampError: ExitCode.CONFIGURATION,
@@ -118,9 +149,9 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
     UnresolvedIntentsError: ExitCode.UNRESOLVED_INTENTS,
     ConcurrentSubmissionError: ExitCode.CONCURRENT_SUBMISSION,
-    # One code for all four refusal kinds. They have four different remedies --
-    # backfill, repair the bars, fix the strategy, widen the horizon -- but
-    # they are all "the run you asked for cannot be simulated honestly", and
+    # One code for all five refusal kinds. They have different remedies --
+    # backfill, repair the bars, fix the arm or strategy, widen the horizon --
+    # but they are all "the run you asked for cannot be simulated honestly", and
     # the kind itself travels as the ``refusal`` key on the error payload,
     # which is what a script actually branches on.
     BacktestRefused: ExitCode.CONFIGURATION,
@@ -167,6 +198,20 @@ def _emit(payload: dict[str, JsonValue], *, status: str = "ok") -> None:
 def _fail(detail: str, code: ExitCode | int, **extra: str) -> typer.Exit:
     typer.echo(json.dumps({"status": "error", "detail": detail, **extra}, sort_keys=True), err=True)
     return typer.Exit(code=int(code))
+
+
+class _BacktestCommand(TyperCommand):
+    def make_context(
+        self,
+        info_name: str | None,
+        args: list[str],
+        parent: Any | None = None,
+        **extra: Any,
+    ) -> Any:
+        try:
+            return super().make_context(info_name, args, parent=parent, **extra)
+        except UsageError:
+            raise _fail(ConfigurationError.public_message, EXIT_CODES[ConfigurationError]) from None
 
 
 def _execute(operation: Callable[[], dict[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -263,6 +308,13 @@ def _decimal(value: str) -> Decimal:
     # command exited 1 with a correlation id instead of 2. ``copy_abs`` is
     # context-free and cannot raise.
     if parsed.copy_abs() > _DECIMAL_MAGNITUDE_CEILING:
+        raise ConfigurationError()
+    return parsed
+
+
+def _unit_interval_decimal(value: str) -> Decimal:
+    parsed = _decimal(value)
+    if parsed < 0 or parsed > 1:
         raise ConfigurationError()
     return parsed
 
@@ -1078,11 +1130,10 @@ def guard_status() -> None:
     _run(operation)
 
 
-@backtest_app.command("run")
+@backtest_app.command("run", cls=_BacktestCommand)
 def backtest_run(
     strategy: Annotated[str, typer.Option("--strategy", help="Registered strategy id.")],
-    instrument: Annotated[str, typer.Option("--instrument")],
-    timeframe: Annotated[Timeframe, typer.Option("--timeframe")],
+    exit_policy: Annotated[ExitPolicyName, typer.Option("--exit-policy")],
     start: Annotated[datetime, typer.Option("--start", help="First bar open (UTC).")],
     end: Annotated[datetime, typer.Option("--end", help="Last bar open, inclusive (UTC).")],
     firm_equity: Annotated[str, typer.Option("--firm-equity")],
@@ -1094,10 +1145,10 @@ def backtest_run(
     swap_long_points_per_day: Annotated[str, typer.Option("--swap-long-points-per-day")],
     swap_short_points_per_day: Annotated[str, typer.Option("--swap-short-points-per-day")],
     triple_swap_weekday: Annotated[int, typer.Option("--triple-swap-weekday")],
-    toy_every_n: Annotated[int, typer.Option("--toy-every-n", min=1)] = 1,
+    defective_bar_tolerance: Annotated[str, typer.Option("--defective-bar-tolerance")] = "0",
     stress_multiplier: Annotated[str, typer.Option("--stress-multiplier")] = "1",
 ) -> None:
-    """Replay one strategy over stored bars and print the result and its digest.
+    """Replay one registered strategy over stored EURUSD M15 bars.
 
     Every cost is a required option. ``CostModel`` defaults exactly one field --
     ``stress_multiplier``, the 1.5x-2x sensitivity knob section 12 asks for --
@@ -1105,20 +1156,16 @@ def backtest_run(
     that silently assumed zero commission (D-5). This command keeps that
     property: omit a cost and the command refuses rather than charging nothing.
 
-    ``--contract`` is a file because nothing in this repo can supply an
-    ``InstrumentContract`` without a live MetaTrader 5 terminal, and a research
-    command that needs a terminal is not one that can be replayed. The same
-    reasoning as ``order submit --decision``: the facts come from a file, never
-    from flags nobody vetted.
+    ``--exit-policy`` is required because an unchosen arm is not a result. The
+    three arm parameters are fixed in code and absent from the command line so
+    one invocation can add trials only by a code change that says so.
 
-    ``--strategy`` names a registry with exactly one entry in Phase 6 -- the
-    toy, whose only option is ``--toy-every-n``. It has no edge and nothing it
-    reports is evidence about a strategy. Phase 7 replaces it with a real
-    registry; until then, an unknown id is refused rather than silently
-    running the toy under another name.
+    ``--defective-bar-tolerance`` is a decimal fraction in ``[0, 1]``. Zero
+    preserves strict refusal; a real-data run may state its allowance exactly.
     """
 
     def operation() -> dict[str, JsonValue]:
+        policy = _exit_policy(exit_policy)
         settings = _settings()
         cost_model = CostModel(
             commission_per_lot_per_side=_decimal(commission_per_lot_per_side),
@@ -1141,15 +1188,7 @@ def backtest_run(
             # comma in it is the likeliest mistake this command sees, and
             # ``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
             raise ConfigurationError() from error
-        if instrument_contract.instrument_id != instrument:
-            # The composition root is the only place that holds both, and
-            # nothing downstream refuses the pair. The risk engine does catch
-            # it -- but as a RejectedRiskDecision, which the replay loop
-            # records and continues past, so the run exits 0 with zero trades,
-            # N rejections and a plausible-looking payload. That is the same
-            # silent shape the shared clock exists to avoid, reached through a
-            # different argument, and it is refused before the run starts
-            # rather than reported after it.
+        if instrument_contract.instrument_id != _BACKTEST_INSTRUMENT:
             raise ConfigurationError()
         try:
             # BacktestRequest validates firm_equity in __post_init__ and raises
@@ -1158,26 +1197,28 @@ def backtest_run(
             # the second would let a mistyped equity escape as "unexpected
             # failure".
             request = BacktestRequest(
-                strategy=build_strategy(strategy, every_n=toy_every_n, timeframe=timeframe),
-                instrument_id=instrument,
-                timeframe=timeframe,
+                strategy=build_strategy(strategy, exit_policy=policy),
+                instrument_id=_BACKTEST_INSTRUMENT,
+                timeframe=_BACKTEST_TIMEFRAME,
                 start=_as_utc(start),
                 end=_as_utc(end),
                 firm_equity=_decimal(firm_equity),
                 cost_model=cost_model,
                 atr_period=atr_period,
                 spread_window=spread_window,
+                defective_bar_tolerance=_unit_interval_decimal(defective_bar_tolerance),
             )
         except ValueError as error:
             raise ConfigurationError() from error
+        loaded_constitution = load_constitution(
+            settings.constitution_path,
+            settings.constitution_signature_path,
+            settings.constitution_public_key_path,
+        )
         result = build_backtester(
             bars=_bar_store(),
             contract=instrument_contract,
-            constitution=load_constitution(
-                settings.constitution_path,
-                settings.constitution_signature_path,
-                settings.constitution_public_key_path,
-            ).constitution,
+            constitution=loaded_constitution,
         ).run(request)
         # The result is re-parsed rather than embedded as a string so the whole
         # payload is one key-sorted JSON document, like every other command's.

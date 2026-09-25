@@ -78,6 +78,15 @@ BACKTEST_ALLOWED = frozenset(
         "trading_house.research.backtest",
     }
 )
+STRATEGIES_ROOT = SOURCE_ROOT / "strategies"
+STRATEGIES_ALLOWED = frozenset(
+    {
+        "trading_house.core",
+        "trading_house.features",
+        "trading_house.risk",
+        "trading_house.strategies",
+    }
+)
 EXECUTION_ROOT = SOURCE_ROOT / "execution"
 # execution/ may reach core/ and database/, nothing else this project owns:
 # it declares the venue port (VenueSubmitPort/DealSource/ProtectionPort) it
@@ -476,6 +485,48 @@ def test_the_backtest_import_guard_permits_what_the_spec_permits(statement: str)
     """
 
     assert _reaches_outside(ast.parse(statement + "\n"), BACKTEST_ALLOWED) == set()
+
+
+def test_no_strategy_module_imports_outside_its_allowlist() -> None:
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        if not path.is_relative_to(STRATEGIES_ROOT):
+            continue
+        reached = _reaches_outside(tree, STRATEGIES_ALLOWED)
+        if reached:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
+
+
+def test_the_strategy_package_is_not_empty() -> None:
+    assert sorted(STRATEGIES_ROOT.rglob("*.py"))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.research.backtest.strategy import Strategy",
+        "from trading_house.marketdata.models import Timeframe",
+        "import trading_house.brokers",
+    ],
+)
+def test_the_strategy_import_guard_can_still_fail(statement: str) -> None:
+    assert _reaches_outside(ast.parse(statement + "\n"), STRATEGIES_ALLOWED)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.core.snapshot import FeatureSnapshot",
+        "from trading_house.features.sessions import Session",
+        "from trading_house.risk.engine import RiskEngine",
+        "from trading_house.strategies.spec import StrategySpec",
+        "import json",
+    ],
+)
+def test_the_strategy_import_guard_permits_what_the_spec_permits(statement: str) -> None:
+    assert _reaches_outside(ast.parse(statement + "\n"), STRATEGIES_ALLOWED) == set()
 
 
 def test_the_terminal_module_stays_thin() -> None:

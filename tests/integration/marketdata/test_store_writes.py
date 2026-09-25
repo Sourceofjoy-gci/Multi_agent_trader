@@ -4,21 +4,86 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
+from psycopg import sql
 from pydantic import SecretStr
 
 from tests.integration.marketdata.conftest import NINE, _bar, seed
 from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.models import BarQuality, Timeframe
-from trading_house.marketdata.store import BarStore
+from trading_house.marketdata.store import BarStore, PostgresBarStore
 
 if TYPE_CHECKING:
     from ...conftest import DatabaseHarness
 
 pytestmark = pytest.mark.integration
+
+
+class _CountingCursor:
+    def __init__(
+        self,
+        cursor: Any,
+        insert_parameter_counts: list[int],
+        read_back_count: list[int],
+    ) -> None:
+        self._cursor = cursor
+        self._insert_parameter_counts = insert_parameter_counts
+        self._read_back_count = read_back_count
+
+    def __enter__(self) -> _CountingCursor:
+        self._cursor.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> object:
+        return self._cursor.__exit__(exc_type, exc_value, traceback)
+
+    def execute(self, statement: Any, parameters: Any = None) -> Any:
+        rendered = statement.as_string() if isinstance(statement, sql.Composed) else statement
+        if isinstance(rendered, str):
+            normalized = rendered.lstrip()
+            if normalized.startswith("INSERT INTO marketdata.bars"):
+                self._insert_parameter_counts.append(len(parameters))
+            elif normalized.startswith("SELECT event_time, open, high, low, close"):
+                self._read_back_count[0] += 1
+        return self._cursor.execute(statement, parameters)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._cursor.fetchall()
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._cursor.fetchone()
+
+
+class _CountingConnection:
+    def __init__(
+        self,
+        connection: Any,
+        insert_parameter_counts: list[int],
+        read_back_count: list[int],
+    ) -> None:
+        self._connection = connection
+        self._insert_parameter_counts = insert_parameter_counts
+        self._read_back_count = read_back_count
+
+    def __enter__(self) -> _CountingConnection:
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> object:
+        return self._connection.__exit__(exc_type, exc_value, traceback)
+
+    def cursor(self) -> _CountingCursor:
+        return _CountingCursor(
+            self._connection.cursor(),
+            self._insert_parameter_counts,
+            self._read_back_count,
+        )
+
+    def close(self) -> None:
+        self._connection.close()
 
 
 def test_appending_the_same_bar_twice_stores_it_once(bar_store: BarStore) -> None:
@@ -102,6 +167,37 @@ def test_two_disagreeing_bars_in_one_batch_report_a_conflict(
 
     assert result.stored == 1
     assert result.conflicting == 1
+
+
+def test_a_large_batch_is_chunked_and_counted_across_chunk_boundaries(
+    bar_store: BarStore, database: DatabaseHarness
+) -> None:
+    safe_chunk_size = 65_535 // 13
+    bars = tuple(_bar(index) for index in range(safe_chunk_size + 1))
+    duplicate = bars[0]
+    conflict = bars[safe_chunk_size]
+    revised = conflict.model_copy(update={"close": Decimal("9.99999")})
+    seed(bar_store, [duplicate, revised])
+
+    insert_parameter_counts: list[int] = []
+    read_back_count = [0]
+    counted_store = PostgresBarStore(
+        lambda: _CountingConnection(
+            open_runtime_connection(SecretStr(database.runtime_dsn)),
+            insert_parameter_counts,
+            read_back_count,
+        )
+    )
+
+    result = seed(counted_store, bars)
+
+    assert result.stored == safe_chunk_size - 1
+    assert result.duplicate == 1
+    assert result.conflicting == 1
+    assert result.stored + result.duplicate + result.conflicting == len(bars)
+    assert insert_parameter_counts == [safe_chunk_size * 13, 13]
+    assert all(count <= 65_535 for count in insert_parameter_counts)
+    assert read_back_count == [1]
 
 
 def test_the_run_ledger_records_what_the_write_actually_did(

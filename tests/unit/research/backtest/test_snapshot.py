@@ -20,25 +20,25 @@ def _snapshot(
     spread: int = 17,
     event_time: datetime | None = None,
     as_of: datetime | None = None,
-    availability_time: datetime | None = None,
     tick_spread_points: Decimal | None = None,
     tick_time: datetime | None = None,
     session: Session | None = None,
     prior_session_return: Decimal | None = None,
     session_open_price: Decimal | None = None,
     bars_since_session_open: int = 0,
+    instrument_id: str = "fx.eurusd",
+    timeframe: Timeframe = Timeframe.M1,
+    bar_instrument_id: str = "fx.eurusd",
+    bar_timeframe: Timeframe = Timeframe.M1,
 ) -> FeatureSnapshot:
-    timeframe = Timeframe.M1
-    if availability_time is not None:
-        resolved_availability_time = availability_time
-    elif event_time is not None:
-        resolved_availability_time = event_time + duration(timeframe)
+    if event_time is not None:
+        resolved_availability_time = event_time + duration(bar_timeframe)
     else:
         resolved_availability_time = NOW
     bar = Bar(
-        instrument_id="fx.eurusd",
-        timeframe=timeframe,
-        event_time=resolved_availability_time - duration(timeframe),
+        instrument_id=bar_instrument_id,
+        timeframe=bar_timeframe,
+        event_time=resolved_availability_time - duration(bar_timeframe),
         availability_time=resolved_availability_time,
         open=Decimal("1.10000"),
         high=Decimal("1.10050"),
@@ -51,7 +51,7 @@ def _snapshot(
     )
     return FeatureSnapshot(
         as_of=as_of if as_of is not None else resolved_availability_time,
-        instrument_id="fx.eurusd",
+        instrument_id=instrument_id,
         timeframe=timeframe,
         bar=bar,
         atr=Decimal("0.00050"),
@@ -94,13 +94,23 @@ def test_a_non_utc_but_consistent_triple_is_still_normalized_to_utc() -> None:
 
     snapshot = _snapshot(
         spread=17,
+        event_time=same_instant_plus_two - duration(Timeframe.M1),
         as_of=same_instant_plus_two,
-        availability_time=same_instant_plus_two,
         tick_time=same_instant_plus_two,
     )
 
     assert snapshot.as_of.tzinfo is UTC
     assert snapshot.tick_time.tzinfo is UTC
+
+
+def test_a_snapshot_instrument_must_match_its_bar() -> None:
+    with pytest.raises(ValidationError, match="instrument_id"):
+        _snapshot(instrument_id="fx.gbpusd")
+
+
+def test_a_snapshot_timeframe_must_match_its_bar() -> None:
+    with pytest.raises(ValidationError, match="timeframe"):
+        _snapshot(timeframe=Timeframe.M5)
 
 
 def test_a_snapshot_whose_tick_fields_disagree_with_its_bar_is_refused() -> None:
@@ -118,9 +128,9 @@ def test_a_snapshot_whose_tick_time_disagrees_with_its_bars_availability_is_refu
     with pytest.raises(ValueError, match="availability_time"):
         _snapshot(
             spread=17,
+            event_time=NOW - duration(Timeframe.M1),
             as_of=NOW,
-            availability_time=NOW - timedelta(seconds=1),
-            tick_time=NOW,
+            tick_time=NOW + timedelta(seconds=1),
         )
 
 
@@ -132,8 +142,8 @@ def test_a_snapshot_whose_tick_time_disagrees_with_as_of_is_refused() -> None:
     with pytest.raises(ValueError, match="tick_time must equal as_of"):
         _snapshot(
             spread=17,
+            event_time=NOW - duration(Timeframe.M1),
             as_of=NOW - timedelta(seconds=1),
-            availability_time=NOW,
             tick_time=NOW,
         )
 

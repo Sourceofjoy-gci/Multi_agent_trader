@@ -105,10 +105,11 @@ implementer is how a strategy acquires behaviour nobody specified:
   no-signal day.
 - **`prior_session_return` is exactly zero.** No proposal. A sign of zero is not
   a direction, and picking one would be inventing signal.
-- **`max_holding_seconds` is the seconds from the entry bar's `event_time` to
-  16:00 UTC that day** — 32400 for an entry at 07:00. It is derived from the
-  session boundary, not declared, so it cannot drift from the rule it
-  implements.
+- **`max_holding_seconds` is the seconds from the fill bar's `event_time` to
+  16:00 UTC that day.** The 07:00 closed bar produces a 07:15 fill, so the
+  declared value is 31500 seconds; 32400 would hold until 16:15. It is derived
+  from the fill time and session boundary, not declared, so it cannot drift
+  from the rule it implements.
 
 **The timeframe is forced, not chosen.** Phase 6's D-1 refuses a horizon shorter
 than ten bars of the timeframe. A nine-hour hold is thirty-six M15 bars and nine
@@ -117,9 +118,16 @@ timeframe that passes.
 
 **The book is forced, not chosen.** `fx_scalp` caps a position at 300 seconds
 (`max_position_duration_seconds`), so a strategy holding a session is
-`fx_swing`. Its `k_sigma` of 2.5 sets the stop distance, its
+`fx_swing`. Its `k_sigma` of 2.5 sets the volatility stop component, its
 `risk_per_trade_pct` of 0.75 sets the size, and both are read off the
 constitution rather than declared by the strategy.
+
+**The structural invalidation is a fixed 10 pips from entry** (`0.00100` for
+EURUSD), not a tuned parameter and not an additional A/B arm. The proposal states
+that level so `TradeProposal` has a loss-side invalidation; `RiskEngine` still
+computes the executable stop and may widen it for volatility, spread, contract,
+or broker-distance constraints. This value is an economic prior declared before
+the three planned trials, not a value selected after observing them.
 
 ### 4.3 Declared items (§10.3)
 
@@ -156,7 +164,13 @@ condition is expressible without the strategy reasoning about timestamps itself
 — a strategy that computes its own session boundaries is a strategy that can get
 point-in-time wrong privately.
 
-`features/indicators/session.py` holds the pure functions; `FeatureEngine` holds
+A session window is usable only when every expected bar from its start through the
+reference bar is present at the requested timeframe. An interior gap makes
+`prior_session_return` return `None` and makes the two current-session methods
+raise `InsufficientHistoryError`; a partial window must never be reported as a
+complete overnight return, open, or bar count.
+
+`features/sessions.py` holds the pure functions; `FeatureEngine` holds
 the only reference to the bar store, unchanged from Phase 2.
 
 ## 6. The strategy package
@@ -170,7 +184,10 @@ src/trading_house/strategies/
 ```
 
 **Import boundary.** `strategies/` may import `core/`, `features/` and `risk/`.
-It may not import `brokers/`, `execution/` or `research/`. The backtester never
+It may not import `brokers/`, `execution/` or `research/`. `FeatureSnapshot` and
+`ExitPolicy` move to `core/snapshot.py` and `core/exits.py` so the concrete
+strategy can implement the shared protocols without depending on the backtester;
+their old research modules re-export them for compatibility. The backtester never
 imports `strategies/` — it takes the `Strategy` Protocol and the composition
 root wires the concrete strategy in, exactly as it wires the toy today. The
 arrow is AST-checked in `tests/acceptance/test_architecture.py` with a
@@ -189,6 +206,10 @@ one comparison in `RiskEngine.evaluate` with its own `RejectionReason`:
 | `min_expected_edge_after_cost_bps` | `expected_return_bps - expected_cost_bps` | `EDGE_BELOW_FLOOR` |
 | `max_position_duration_seconds` | `proposal.max_holding_seconds` | `HOLDING_EXCEEDS_BOOK_LIMIT` |
 | `max_swap_cost_pct_of_expected_edge` | Estimated swap over the hold, as a fraction of declared edge | `SWAP_EXCEEDS_EDGE_FRACTION` |
+
+`expected_swap_cost_bps` is required on every `TradeProposal`. Zero is a valid
+explicit declaration for an intraday strategy; omission is not, because it lets a
+swing proposal bypass the swap-fraction gate by leaving the field out.
 
 The remaining limits — `flat_by_session_close`, `max_overnight_positions`,
 `max_weekend_exposure_pct`, `gap_risk_multiple`, `earnings_blackout_days` — need
@@ -245,6 +266,11 @@ it not a toy:
 - **Distance floor.** The candidate is clamped to the broker's minimum distance
   from current price.
 
+A `fixed_target` arm and the proposal's `target_r_multiple` must agree; a
+mismatch refuses the run rather than recording a result under the wrong arm. A
+non-positive Chandelier candidate likewise refuses the run rather than masquerading
+as an unchanged trail.
+
 ## 9. The A/B, and its price
 
 §9.2 makes the trail-vs-fixed result a mandatory item in the strategy spec, and
@@ -294,6 +320,10 @@ run now says by exactly how much it fell short.
 **Capacity is not modelled.** Order size against expected depth needs depth data
 MT5 does not give at retail. Stated as a non-promise in the strategy spec and
 the README rather than filled with an invented number.
+
+Declared slippage must be non-negative. Costs may make a fill worse; a negative
+slippage declaration would reverse that invariant and let a model improve entry
+or exit prices.
 
 **A negative result is a completed phase.** If the strategy does not make money
 after costs, that is recorded in the spec with its trial count and becomes Phase

@@ -15,21 +15,23 @@ import pytest
 
 from tests.unit.research.backtest.conftest import (
     ATR_PERIOD,
-    FIRST_SNAPSHOT_BAR,
-    HALF_SPREAD,
     SPREAD_WINDOW,
     FakeBarReader,
-    _constitution,
     _contract,
     _cost_model,
-    _ramp,
-    ramp_price,
+    _loaded_constitution,
+    _session_ramp,
 )
 from trading_house.core.errors import ConfigurationError
+from trading_house.core.exits import (
+    ChandelierPolicy,
+    ExitPolicy,
+    FixedTargetPolicy,
+    NoExitPolicy,
+)
 from trading_house.core.schemas import Side
-from trading_house.marketdata.models import Timeframe, duration
+from trading_house.marketdata.models import Timeframe
 from trading_house.ops.backtest import (
-    TOY_STRATEGY_ID,
     NeverBindingMargin,
     build_backtester,
     build_strategy,
@@ -37,23 +39,21 @@ from trading_house.ops.backtest import (
 from trading_house.research.backtest.engine import BacktestRequest
 from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import BacktestResult
-from trading_house.research.backtest.snapshot import MIN_HORIZON_BARS
 from trading_house.risk.engine import MARGIN_HEADROOM_MULTIPLE
+from trading_house.strategies.impl.session_momentum import SESSION_MOMENTUM_ID
 
-BARS = 60
-EVERY_N = 20
+BARS = 65
 
 
-def _composed_run() -> BacktestResult:
-    bars = _ramp(BARS)
-    tester = build_backtester(
-        bars=FakeBarReader(bars), contract=_contract(), constitution=_constitution()
-    )
+def _composed_run(policy: ExitPolicy) -> BacktestResult:
+    bars = _session_ramp(BARS)
+    loaded = _loaded_constitution()
+    tester = build_backtester(bars=FakeBarReader(bars), contract=_contract(), constitution=loaded)
     return tester.run(
         BacktestRequest(
-            strategy=build_strategy(TOY_STRATEGY_ID, every_n=EVERY_N, timeframe=Timeframe.M1),
+            strategy=build_strategy(SESSION_MOMENTUM_ID, exit_policy=policy),
             instrument_id="fx.eurusd",
-            timeframe=Timeframe.M1,
+            timeframe=Timeframe.M15,
             start=bars[0].event_time,
             end=bars[-1].event_time,
             firm_equity=Decimal("100000"),
@@ -65,65 +65,60 @@ def _composed_run() -> BacktestResult:
 
 
 def test_the_composed_backtester_shares_its_clock_with_its_risk_engine() -> None:
-    """The single most likely error in this task, made loud.
+    """The real strategy must trade through the composed risk path."""
 
-    ``RiskEngine``'s tick-freshness gate reads its OWN clock and compares it to
-    the snapshot's ``tick_time``; only a clock advanced to each bar's
-    ``availability_time`` passes. Give the engine a ``SystemClock`` while the
-    ``Backtester`` keeps the ``ReplayClock`` and nothing raises: every proposal
-    is rejected ``tick_stale``, the run reports no trades, and the result is
-    indistinguishable from a strategy that proposed nothing.
-
-    So this asserts what such a run cannot produce -- trades -- rather than the
-    clock's identity, which a future wiring could satisfy while still handing
-    the engine a clock nobody advances. The rejection assertion is what names
-    the cause when it does fail.
-
-    The content assertions below are the composed path's own known answer.
-    Counting two trades catches a run that stopped trading; it does not catch a
-    run that trades the WRONG thing, and Task 5's known-answer test wires its
-    own clock and its own strategy, so it never exercises this composition. The
-    prices are derived from the ramp rather than written down: the first
-    snapshot is bar ``FIRST_SNAPSHOT_BAR`` (the ATR window is cold before it),
-    a signal fills at the NEXT bar's open, and a buy pays half the spread.
-    """
-
-    result = _composed_run()
+    bars = _session_ramp(BARS)
+    result = _composed_run(NoExitPolicy(kind="none"))
 
     assert result.rejections == ()
-    assert len(result.trades) == 2
+    assert result.constitution_sha256 == _loaded_constitution().constitution_sha256
+    assert len(result.trades) == 1
     assert result.bars_seen == BARS
-
-    first, second = result.trades
-    assert first.entry_price == ramp_price(FIRST_SNAPSHOT_BAR + 1) + HALF_SPREAD
-    assert second.entry_price == ramp_price(FIRST_SNAPSHOT_BAR + EVERY_N + 1) + HALF_SPREAD
-    # The toy's stop sits 100 points away and the ramp rises one point a bar,
-    # so neither position can be stopped out or take profit: both must run to
-    # the holding deadline. An exit kind that is not TIME means the simulator
-    # resolved something this series cannot produce.
-    assert (first.exit_kind, second.exit_kind) == (ExitKind.TIME, ExitKind.TIME)
-    assert (first.net_pnl, second.net_pnl) == (Decimal("-23.59"), Decimal("-23.59"))
-    assert result.net_pnl == Decimal("-47.18")
+    trade = result.trades[0]
+    assert trade.exit_kind is ExitKind.TIME
+    assert trade.entry_at == bars[29].event_time
+    assert trade.exit_at == bars[-1].event_time
 
 
-def test_the_toy_is_the_only_registered_strategy() -> None:
-    """``--strategy`` names a registry with exactly one entry in Phase 6. An
-    unknown id must be a typed configuration failure, not a run of the toy
-    under someone else's name."""
+def test_the_real_strategy_actually_trades_in_every_ab_arm() -> None:
+    policies = (
+        NoExitPolicy(kind="none"),
+        FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
+        ChandelierPolicy(
+            kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
+        ),
+    )
 
+    results = tuple(_composed_run(policy) for policy in policies)
+
+    assert all(result.trades for result in results)
+    assert tuple(result.exit_policy for result in results) == policies
+
+
+def test_the_ops_registry_builds_the_real_strategy_and_refuses_the_toy() -> None:
+    strategy = build_strategy(SESSION_MOMENTUM_ID, exit_policy=NoExitPolicy(kind="none"))
+
+    assert strategy.id == SESSION_MOMENTUM_ID
     with pytest.raises(ConfigurationError):
-        build_strategy("momentum", every_n=1, timeframe=Timeframe.M1)
+        build_strategy("toy", exit_policy=NoExitPolicy(kind="none"))
 
 
-@pytest.mark.parametrize("timeframe", list(Timeframe))
-def test_the_toys_horizon_is_simulatable_on_every_timeframe(timeframe: Timeframe) -> None:
-    """D-1 refuses a horizon shorter than ten bars. A toy stating its horizon in
-    fixed seconds would be refused outright on the slow timeframes, which reads
-    as the simulator rejecting the timeframe rather than the toy."""
+@pytest.mark.parametrize(
+    "policy",
+    [
+        NoExitPolicy(kind="none"),
+        FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
+        ChandelierPolicy(
+            kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
+        ),
+    ],
+)
+def test_the_ops_registry_applies_the_selected_arm(
+    policy: NoExitPolicy | FixedTargetPolicy | ChandelierPolicy,
+) -> None:
+    strategy = build_strategy(SESSION_MOMENTUM_ID, exit_policy=policy)
 
-    strategy = build_strategy(TOY_STRATEGY_ID, every_n=1, timeframe=timeframe)
-
-    assert strategy.horizon_seconds >= MIN_HORIZON_BARS * duration(timeframe).total_seconds()
+    assert strategy.exit_policy() == policy
 
 
 def test_the_simulated_margin_port_never_binds() -> None:

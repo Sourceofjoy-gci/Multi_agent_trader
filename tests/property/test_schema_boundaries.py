@@ -6,6 +6,7 @@ import importlib
 import pkgutil
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from fractions import Fraction
 from typing import Any, get_args
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from trading_house.brokers.base import (
     ReconciliationReport,
     VenueHealth,
 )
+from trading_house.core.exits import NoExitPolicy
 from trading_house.core.schemas import (
     AgentOpinion,
     CanonicalModel,
@@ -83,6 +85,7 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "expected_return_bps": 5.0,
         "expected_return_stdev_bps": 2.0,
         "expected_cost_bps": 1.0,
+        "expected_swap_cost_bps": 0.0,
         "win_probability": 0.55,
         "calibration_id": "c-1",
         "required_liquidity": PositiveQuantity(amount=Decimal("0.5"), unit="lots"),
@@ -287,6 +290,9 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "run_id": "run-1",
         "strategy_id": "strat-1",
         "strategy_version": "v1",
+        "exit_policy": NoExitPolicy(kind="none"),
+        "constitution_sha256": "a" * 64,
+        "contract_sha256": "b" * 64,
         "instrument_id": "fx.eurusd",
         "timeframe": Timeframe.M1,
         "start": AWARE,
@@ -299,6 +305,9 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
             swap_short_points_per_day=Decimal("-1"),
             triple_swap_weekday=2,
         ),
+        "atr_period": 14,
+        "spread_window": 20,
+        "defective_bar_tolerance": Fraction(0),
         "trades": (),  # filled in below: SimulatedTrade's own entry is not bound yet here
         "rejections": (),
         "bars_seen": 60,

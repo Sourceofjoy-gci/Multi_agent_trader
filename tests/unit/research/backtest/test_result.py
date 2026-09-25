@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 from pydantic import ValidationError
 
+from trading_house.core.exits import NoExitPolicy
 from trading_house.core.schemas import Side
 from trading_house.marketdata.models import Timeframe
 from trading_house.research.backtest.costs import CostModel
@@ -56,12 +58,18 @@ def _result(**overrides: object) -> BacktestResult:
         "run_id": "run-1",
         "strategy_id": "strat-1",
         "strategy_version": "v1",
+        "exit_policy": NoExitPolicy(kind="none"),
+        "constitution_sha256": "a" * 64,
+        "contract_sha256": "b" * 64,
         "instrument_id": "fx.eurusd",
         "timeframe": Timeframe.M1,
         "start": NOW,
         "end": NOW + timedelta(hours=1),
         "firm_equity": Decimal("100000"),
         "cost_model": _cost_model(),
+        "atr_period": 14,
+        "spread_window": 20,
+        "defective_bar_tolerance": Fraction(0),
         "trades": trades,
         "rejections": (),
         "bars_seen": 60,
@@ -69,6 +77,14 @@ def _result(**overrides: object) -> BacktestResult:
         "net_pnl": net_pnl,
     }
     return BacktestResult(**{**defaults, **overrides})  # type: ignore[arg-type]
+
+
+def test_defective_bars_defaults_to_zero_and_is_a_non_negative_count() -> None:
+    assert _result().defective_bars == 0
+    assert _result(defective_bars=2).defective_bars == 2
+
+    with pytest.raises(ValidationError):
+        _result(defective_bars=-1)
 
 
 def test_net_pnl_is_gross_less_every_cost_term() -> None:

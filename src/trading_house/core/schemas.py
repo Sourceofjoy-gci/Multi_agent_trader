@@ -116,10 +116,9 @@ class TradeProposal(Stamped):
     expected_cost_bps: NonNegativeFiniteFloat
     # The strategy's declared swap component, already included in
     # expected_cost_bps above and carried separately here because
-    # max_swap_cost_pct_of_expected_edge needs it alone. A default of zero is
-    # not "no opinion" -- it is a claim an intraday strategy is entitled to
-    # make, and one the swap gate then checks rather than skips.
-    expected_swap_cost_bps: NonNegativeFiniteFloat = 0.0
+    # max_swap_cost_pct_of_expected_edge needs it alone. The strategy must
+    # declare it explicitly; zero remains a valid declaration.
+    expected_swap_cost_bps: NonNegativeFiniteFloat
     win_probability: Probability
     calibration_id: NonEmptyStr
     required_liquidity: PositiveQuantity
@@ -149,6 +148,12 @@ class TradeProposal(Stamped):
             raise ValueError("BUY invalidation must be below entry_price_ref")
         if self.side is Side.SELL and self.invalidation_price <= self.entry_price_ref:
             raise ValueError("SELL invalidation must be above entry_price_ref")
+        return self
+
+    @model_validator(mode="after")
+    def swap_is_included_in_total_cost(self) -> Self:
+        if self.expected_swap_cost_bps > self.expected_cost_bps:
+            raise ValueError("expected_swap_cost_bps must not exceed expected_cost_bps")
         return self
 
 

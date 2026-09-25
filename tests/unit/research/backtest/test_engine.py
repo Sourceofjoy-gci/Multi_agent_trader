@@ -1,5 +1,8 @@
+import hashlib
+import json
 from datetime import timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -12,6 +15,7 @@ from tests.unit.research.backtest.conftest import (
     ToyStrategy,
     _bar,
     _contract,
+    _loaded_constitution,
     _ramp,
     _run,
     ramp_price,
@@ -299,6 +303,211 @@ def test_a_defective_bar_in_the_range_refuses_the_run() -> None:
     assert caught.value.kind is RefusalKind.DEFECTIVE_BAR
 
 
+def test_a_defective_bar_within_tolerance_is_counted_and_skipped() -> None:
+    bars = _ramp(40)
+    bars = (
+        *bars[:20],
+        bars[20].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}),
+        *bars[21:],
+    )
+
+    result = _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.1"))
+
+    assert result.defective_bars == 1
+    assert result.bars_seen == 39
+
+
+def test_a_defective_fraction_above_tolerance_still_refuses() -> None:
+    """The tolerance is a declared allowance, not a way to ignore bad data."""
+
+    bars = tuple(
+        bar.model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}) for bar in _ramp(40)
+    )
+
+    with pytest.raises(BacktestRefused) as caught:
+        _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.1"))
+
+    assert caught.value.kind is RefusalKind.DEFECTIVE_BAR
+
+
+def test_the_default_tolerance_is_zero_so_phase_sixs_behaviour_is_unchanged() -> None:
+    """A caller who says nothing gets the strict refusal, so the tolerance
+    cannot be acquired by accident."""
+
+    bars = _ramp(40)
+    bars = (
+        *bars[:20],
+        bars[20].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}),
+        *bars[21:],
+    )
+
+    with pytest.raises(BacktestRefused):
+        _run(bars=bars, strategy=ToyStrategy())
+
+
+def test_a_defective_fraction_equal_to_the_tolerance_is_allowed() -> None:
+    bars = _ramp(10)
+    bars = (
+        bars[0].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}),
+        *bars[1:],
+    )
+
+    result = _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.1"))
+
+    assert result.defective_bars == 1
+    assert result.bars_seen == 9
+
+
+def test_a_fraction_just_below_exact_one_third_is_refused() -> None:
+    bars = _ramp(3)
+    bars = (
+        bars[0].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}),
+        *bars[1:],
+    )
+
+    with pytest.raises(BacktestRefused) as caught:
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(),
+            defective_bar_tolerance=Decimal("0.3333333333333333333333333333"),
+        )
+
+    assert caught.value.kind is RefusalKind.DEFECTIVE_BAR
+
+
+def test_run_identity_includes_the_defective_bar_tolerance() -> None:
+    bars = _ramp(40)
+    bars = (
+        *bars[:20],
+        bars[20].model_copy(update={"quality": BarQuality.OHLC_INCOHERENT}),
+        *bars[21:],
+    )
+
+    low = _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.1"))
+    high = _run(bars=bars, strategy=ToyStrategy(), defective_bar_tolerance=Decimal("0.2"))
+
+    assert low.defective_bars == high.defective_bars == 1
+    assert low.run_id != high.run_id
+    assert low.digest() != high.digest()
+
+
+def test_result_carries_complete_run_and_constitution_provenance() -> None:
+    contract = _contract()
+    payload = contract.model_dump(mode="json")
+    payload["supported_fills"] = sorted(payload["supported_fills"])
+    expected_contract_sha256 = hashlib.sha256(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+
+    result = _run(bars=_ramp(60), strategy=ToyStrategy(every_n=20), contract=contract)
+
+    assert result.exit_policy == NoExitPolicy(kind="none")
+    assert result.constitution_sha256 == _loaded_constitution().constitution_sha256
+    assert result.contract_sha256 == expected_contract_sha256
+    assert result.atr_period == 2
+    assert result.spread_window == 10
+    assert result.defective_bar_tolerance == Fraction(0)
+
+
+def test_each_exit_policy_has_a_distinct_identity_even_when_trades_coincide() -> None:
+    policies = (
+        NoExitPolicy(kind="none"),
+        FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1000")),
+        ChandelierPolicy(
+            kind="chandelier", atr_multiple=Decimal("3"), min_step_points=Decimal("1000")
+        ),
+    )
+
+    results = [
+        _run(
+            bars=_ramp(60),
+            strategy=ToyStrategy(every_n=1000, target_r_multiple=Decimal("1000"), policy=policy),
+        )
+        for policy in policies
+    ]
+
+    assert results[0].trades
+    assert all(result.trades == results[0].trades for result in results[1:])
+    assert len({result.run_id for result in results}) == 3
+    assert len({result.digest() for result in results}) == 3
+
+
+def test_every_run_assumption_changes_run_and_result_identity() -> None:
+    bars = _ramp(60)
+    base = _run(bars=bars, strategy=ToyStrategy(every_n=20))
+    changed = (
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(every_n=20),
+            contract=_contract(freeze_distance=Decimal("0.0002")),
+        ),
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(every_n=20),
+            constitution_sha256="f" * 64,
+        ),
+        _run(bars=bars, strategy=ToyStrategy(every_n=20), atr_period=3),
+        _run(bars=bars, strategy=ToyStrategy(every_n=20), spread_window=11),
+        _run(
+            bars=bars,
+            strategy=ToyStrategy(every_n=20),
+            defective_bar_tolerance=Decimal("0.01"),
+        ),
+    )
+
+    for result in changed:
+        assert result.run_id != base.run_id
+        assert result.digest() != base.digest()
+
+
+def test_equivalent_policy_and_tolerance_spellings_have_one_identity() -> None:
+    bars = _ramp(60)
+    first = _run(
+        bars=bars,
+        strategy=ToyStrategy(
+            every_n=1000,
+            target_r_multiple=Decimal("1.0"),
+            policy=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
+        ),
+        defective_bar_tolerance=Decimal("0.10"),
+    )
+    second = _run(
+        bars=bars,
+        strategy=ToyStrategy(
+            every_n=1000,
+            target_r_multiple=Decimal("1.00"),
+            policy=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.00")),
+        ),
+        defective_bar_tolerance=Decimal("0.1"),
+    )
+
+    assert first.exit_policy.model_dump_json() == second.exit_policy.model_dump_json()
+    assert first.defective_bar_tolerance == second.defective_bar_tolerance == Fraction(1, 10)
+    assert first.run_id == second.run_id
+    assert first.digest() == second.digest()
+
+
+@pytest.mark.parametrize(
+    "tolerance",
+    [
+        Decimal("-0.1"),
+        Decimal("1.1"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        0.1,
+    ],
+)
+def test_a_request_refuses_a_non_finite_or_out_of_range_defective_bar_tolerance(
+    tolerance: object,
+) -> None:
+    with pytest.raises(ValueError, match="defective_bar_tolerance"):
+        _run(
+            bars=_ramp(30),
+            strategy=ToyStrategy(every_n=5),
+            defective_bar_tolerance=tolerance,
+        )
+
+
 def test_a_range_outside_the_stores_coverage_refuses_the_run() -> None:
     """Simulating across data we do not have is the worst kind of silent lie:
     the equity curve simply has fewer bars than the period claims."""
@@ -411,6 +620,20 @@ def test_the_fixed_target_arm_exits_on_its_target_end_to_end() -> None:
     assert [trade.exit_kind for trade in result.trades] == [ExitKind.TARGET]
     assert result.trades[0].exit_price == Decimal("1.10025")
     assert result.trades[0].exit_at == bars[24].event_time
+
+
+def test_a_fixed_target_arm_refuses_a_proposal_without_the_declared_target() -> None:
+    with pytest.raises(BacktestRefused) as caught:
+        _run(
+            bars=_ramp(40),
+            strategy=ToyStrategy(
+                every_n=1000,
+                target_r_multiple=None,
+                policy=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1")),
+            ),
+        )
+
+    assert caught.value.kind is RefusalKind.EXIT_POLICY
 
 
 def test_a_target_the_risk_engine_priced_is_ignored_unless_the_arm_names_it() -> None:
@@ -530,6 +753,45 @@ def test_a_request_normalises_an_offset_aware_range_to_utc() -> None:
 
     assert offset.run_id == utc.run_id
     assert offset.digest() == utc.digest()
+
+
+def test_a_non_positive_chandelier_level_refuses_the_run() -> None:
+    with pytest.raises(BacktestRefused) as caught:
+        trail_candidate(
+            side=Side.BUY,
+            current_stop=Decimal("1.09900"),
+            bar=_bar(high=Decimal("1.10500"), close=Decimal("1.10000")),
+            atr=Decimal("0.00010"),
+            contract=_contract(min_stop_distance=Decimal("2")),
+            policy=ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal(3), min_step_points=Decimal(1)
+            ),
+        )
+
+    assert caught.value.kind is RefusalKind.EXIT_POLICY
+
+
+def test_a_positive_sub_tick_chandelier_level_that_quantizes_to_zero_refuses_the_run() -> None:
+    with pytest.raises(BacktestRefused) as caught:
+        trail_candidate(
+            side=Side.BUY,
+            current_stop=Decimal("0.00001"),
+            bar=_bar(
+                high=Decimal("0.00002"),
+                low=Decimal("0.000004"),
+                close=Decimal("0.000005"),
+            ),
+            atr=Decimal("0.000001"),
+            contract=_contract(
+                min_stop_distance=Decimal("0.000004"),
+                freeze_distance=Decimal("0.000004"),
+            ),
+            policy=ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal(1), min_step_points=Decimal(1)
+            ),
+        )
+
+    assert caught.value.kind is RefusalKind.EXIT_POLICY
 
 
 def test_a_chandelier_stop_only_ever_moves_toward_profit() -> None:

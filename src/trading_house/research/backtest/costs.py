@@ -52,7 +52,7 @@ class CostModel(CanonicalModel):
     """
 
     commission_per_lot_per_side: Decimal  # account currency
-    slippage_points_per_side: Decimal
+    slippage_points_per_side: Decimal = Field(ge=0)
     swap_long_points_per_day: Decimal  # signed; negative is a charge
     swap_short_points_per_day: Decimal
     triple_swap_weekday: int = Field(ge=0, le=6)  # 0=Monday .. 6=Sunday

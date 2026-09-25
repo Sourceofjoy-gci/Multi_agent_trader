@@ -331,23 +331,46 @@ def _m15_bar(event_time: datetime, price: Decimal) -> Bar:
     )
 
 
-def _asian_then_london() -> tuple[Bar, ...]:
-    """Two Asian M15 bars bracketing a 0.001 close-to-close return, then the
-    first bar of the following London session."""
-
-    return (
-        _m15_bar(datetime(2026, 9, 21, 0, 0, tzinfo=UTC), Decimal("1.10000")),
-        _m15_bar(datetime(2026, 9, 21, 6, 45, tzinfo=UTC), Decimal("1.10110")),
-        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),
+def _m15_window(
+    start: datetime,
+    end: datetime,
+    *,
+    first_close: Decimal,
+    last_close: Decimal,
+) -> tuple[Bar, ...]:
+    step = duration(Timeframe.M15)
+    count = int((end - start) / step)
+    return tuple(
+        _m15_bar(
+            start + index * step,
+            first_close if index == 0 else last_close,
+        )
+        for index in range(count)
     )
 
 
-def _asian_only() -> tuple[Bar, ...]:
-    """The Asian session's own two bars, with London not yet ingested at
-    all -- as opposed to ``_asian_then_london``'s three, where London's
-    first bar already exists by the time anything asks about it."""
+def _asian_then_london() -> tuple[Bar, ...]:
+    """Every Asian M15 bar bracketing a 0.001 close-to-close return, then the
+    first bar of the following London session."""
 
-    return _asian_then_london()[:2]
+    asian = _m15_window(
+        datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        first_close=Decimal("1.10000"),
+        last_close=Decimal("1.10110"),
+    )
+    return (*asian, _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")))
+
+
+def _asian_only() -> tuple[Bar, ...]:
+    """Every Asian M15 bar, with London not yet ingested at all."""
+
+    return _m15_window(
+        datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        first_close=Decimal("1.10000"),
+        last_close=Decimal("1.10110"),
+    )
 
 
 def _london_only() -> tuple[Bar, ...]:
@@ -366,11 +389,13 @@ def _london_only() -> tuple[Bar, ...]:
 def _flat_asian_then_london() -> tuple[Bar, ...]:
     """Asian closes exactly where it opened."""
 
-    return (
-        _m15_bar(datetime(2026, 9, 21, 0, 0, tzinfo=UTC), Decimal("1.10000")),
-        _m15_bar(datetime(2026, 9, 21, 6, 45, tzinfo=UTC), Decimal("1.10000")),
-        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10000")),
+    asian = _m15_window(
+        datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        first_close=Decimal("1.10000"),
+        last_close=Decimal("1.10000"),
     )
+    return (*asian, _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10000")))
 
 
 def _partial_asian_coverage() -> tuple[Bar, ...]:
@@ -429,6 +454,45 @@ def test_a_flat_preceding_window_returns_zero_not_none() -> None:
     ) == Decimal(0)
 
 
+def test_prior_session_return_refuses_an_interior_gap() -> None:
+    complete = _m15_window(
+        datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        first_close=Decimal("1.10000"),
+        last_close=Decimal("1.10110"),
+    )
+    bars = (*complete[:1], *complete[2:])
+    london = _m15_bar(
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        Decimal("1.10120"),
+    )
+    engine = FeatureEngine(FakeBarReader((*bars, london)))
+
+    assert (
+        engine.prior_session_return(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+        is None
+    )
+
+
+def test_prior_session_return_refuses_a_missing_final_bar() -> None:
+    complete = _m15_window(
+        datetime(2026, 9, 21, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        first_close=Decimal("1.10000"),
+        last_close=Decimal("1.10110"),
+    )
+    engine = FeatureEngine(FakeBarReader(complete[:-1]))
+
+    assert (
+        engine.prior_session_return(
+            "fx.eurusd", Timeframe.M15, as_of=datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
+        )
+        is None
+    )
+
+
 def test_the_session_open_price_and_bar_count_at_the_open() -> None:
     """As of 07:15 the 07:00 London bar has just closed and is the only bar
     the window can know about -- not 07:00 itself, the wall-clock instant
@@ -457,7 +521,7 @@ def test_session_open_price_at_the_windows_own_start_resolves_to_the_preceding_s
     as_of = datetime(2026, 9, 21, 7, 0, tzinfo=UTC)
 
     assert engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of) == Decimal("1.10000")
-    assert engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of) == 1
+    assert engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of) == 27
 
 
 def test_session_open_price_refuses_when_the_new_session_has_no_bars_yet() -> None:
@@ -520,6 +584,34 @@ def test_bars_since_session_open_refuses_on_partial_coverage_not_coverage_error(
         engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of)
 
 
+def test_current_session_methods_refuse_an_interior_gap() -> None:
+    bars = (
+        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),
+        _m15_bar(datetime(2026, 9, 21, 7, 30, tzinfo=UTC), Decimal("1.10130")),
+    )
+    engine = FeatureEngine(FakeBarReader(bars))
+    as_of = datetime(2026, 9, 21, 7, 45, tzinfo=UTC)
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of)
+    with pytest.raises(InsufficientHistoryError):
+        engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of)
+
+
+def test_current_session_methods_refuse_a_missing_final_reference_bar() -> None:
+    bars = (
+        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),
+        _m15_bar(datetime(2026, 9, 21, 7, 15, tzinfo=UTC), Decimal("1.10130")),
+    )
+    engine = FeatureEngine(FakeBarReader(bars))
+    as_of = datetime(2026, 9, 21, 7, 45, tzinfo=UTC)
+
+    with pytest.raises(InsufficientHistoryError):
+        engine.session_open_price("fx.eurusd", Timeframe.M15, as_of=as_of)
+    with pytest.raises(InsufficientHistoryError):
+        engine.bars_since_session_open("fx.eurusd", Timeframe.M15, as_of=as_of)
+
+
 def test_session_open_price_refuses_in_the_off_window_not_a_bare_value_error() -> None:
     """C1. Between 21:00 and midnight UTC ``session_of`` returns
     ``Session.OFF``, and ``session_bounds`` has no window to give it for
@@ -556,9 +648,11 @@ def test_session_open_price_at_a_sessions_closing_bar_uses_the_bars_own_session(
     ``FeatureSnapshot.session``, which is pinned to
     ``session_of(bar.event_time)`` -- the two must agree by construction."""
 
-    bars = (
-        _m15_bar(datetime(2026, 9, 21, 7, 0, tzinfo=UTC), Decimal("1.10120")),  # London's open
-        _m15_bar(datetime(2026, 9, 21, 15, 45, tzinfo=UTC), Decimal("1.10500")),  # London's close
+    bars = _m15_window(
+        datetime(2026, 9, 21, 7, 0, tzinfo=UTC),
+        datetime(2026, 9, 21, 16, 0, tzinfo=UTC),
+        first_close=Decimal("1.10120"),
+        last_close=Decimal("1.10500"),
     )
     engine = FeatureEngine(FakeBarReader(bars))
     as_of = datetime(2026, 9, 21, 16, 0, tzinfo=UTC)  # the closing bar's availability_time

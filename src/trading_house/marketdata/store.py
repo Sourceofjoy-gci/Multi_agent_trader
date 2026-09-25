@@ -58,6 +58,7 @@ _BAR_COLUMNS = (
     "quality",
     "ingest_run_id",
 )
+_MAX_INSERT_ROWS = 65_535 // len(_BAR_COLUMNS)
 
 _INSERT_RUN_SQL = """
     INSERT INTO marketdata.ingest_runs (
@@ -371,11 +372,14 @@ class PostgresBarStore:
         connection = self._connect()
         try:
             with connection, connection.cursor() as cursor:
-                params: list[Any] = []
-                for bar in candidates:
-                    params.extend(_bar_params(bar, run_id))
-                cursor.execute(_insert_bars_statement(len(candidates)), params)
-                inserted: set[BarKey] = {(row[0], row[1], row[2]) for row in cursor.fetchall()}
+                inserted: set[BarKey] = set()
+                for offset in range(0, len(candidates), _MAX_INSERT_ROWS):
+                    chunk = candidates[offset : offset + _MAX_INSERT_ROWS]
+                    params: list[Any] = []
+                    for bar in chunk:
+                        params.extend(_bar_params(bar, run_id))
+                    cursor.execute(_insert_bars_statement(len(chunk)), params)
+                    inserted.update((row[0], row[1], row[2]) for row in cursor.fetchall())
 
                 missing = [bar for bar in candidates if _key(bar) not in inserted]
                 stored_ohlc = self._read_back(cursor, missing)

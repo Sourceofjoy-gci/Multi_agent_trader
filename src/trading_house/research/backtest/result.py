@@ -12,12 +12,14 @@ import hashlib
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from fractions import Fraction
 from typing import Self
 
-from pydantic import NonNegativeInt, field_validator, model_validator
+from pydantic import NonNegativeInt, PositiveInt, field_validator, model_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import TimestampError
+from trading_house.core.exits import ExitPolicy
 from trading_house.core.schemas import Side
 from trading_house.core.values import CanonicalModel, InstrumentId, NonEmptyStr
 from trading_house.marketdata.models import Timeframe
@@ -28,6 +30,7 @@ from trading_house.research.backtest.fills import ExitKind
 class RefusalKind(str, Enum):  # noqa: UP042
     COVERAGE = "coverage"
     DEFECTIVE_BAR = "defective_bar"
+    EXIT_POLICY = "exit_policy"
     LOOKAHEAD = "lookahead"
     HORIZON = "horizon"
 
@@ -99,15 +102,22 @@ class BacktestResult(CanonicalModel):
     run_id: NonEmptyStr
     strategy_id: NonEmptyStr
     strategy_version: NonEmptyStr
+    exit_policy: ExitPolicy
+    constitution_sha256: NonEmptyStr
+    contract_sha256: NonEmptyStr
     instrument_id: InstrumentId
     timeframe: Timeframe
     start: datetime
     end: datetime
     firm_equity: Decimal
     cost_model: CostModel
+    atr_period: PositiveInt
+    spread_window: PositiveInt
+    defective_bar_tolerance: Fraction
     trades: tuple[SimulatedTrade, ...]
     rejections: tuple[tuple[NonEmptyStr, ...], ...]  # D-8: each decision's reasons
     bars_seen: NonNegativeInt
+    defective_bars: NonNegativeInt = 0
     # A bar the loop saw but for which no FeatureSnapshot was built -- an ATR
     # or spread window still warming up, a session the store only partly
     # covers, or a reference bar in Session.OFF. Counted separately from
