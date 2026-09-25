@@ -244,6 +244,11 @@ class ExecutionStartedPayload(CanonicalModel):
     attempt_id: NonEmptyStr
     execution_started_at: datetime
 
+    @field_validator("execution_started_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime) -> datetime:
+        return _utc(value)
+
 
 class ResultRecordedPayload(CanonicalModel):
     event_type: Literal[LedgerEventType.RESULT_RECORDED]

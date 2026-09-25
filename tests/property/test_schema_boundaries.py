@@ -49,6 +49,24 @@ from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import BacktestResult, SimulatedTrade
 from trading_house.research.backtest.snapshot import FeatureSnapshot
+from trading_house.research.trial_ledger import (
+    CostSpec,
+    DataSpec,
+    ExecutionSpec,
+    ExecutionStartedPayload,
+    HoldoutSpec,
+    HoldoutState,
+    LedgerEvent,
+    LedgerEventType,
+    LedgerRecord,
+    PreregisteredPayload,
+    RegimeSpec,
+    RegistrationState,
+    ScopeKind,
+    TrialProtocol,
+    TrialSpec,
+    ValidationSpec,
+)
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
@@ -58,6 +76,70 @@ STAMP: dict[str, Any] = {
     "processing_time": AWARE,
     "source": "property-suite",
 }
+
+
+def _protocol() -> TrialProtocol:
+    """One complete protocol for the LedgerEvent builder below.
+
+    Built as an instance, not a nested mapping: every research contract is
+    ``strict=True``, and a strict model field takes its own model.
+    """
+
+    return TrialProtocol(
+        protocol_id="protocol-1",
+        protocol_version="1",
+        agent_run_id="run-1",
+        strategy_id="session_momentum",
+        strategy_version="1",
+        strategy_sha256="a" * 64,
+        data=DataSpec(
+            instrument_id="fx.eurusd",
+            timeframe=Timeframe.M15,
+            start=AWARE,
+            end=AWARE + timedelta(days=1),
+            dataset_sha256="b" * 64,
+            point_in_time_policy="availability_time",
+        ),
+        execution=ExecutionSpec(
+            seed="fixed",
+            warmup_bars=20,
+            fill_policy="pessimistic-bar",
+            sizing_policy="risk-engine",
+        ),
+        costs=CostSpec(
+            baseline=CostModel(
+                commission_per_lot_per_side=Decimal("0"),
+                slippage_points_per_side=Decimal("0.4"),
+                swap_long_points_per_day=Decimal("-7.7"),
+                swap_short_points_per_day=Decimal("2"),
+                triple_swap_weekday=2,
+            ),
+            stress_multipliers=(Decimal("1.5"), Decimal("2")),
+        ),
+        validation=ValidationSpec(
+            primary_metric="net_expectancy",
+            wfa_train_months=24,
+            wfa_validation_months=6,
+            wfa_test_months=6,
+            purge_hours=16,
+            embargo_hours=16,
+            cpcv_folds=6,
+            bootstrap_replicates=10000,
+            bootstrap_c=Decimal("6.7"),
+            trial_count_rule="conservative-selection-lotteries",
+        ),
+        regimes=RegimeSpec(labels=("london", "new_york"), provenance_sha256="c" * 64),
+        holdout=HoldoutSpec(state=HoldoutState.NOT_DEFINED),
+        candidates=(
+            TrialSpec(
+                trial_id="trial-1",
+                spec_id="spec-1",
+                rationale="declared before execution",
+                parameter_space=(("window", "20"),),
+            ),
+        ),
+    )
+
 
 BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
     RegimeAssessment: {
@@ -313,6 +395,63 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "bars_seen": 60,
         "snapshots_skipped": 0,
         "net_pnl": Decimal("90"),
+    },
+    DataSpec: {
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.M15,
+        "start": AWARE,
+        "end": AWARE + timedelta(days=1),
+        "dataset_sha256": "b" * 64,
+        "point_in_time_policy": "availability_time",
+    },
+    # NOT_DEFINED is the only state that must carry no dates, so this builder
+    # leaves both timestamps and the hash None rather than inventing a window.
+    HoldoutSpec: {
+        "state": HoldoutState.NOT_DEFINED,
+        "start": None,
+        "end": None,
+        "dataset_sha256": None,
+    },
+    ExecutionStartedPayload: {
+        "event_type": LedgerEventType.EXECUTION_STARTED,
+        "attempt_id": "attempt-1",
+        "execution_started_at": AWARE,
+    },
+    LedgerEvent: {
+        "event_id": uuid4(),
+        "scope_kind": ScopeKind.PROTOCOL,
+        "scope_id": "protocol-1",
+        "event_type": LedgerEventType.PREREGISTERED,
+        "trial_id": None,
+        "attempt_id": None,
+        "spec_sha256": "a" * 64,
+        "occurred_at": AWARE,
+        "payload": PreregisteredPayload(
+            event_type=LedgerEventType.PREREGISTERED,
+            protocol=_protocol(),
+            registration_state=RegistrationState.PROSPECTIVE,
+        ),
+        "legacy": False,
+        "legacy_reason": None,
+    },
+    # Every non-optional field is supplied: LedgerRecord has no defaults, so a
+    # partial builder would fail test_every_builder_produces_a_valid_model.
+    LedgerRecord: {
+        "sequence": 1,
+        "event_id": uuid4(),
+        "scope_kind": ScopeKind.PROTOCOL,
+        "scope_id": "protocol-1",
+        "trial_id": None,
+        "attempt_id": None,
+        "event_type": LedgerEventType.PREREGISTERED,
+        "spec_sha256": "a" * 64,
+        "event_json": {},
+        "payload_sha256": "b" * 64,
+        "previous_hash": "0" * 64,
+        "event_hash": "c" * 64,
+        "legacy": False,
+        "legacy_reason": None,
+        "recorded_at": AWARE,
     },
 }
 
