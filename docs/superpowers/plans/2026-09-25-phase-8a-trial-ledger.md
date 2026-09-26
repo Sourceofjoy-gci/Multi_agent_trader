@@ -1058,6 +1058,10 @@ Add a `ThreadPoolExecutor(max_workers=8)` test that appends eight events on dist
 Before implementing `settings.py`, extend `tests/unit/test_settings.py` with the two research environment suffixes and assert that the DSN remains optional while the evidence root defaults to `.local/evidence`. The two DSNs must be two different databases, as they are in the code below — a fixture that pointed both at one DSN would configure exactly the collision `ops/ledger.py` refuses:
 
 ```python
+SECRET_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house"  # noqa: S105
+RESEARCH_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house_research"
+
+
 def test_research_dsn_is_optional_for_non_trial_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
 
