@@ -781,11 +781,14 @@ The table is still migrated, and the runtime role still holds the `INSERT` on it
 that `0002` granted — inherited, not granted by this phase. No test asserts that
 privilege today: the memory-migration suite's append-only test connects as the
 migrator and does `SET ROLE trading_house_owner` to put a row in place so the
-row-level trigger has something to fire on, then rolls back. The ledger tables
-are the one place in this repository where a role's privileges *are* asserted
-against the migration that grants them
-(`tests/integration/research/test_trial_ledger_store.py`), which is why the
-separation above is stated per table rather than per database.
+row-level trigger has something to fire on, then rolls back. Other privileges
+*are* asserted against the migration that grants them —
+`audit.ledger` in `tests/integration/database/test_privileges.py`,
+`marketdata.bars` and `marketdata.ingest_runs` in
+`tests/integration/marketdata/test_migration.py`, and the two ledger tables in
+`tests/integration/research/test_trial_ledger_store.py` — so the separation
+above is stated per table, and `research.trials` is one whose runtime privileges
+are read off the migration file rather than checked against it.
 
 ### Configuration
 
