@@ -49,6 +49,7 @@ from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import BacktestResult, SimulatedTrade
 from trading_house.research.backtest.snapshot import FeatureSnapshot
+from trading_house.research.evidence import EvidenceProvenance
 from trading_house.research.trial_ledger import (
     CostSpec,
     DataSpec,
@@ -452,6 +453,19 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "legacy": False,
         "legacy_reason": None,
         "recorded_at": AWARE,
+    },
+    # Every provenance field the model declares, so the two UTC validators this
+    # model carries are exercised by test_naive_datetimes_are_rejected_everywhere
+    # below. PROSPECTIVE with NOT_DEFINED is the honest pairing here: nothing has
+    # been registered against a holdout, so there is no holdout to report.
+    EvidenceProvenance: {
+        "agent_run_id": "run-1",
+        "source_artifact_sha256": "a" * 64,
+        "dataset_sha256": "b" * 64,
+        "registered_at": AWARE,
+        "occurred_at": AWARE,
+        "registration_state": RegistrationState.PROSPECTIVE,
+        "holdout_state": HoldoutState.NOT_DEFINED,
     },
 }
 

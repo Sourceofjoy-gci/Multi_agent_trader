@@ -51,6 +51,7 @@ from trading_house.core.errors import (
     ConfigurationError,
     CoverageError,
     DatabaseUnavailableError,
+    EvidenceIntegrityError,
     ExitCode,
     InsufficientHistoryError,
     IntentAlreadySubmittedError,
@@ -149,6 +150,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
     UnresolvedIntentsError: ExitCode.UNRESOLVED_INTENTS,
     ConcurrentSubmissionError: ExitCode.CONCURRENT_SUBMISSION,
+    EvidenceIntegrityError: ExitCode.EVIDENCE_INTEGRITY,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --
     # but they are all "the run you asked for cannot be simulated honestly", and

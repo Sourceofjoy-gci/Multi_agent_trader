@@ -18,6 +18,7 @@ class ExitCode(IntEnum):
     DUPLICATE_INTENT = 12
     UNRESOLVED_INTENTS = 13
     CONCURRENT_SUBMISSION = 14
+    EVIDENCE_INTEGRITY = 17
 
 
 class TradingHouseError(Exception):
