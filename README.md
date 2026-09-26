@@ -752,7 +752,7 @@ leaves undone.
 | Database | Role |
 |---|---|
 | `trading_house` | The application database: audit chain, intents, positions, bars, agent runs |
-| `trading_house_research` | The trial ledger only: `research.trial_ledger_events` and its head cache |
+| `trading_house_research` | The trial ledger's deployment target: where `research.trial_ledger_events` and its head cache live. Carries the full migrated schema like the other database — the ledger tables are what this phase *adds* to it, not all it contains |
 
 The split is operational, not a security boundary. Both databases run the *same*
 migration history, so `trading_house_research` contains the **full migrated
@@ -770,13 +770,16 @@ that no migration of the application schema can disturb it.
 `trading_house_research`) on a fresh cluster only; remove the volume and
 re-initialise if you change it later.
 
-**Nothing in Phase 8A writes `research.trials`.** That is the legacy
-Phase 0.5 table the deprecated `Trial`/`deflation_trial_count` models describe;
-the trial ledger replaced it with `research.trial_ledger_events`, and no
-migration, command or store in this phase touches the old one. It is still
-migrated, and the runtime role can still insert into it — that is inherited from
-`0002`, not granted by this phase, and it is the clearest example of why the
-privilege separation above is stated per table rather than per database.
+**No application code writes `research.trials`.** That is the legacy Phase 0.5
+table, and the live public `Trial` and `deflation_trial_count` models describe
+it — they are not deprecated, and nothing under `src/` writes the table. What
+changed is the *role*, not the models: the ledger computes its own deflation
+denominators with `trial_counters(events)`, counting from the chain, and
+`research.trial_ledger_events` is what a trial is now recorded in. The table is
+still migrated, the runtime role can still insert into it (inherited from `0002`,
+not granted by this phase), and the memory-migration integration test does
+exactly that to prove the `0002` grants still hold. It is the clearest example of
+why the privilege separation above is stated per table rather than per database.
 
 ### Configuration
 
