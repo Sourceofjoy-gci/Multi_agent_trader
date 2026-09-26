@@ -40,6 +40,15 @@ that drifts leaves the row chaining perfectly while describing a different event
 It is the one check that needed a database rather than a code reading to find,
 which is why the tampering test for it is integration-only: the jsonb check passes
 on exactly the row this catches.
+
+One more check is a consequence of that same reading. The genesis row's previous
+hash is the one link in the chain the verifier supplies rather than reads off the
+row before it, and the database's CHECK pins 32 zero bytes to ``sequence = 1``
+alone -- so a chain whose first row has been renumbered satisfies every hash
+check while claiming a genesis it never had. ``verify`` therefore anchors the
+first row's sequence at 1 and reports ``genesis_sequence_mismatch``; every other
+sequence is still free to skip, because a burned number is a gap rather than a
+break.
 """
 
 from __future__ import annotations
@@ -240,14 +249,20 @@ def _read_rows(
     return outcome
 
 
+def _lineage_parameters(trial_id: str) -> tuple[str, Jsonb]:
+    """The two arguments ``_LINEAGE_SQL`` takes, in its own order.
+
+    One place, because the containment question asked by the append guard and the
+    one asked by ``declares_trial`` have to be the *same* question -- two copies of
+    the containment document would eventually disagree, and the disagreement would
+    be invisible until a trial was admitted by one and refused by the other.
+    """
+
+    return (trial_id, Jsonb({"payload": {"protocol": {"candidates": [{"trial_id": trial_id}]}}}))
+
+
 def _is_registered(cursor: psycopg.Cursor[tuple[Any, ...]], trial_id: str) -> bool:
-    cursor.execute(
-        _LINEAGE_SQL,
-        (
-            trial_id,
-            Jsonb({"payload": {"protocol": {"candidates": [{"trial_id": trial_id}]}}}),
-        ),
-    )
+    cursor.execute(_LINEAGE_SQL, _lineage_parameters(trial_id))
     row = cursor.fetchone()
     return bool(row is not None and row[0])
 
@@ -392,6 +407,21 @@ class PostgresTrialLedger:
 
         return self._records(_TRIAL_EVENTS_SQL, (trial_id,))
 
+    def declares_trial(self, trial_id: str) -> bool:
+        """Whether any lineage row already declares this trial.
+
+        The same containment question ``append`` asks before it lets an outcome
+        through, exposed as its own read so a caller that writes something
+        *beside* the chain can ask it first. It is a preflight and not the rule:
+        the append is still refused if the declaration is withdrawn between the
+        two, which is why nothing here is treated as permission.
+        """
+
+        rows = _read_rows(self._connection_factory, _LINEAGE_SQL, _lineage_parameters(trial_id))
+        if isinstance(rows, _OperationFailure):
+            _raise_trial_ledger_append_error()
+        return bool(rows) and rows[0][0] is True
+
     def replay(self) -> tuple[LedgerEvent, ...]:
         """Return the chain as validated events, for counters and readers."""
 
@@ -462,13 +492,25 @@ def _verify_rows(rows: tuple[tuple[Any, ...], ...]) -> LedgerIntegrityReport:
     expected_previous_hash = GENESIS_HASH
     checked_events = 0
 
-    for row in rows:
+    for index, row in enumerate(rows):
         try:
             if len(row) != _ROW_WIDTH:
                 return _failure(checked_events, "row_invalid")
             sequence = row[0]
             if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
                 return _failure(checked_events, "row_invalid")
+            # The chain's first link is the only one whose previous hash the
+            # verifier supplies rather than reads off the row before it, and the
+            # database's CHECK pins that hash to 32 zero bytes for ``sequence = 1``
+            # only. So a row that is *first* but numbered above 1 has had its
+            # sequence renumbered, and a verifier that stops at the hash link
+            # cannot see it: the link is satisfied by the same forged sequence the
+            # hash was recomputed over, and every other check passes. Numbering
+            # from 1 is what makes "this is the genesis row" and "this row says it
+            # is genesis" the same statement. Skips are still allowed everywhere
+            # else -- a burned sequence is a gap, not a break.
+            if index == 0 and sequence != 1:
+                return _failure(checked_events, "genesis_sequence_mismatch")
 
             previous_hash = bytes(row[13])
             if previous_hash != expected_previous_hash:

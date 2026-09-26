@@ -1,9 +1,12 @@
 """The trial ledger's composition shim, without a database.
 
-Three things can go wrong here and none of them needs PostgreSQL to detect: a
+Four things can go wrong here and none of them needs PostgreSQL to detect: a
 missing research DSN turning into a confusing error much later, a DSN handed to
-the driver in the wrong shape, and an evidence root that is not the configured
-one. The last of those is the easiest to get wrong by accident --
+the driver in the wrong shape, a research DSN that names the application
+database, and an evidence root that is not the configured one. The third is the
+one a unit test is the *only* place to catch -- the driver connects to whatever
+it is told, and a ledger in the application database passes every other check.
+The last of the four is the easiest to get wrong by accident --
 ``EvidenceStore`` resolves its root, so a test comparing against a resolved path
 is the only kind that would notice.
 """
@@ -23,9 +26,15 @@ from trading_house.database.connection import open_runtime_connection
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.settings import RuntimeSettings
 
-SECRET_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house_research"  # noqa: S105
+# Two databases, because the shim now refuses a research DSN that names the
+# application one. The main DSN is the constant every other test in this file
+# wants; ``RESEARCH_DSN`` is the same server and role on the ledger's database.
+MAIN_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house"
+RESEARCH_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house_research"
 # Malformed rather than merely unreachable: psycopg rejects it while parsing the
-# conninfo, so the test costs no network round trip and no container.
+# conninfo, so the test costs no network round trip and no container. It names no
+# database, which is the point: the boundary compares names, and this is the case
+# that has to reach the driver so the store's redaction is what is under test.
 UNROUTABLE_DSN = "postgresql://runtime:unroutable-secret@[/malformed"
 
 
@@ -43,7 +52,7 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> RuntimeSetti
     the undo.
     """
 
-    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", MAIN_DSN)
     for key, value in overrides.items():
         monkeypatch.setenv(f"TRADING_HOUSE_{key}", value)
     return RuntimeSettings()
@@ -67,6 +76,64 @@ def test_a_missing_research_dsn_is_a_configuration_error(
     assert str(raised.value) == "configuration invalid"
 
 
+def test_a_research_dsn_naming_the_application_database_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two-database boundary, enforced at the one place that composes both.
+
+    A ledger in the application database would satisfy every other check this
+    phase makes: the tables are there, the head is a chain, ``verify`` passes, and
+    the operator's trial commands all report success. The claim that is false is
+    the one the split exists for, and nothing else in the system can notice it --
+    so it is refused here, before a single connection is opened.
+    """
+
+    settings = _settings(monkeypatch, RESEARCH_LEDGER_DSN=MAIN_DSN)
+
+    with pytest.raises(ConfigurationError) as raised:
+        ledger_ops.research_ledger_dsn(settings)
+
+    # The refusal is one credential-free string, and the collision it reports is
+    # not: nothing here may name either DSN.
+    assert str(raised.value) == "configuration invalid"
+    assert MAIN_DSN not in str(raised.value)
+    assert "super-secret-password" not in str(raised.value)
+
+
+def test_two_dsn_spellings_of_one_database_are_still_one_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comparison is a parse, not a string compare.
+
+    URI and keyword/value conninfo are the two spellings every deployment meets,
+    and only a parse sees through the difference. A string compare would let this
+    pair through, which is the whole failure the check exists to prevent.
+    """
+
+    settings = _settings(
+        monkeypatch,
+        DATABASE_DSN="postgresql://runtime:pw@localhost/trading_house",
+        RESEARCH_LEDGER_DSN="host=localhost dbname=trading_house user=runtime",
+    )
+
+    with pytest.raises(ConfigurationError):
+        ledger_ops.research_ledger_dsn(settings)
+
+
+def test_a_dsn_naming_a_different_database_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal is the collision, not the presence of a second DSN.
+
+    Without this a rule that refused whenever both DSNs parse would pass every
+    test above and refuse every real deployment.
+    """
+
+    settings = _settings(monkeypatch, RESEARCH_LEDGER_DSN=RESEARCH_DSN)
+
+    assert ledger_ops.research_ledger_dsn(settings) is settings.research_ledger_dsn
+
+
 def test_the_configured_secret_is_what_a_connection_factory_is_given(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -78,13 +145,13 @@ def test_the_configured_secret_is_what_a_connection_factory_is_given(
     could drift from the one settings holds.
     """
 
-    settings = _settings(monkeypatch, RESEARCH_LEDGER_DSN=SECRET_DSN)
+    settings = _settings(monkeypatch, RESEARCH_LEDGER_DSN=RESEARCH_DSN)
 
     dsn = ledger_ops.research_ledger_dsn(settings)
 
     assert isinstance(dsn, SecretStr)
     assert dsn is settings.research_ledger_dsn
-    assert dsn.get_secret_value() == SECRET_DSN
+    assert dsn.get_secret_value() == RESEARCH_DSN
 
 
 def test_the_dsn_reaches_the_driver_and_stays_out_of_the_error(

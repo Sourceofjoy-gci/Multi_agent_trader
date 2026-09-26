@@ -1,10 +1,17 @@
-"""Create the append-only trial ledger in its own database (Phase 8A, Task 3).
+"""Create the append-only trial ledger, in both databases (Phase 8A, Task 3).
 
 The audit ledger already proves that a database can own a hash chain better than
 a process can. This is the same discipline for a different chain, and the two
 stay apart on purpose: ``trading-house:audit:v1`` and
 ``trading-house:trial-ledger:v1`` are different preimages, so a digest from one
 can never be replayed into the other even though the encoding is the same shape.
+
+It runs in *both* databases, which is the other half of the two-database split:
+``trading_house_research`` is a second deployment target for this repository's
+schema rather than a schema of its own, so the ledger tables exist in the
+application database too. The separation is operational -- each database can be
+backed up, migrated or dropped on its own schedule -- and not a read boundary.
+See the README for what that means and does not claim.
 
 Three things here are not the obvious ones:
 
@@ -25,7 +32,10 @@ Three things here are not the obvious ones:
 The genesis event's previous hash is 32 zero bytes, and the CHECK constraints
 pin every digest to 32 bytes. Sequence numbers are allowed to skip: a
 rolled-back insert burns one, and integrity is the previous-hash link, never
-``sequence - 1``.
+``sequence - 1``. The one place the sequence is load-bearing is that same
+genesis check, which constrains ``sequence = 1`` and no other row -- so a chain
+whose first row has been renumbered satisfies it vacuously, and the verifier
+anchors the first row's sequence at 1 for exactly that reason.
 
 The heads row is a cache, not a record. A tampered ``last_sequence`` or
 ``last_event_hash`` costs availability and nothing else: every append then

@@ -9,7 +9,9 @@ services:
       TRADING_HOUSE_RUNTIME_PASSWORD: ${TRADING_HOUSE_RUNTIME_PASSWORD:?set TRADING_HOUSE_RUNTIME_PASSWORD}
       # Phase 8A: the trial ledger gets its own database, DSN and migration
       # target, so it can be backed up and migrated on its own schedule. The
-      # runtime role reads it in both databases; only INSERT is withheld.
+      # runtime role holds no write privilege at all on the two ledger tables
+      # there; the same role does hold INSERT on the tables this phase inherits,
+      # which is why the split is operational rather than a security boundary.
       TRADING_HOUSE_RESEARCH_DATABASE: ${TRADING_HOUSE_RESEARCH_DATABASE:-trading_house_research}
       TZ: UTC
       PGTZ: UTC

@@ -768,7 +768,21 @@ ledger can be backed up, restored, migrated or dropped on its own schedule, and
 that no migration of the application schema can disturb it.
 `docker compose` creates it from `TRADING_HOUSE_RESEARCH_DATABASE` (default
 `trading_house_research`) on a fresh cluster only; remove the volume and
-re-initialise if you change it later.
+re-initialise if you change it later. `init-roles.sh` reads that one variable for
+the `CREATE DATABASE` *and* for every grant and `ALTER DATABASE` against it, so
+there is no name in the script that can disagree with the database it creates.
+
+**Restoring that database from a backup rewinds the ledger, and nothing detects
+it.** A backup taken before a trial ran restores a chain that verifies clean,
+holds fewer events, and is indistinguishable from a trial that never ran — the
+hash chain proves the rows it holds were not rewritten, and it says nothing about
+rows that were never restored. So restore on a schedule you can defend, and treat
+`checked_events` from `research trial verify` and the age of the backup you
+restored as the only two signals an operator has. Anything that can write to the
+database as its owner (`pg_dump`, a restore, a replica) can remove trials from
+the record without leaving a break behind; the second database gives that write
+its own name and its own schedule, which is a smaller blast radius, not a
+guarantee.
 
 **No application code writes `research.trials`.** That is the legacy Phase 0.5
 table, and the live public `Trial` and `deflation_trial_count` models describe
@@ -794,11 +808,23 @@ are read off the migration file rather than checked against it.
 
 | Variable | Meaning |
 |---|---|
-| `TRADING_HOUSE_RESEARCH_LEDGER_DSN` | The trial ledger's connection string. **Optional** in `RuntimeSettings` — only a `research trial` command needs it, so `order submit` and `guard run` start on a host that has never run a trial. Its absence is a `configuration invalid` (exit 2) at the single boundary that cannot work without it. |
+| `TRADING_HOUSE_RESEARCH_LEDGER_DSN` | The trial ledger's connection string. **Optional** in `RuntimeSettings` — only a `research trial` command needs it, so `order submit` and `guard run` start on a host that has never run a trial. Its absence is a `configuration invalid` (exit 2) at the single boundary that cannot work without it, and so is a DSN naming the *same* database as `TRADING_HOUSE_DATABASE_DSN`. |
 | `TRADING_HOUSE_EVIDENCE_ROOT` | Where sealed evidence bundles live. Content-addressed: `<root>/<first two hex>/<digest>.json`. Defaults to `.local/evidence`, which is gitignored. |
 
 Neither is read from `.env`; export them into your shell like the rest of
 `TRADING_HOUSE_*`. See `.env.example` for both.
+
+**The two DSNs must name two databases.** That is the whole point of the split,
+and it is the one property of it that no downstream check can see: a ledger
+sitting in `trading_house` passes every other test in this section, `verify`
+answers `valid`, and every trial command reports success. So the comparison is
+made where the two DSNs are composed, before a connection is opened — the
+`dbname` is parsed out of both with psycopg's own conninfo parser (so URI and
+keyword/value spellings compare the same) and an equal pair is refused as
+`configuration invalid`. Neither DSN appears in the refusal. A DSN that cannot be
+parsed, or that omits `dbname`, is passed through rather than refused on a
+comparison nobody can make: the driver rejects the first and the second is a
+deployment whose ledger database is a guess.
 
 ### What is stored, and what it means
 
@@ -838,6 +864,9 @@ from one can never be replayed into the other.
   `FAILED` and `EVIDENCE_SEALED` are admissible only against a trial some
   `preregistered` protocol declared, or an explicit legacy import. Containment,
   not a column: a protocol seals its whole candidate family inside one event.
+  `record` asks the same question *before* it writes the evidence, so a trial
+  nobody declared leaves an empty evidence root rather than a sealed document no
+  ledger row points at; the store's append check is still what enforces it.
 - **A protocol with no candidate family is refused.** No candidates is not "one
   candidate whose values are unknown" — a trial that is not declared cannot be
   counted, and that is the denominator every later statistic divides by.
@@ -856,10 +885,25 @@ from one can never be replayed into the other.
   answer.** A detected chain break is reported as `{"valid": false, "reason":
   …}` with exit 16. A ledger that could not be *read* raises exit 16 as well, so
   a script cannot mistake "nobody could check" for "nothing is wrong".
-- **Absences are recorded as absences.** No dataset hash, partial cost
-  attribution with spread and slippage left `null`, a return series of realized
-  closed trades over UTC calendar days — never a mark-to-market series, and never
-  a plausible-looking zero where nothing was measured.
+  `checked_events` says how many rows were good before the failure — the count a
+  restore-from-older-backup leaves small, with `valid: true` and no reason at all.
+- **The chain is anchored at its genesis.** `verify` reports
+  `genesis_sequence_mismatch` if the first row is not sequence 1. The genesis
+  row's previous hash is the one link the verifier supplies rather than reads off
+  the row before it, and the database's CHECK pins 32 zero bytes to sequence 1
+  alone, so a chain whose first row was renumbered satisfies every hash check
+  while claiming a genesis it never had. Sequence numbers are still free to skip
+  everywhere else: a burned number is a gap, not a break.
+- **Absences are recorded as absences, by the code that builds them.** The
+  importer writes no dataset hash, `PARTIAL` cost attribution with spread and
+  slippage left `null` rather than zero, and a `REALIZED_CLOSED_TRADES` series
+  over UTC calendar days in which a day with no closed trade reports no return
+  rather than a flat one. Stated that way because the *models* are not what
+  enforces it: `dataset_sha256`, `spread_cost` and `slippage_cost` are optional
+  fields a caller could fill with a plausible zero, and `ReturnSeriesBasis` still
+  carries `MARK_TO_MARKET` for the Phase 8 statistics that will need it. What this
+  phase guarantees is the shape it writes and the fact that it records which
+  shape a reader is holding.
 
 ### The Phase 7 runs, imported as legacy evidence
 
@@ -928,9 +972,10 @@ uv run trading-house research trial verify
   a wall clock, for the same reason.
 - **`record`** takes an `EvidenceBundle` JSON document. The bundle is the single
   source of identity, so `--trial-id` and `--attempt-id` are *checked against it*
-  rather than trusted. Evidence is written before the events are appended: a
-  failed append then leaves a document nothing points at rather than a ledger row
-  whose document is missing.
+  rather than trusted, and the trial's declaration is checked against the ledger
+  before anything is written. Evidence is written before the events are appended:
+  a failed append then leaves a document nothing points at rather than a ledger
+  row whose document is missing.
 - **`count`** reports three numbers, not one: audit attempts, selection
   lotteries, and effective specifications. A repeated execution raises the audit
   count without being a new lottery, and that distinction is why they are three.
@@ -1048,7 +1093,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 
 | Exit | Error | Meaning | Recovery |
 |---|---|---|---|
-| 2 | `configuration invalid` | Missing `TRADING_HOUSE_DATABASE_DSN`, unreadable or malformed constitution YAML | Export the DSN; confirm the YAML parses and its limits are in range |
+| 2 | `configuration invalid` | Missing `TRADING_HOUSE_DATABASE_DSN`, a `research trial` command with no `TRADING_HOUSE_RESEARCH_LEDGER_DSN` or one naming the same database, unreadable or malformed constitution YAML | Export the DSN; for the ledger, point it at the second database; confirm the YAML parses and its limits are in range |
 | 3 | `signature verification failed` | Signature, public key, or constitution bytes do not agree | Restore the committed trio, or re-sign offline. **Do not edit the YAML to make it load** |
 | 4 | `database connection failed` | PostgreSQL unreachable, or the session refused UTC | `docker compose up -d`; check the DSN host, port and credentials |
 | 5 | `migration revision mismatch` | Schema is not at the exact expected revision | Run `alembic upgrade head` as the migrator. Never migrate from the runtime process |

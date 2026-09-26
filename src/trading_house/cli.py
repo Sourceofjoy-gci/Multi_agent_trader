@@ -1374,6 +1374,15 @@ def research_trial_record(
         # cannot record the seal either, so writing first would leave a document
         # behind for a command that then refuses to name it.
         ledger = _trial_ledger()
+        # The declaration is asked for before the write rather than discovered by
+        # the append. The store's own containment check is still the rule and
+        # still refuses; asking first is what keeps a trial nobody declared from
+        # leaving a sealed document on disk that no ledger row points at. Same
+        # error either way, because from the operator's side it is the same
+        # refusal, and a second exit code for a preflight would be a distinction
+        # they cannot act on.
+        if not ledger.declares_trial(trial_id):
+            raise TrialLedgerAppendError()
         stored = _evidence_store().write(bundle)
         # ponytail: two appends, two transactions. A crash between them commits
         # RESULT_RECORDED without EVIDENCE_SEALED, and ``verify()`` still reports

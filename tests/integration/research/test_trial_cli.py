@@ -250,9 +250,18 @@ def _write_phase7_artifact(path: Path, result: BacktestResult) -> Path:
 
 @pytest.fixture
 def research_env(
-    monkeypatch: pytest.MonkeyPatch, research_ledger_dsn: str, research_evidence_root: Path
+    monkeypatch: pytest.MonkeyPatch,
+    research_ledger_dsn: str,
+    research_evidence_root: Path,
+    database: DatabaseHarness,
 ) -> Path:
     """The two DSNs and an emptied evidence root, read from the environment like production.
+
+    The two DSNs name two *different* databases, which is the whole point of the
+    phase: a test that pointed both at the research database would pass with the
+    two-database boundary switched off, because a trial command cannot tell the
+    difference once the connection is open. Only the composition boundary can, so
+    only the composition boundary is exercised this way.
 
     The root is cleared here rather than merely pointed at, because half of this
     file's assertions are an exact count of the files under it -- "one import, one
@@ -264,7 +273,7 @@ def research_env(
 
     shutil.rmtree(research_evidence_root, ignore_errors=True)
     research_evidence_root.mkdir(parents=True)
-    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", research_ledger_dsn)
+    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", database.runtime_dsn)
     monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", research_ledger_dsn)
     monkeypatch.setenv("TRADING_HOUSE_EVIDENCE_ROOT", str(research_evidence_root))
     return research_evidence_root
@@ -491,7 +500,11 @@ def test_record_refuses_a_trial_the_protocol_never_declared(
     """A result recorded against an undeclared trial is a refused append.
 
     The store's containment check is the boundary, and the command must not paper
-    over it by writing the evidence and then reporting success.
+    over it by writing the evidence and then reporting success. The empty root is
+    the half of the assertion that a unit test with a fake ledger could not make:
+    the refusal has to arrive *before* the write, because a sealed document
+    nothing points at is the one artefact of a refused trial that no later reader
+    would recognise as a mistake.
     """
 
     _register(tmp_path)
@@ -513,7 +526,58 @@ def test_record_refuses_a_trial_the_protocol_never_declared(
     )
 
     assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND
+    assert not list(research_env.rglob("*.json"))
     assert len(_ledger(research_ledger_dsn).events()) == 1
+
+
+# --- the two-database boundary -------------------------------------------------
+
+
+def test_a_trial_command_refuses_a_research_dsn_naming_the_main_database(
+    tmp_path: Path,
+    research_env: Path,
+    research_ledger_dsn: str,
+    database: DatabaseHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The misconfiguration no downstream check can see.
+
+    With both DSNs on one database every other property this phase promises still
+    holds: the ledger tables exist, the head is a chain, ``verify`` answers valid,
+    and every trial command reports success. What is false is the claim the second
+    database exists for, and once the connection is open there is no evidence left
+    to notice -- so the refusal has to happen in the composition boundary, and it
+    has to happen before the evidence bytes are written.
+
+    ``research_env`` has already set the two DSNs correctly; the override here
+    reproduces the operator's mistake on top of that, which is why the assertion
+    is a *changed* environment rather than a specially built one.
+    """
+
+    _register(tmp_path)
+    bundle = _write_json(tmp_path / "bundle.json", _bundle("trial-1", "attempt-1", _result()))
+    # The main database, spelled with the research role's own credentials, so the
+    # only thing wrong with it is the one thing under test.
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", database.runtime_dsn)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "record",
+            "--trial-id",
+            "trial-1",
+            "--attempt-id",
+            "attempt-1",
+            "--evidence",
+            str(bundle),
+        ],
+    )
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert not list(research_env.rglob("*.json"))
+    assert research_ledger_dsn not in result.stderr
 
 
 # --- import-legacy -----------------------------------------------------------

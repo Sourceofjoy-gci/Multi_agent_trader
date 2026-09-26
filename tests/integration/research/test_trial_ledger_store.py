@@ -35,7 +35,11 @@ from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.models import Timeframe
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.canonical import canonical_bytes, canonical_sha256
-from trading_house.research.ledger_store import GENESIS_HASH, PostgresTrialLedger
+from trading_house.research.ledger_store import (
+    GENESIS_HASH,
+    PostgresTrialLedger,
+    compute_event_hash,
+)
 from trading_house.research.trial_ledger import (
     CostSpec,
     DataSpec,
@@ -518,6 +522,64 @@ def test_an_explicit_non_contiguous_sequence_is_a_gap_not_a_break(
     assert ledger.verify().valid
 
 
+def test_a_renumbered_genesis_row_is_reported_rather_than_accepted(
+    research_ledger_dsn: str,
+    research_migration_dsn: str,
+    trial_protocol: TrialProtocol,
+) -> None:
+    """The one link in the chain the verifier supplies instead of reading it.
+
+    Every other check is downstream of a row, so renumbering a whole chain and
+    recomputing each hash over its new number leaves the ledger perfectly
+    self-consistent -- and the database's ``ledger_genesis_previous_hash`` CHECK
+    agrees, because it constrains sequence 1 and the renumbering empties it. What
+    is left is the claim "this is the first row *and* it says it is genesis", and
+    that is the claim the verifier's own anchor holds. Built by the owner with the
+    trigger disabled, which is the only role that can rewrite a sequence at all.
+    """
+
+    ledger = _ledger(research_ledger_dsn)
+    genesis = _preregistered_event(trial_protocol)
+    following = _execution_started_event(trial_protocol.candidates[0].trial_id)
+    ledger.append(genesis)
+    ledger.append(following)
+
+    # Re-derived here rather than read back, because re-deriving it in Python is
+    # the point: a chain whose hashes are correct over its forged numbers is
+    # exactly the state the previous-hash link alone cannot catch. The link itself
+    # is unchanged by a renumber -- only the sequence is in the preimage.
+    genesis_hash = compute_event_hash(1, GENESIS_HASH, canonical_bytes(genesis))
+    forged = (
+        (1, 2, compute_event_hash(2, GENESIS_HASH, canonical_bytes(genesis))),
+        (2, 3, compute_event_hash(3, genesis_hash, canonical_bytes(following))),
+    )
+    with psycopg.connect(research_migration_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SET ROLE trading_house_owner")
+        cursor.execute(
+            "ALTER TABLE research.trial_ledger_events "
+            "DISABLE TRIGGER reject_trial_ledger_row_mutation"
+        )
+        # Descending old sequence, because ``sequence`` is the primary key: both
+        # new numbers are above the old maximum, so moving the tail first is what
+        # makes the in-place renumber need no temporary column.
+        for old_sequence, new_sequence, event_hash in sorted(forged, reverse=True):
+            cursor.execute(
+                "UPDATE research.trial_ledger_events SET event_hash = %s, sequence = %s "
+                "WHERE sequence = %s",
+                (event_hash, new_sequence, old_sequence),
+            )
+        connection.commit()
+
+    # The chain now says something coherent and false, which is the state a
+    # verifier has to catch: both links and both hashes agree.
+    assert [record.sequence for record in ledger.events()] == [2, 3]
+    report = ledger.verify()
+
+    assert not report.valid
+    assert report.reason == "genesis_sequence_mismatch"
+    assert report.checked_events == 0
+
+
 def test_concurrent_appends_form_one_continuous_chain(research_ledger_dsn: str) -> None:
     """Eight writers, eight connections, one chain.
 
@@ -788,9 +850,12 @@ def test_an_unreadable_ledger_is_an_integrity_error_not_a_clean_verdict(
 def test_reads_that_fail_stay_append_errors(research_ledger_dsn: str) -> None:
     """The repository pattern, deliberately unchanged.
 
-    ``events``/``replay``/``counters`` have no second typed error to raise, and
-    inventing one here would give a caller two ways to be told "the database was
-    not there". Only ``verify`` has a second meaning to distinguish.
+    ``events``/``replay``/``counters``/``declares_trial`` have no second typed
+    error to raise, and inventing one here would give a caller two ways to be
+    told "the database was not there". Only ``verify`` has a second meaning to
+    distinguish -- and ``declares_trial`` is here for the specific reason that a
+    preflight must not be able to answer "no trial was declared" for a ledger it
+    could not read.
     """
 
     def failing_factory() -> psycopg.Connection[Any]:
@@ -806,6 +871,8 @@ def test_reads_that_fail_stay_append_errors(research_ledger_dsn: str) -> None:
         ledger.replay()
     with pytest.raises(TrialLedgerAppendError):
         ledger.counters()
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.declares_trial("trial-1")
 
 
 def test_a_row_the_parser_cannot_read_becomes_an_append_error(

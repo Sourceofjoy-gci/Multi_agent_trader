@@ -17,12 +17,21 @@ database at the application boundary would stop ``order submit`` and
 ``guard run`` from starting on a host that has never run a trial, so the
 absence of one becomes a ``ConfigurationError`` here, at the single boundary
 that cannot work without it.
+
+The same boundary is also the only place that can compare the two DSNs, and
+the comparison is load-bearing rather than tidy: the split between the two
+databases is the whole operational claim of this phase, and a DSN that names
+the application database would satisfy every other check -- the ledger tables
+exist there, the head is a chain, ``verify`` passes -- while quietly making
+that claim false. A refusal is cheap and a silent collapse is not.
 """
 
 from __future__ import annotations
 
 from uuid import NAMESPACE_URL, uuid5
 
+import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from pydantic import SecretStr
 
 from trading_house.core.errors import ConfigurationError
@@ -41,12 +50,47 @@ def build_evidence_store(settings: RuntimeSettings) -> EvidenceStore:
     return EvidenceStore(settings.evidence_root)
 
 
-def research_ledger_dsn(settings: RuntimeSettings) -> SecretStr:
-    """The research DSN, or the one error a trial command may report for it."""
+def _dbname(dsn: SecretStr) -> str | None:
+    """The database a DSN names, or ``None`` when it cannot be read as one.
 
-    if settings.research_ledger_dsn is None:
+    Parsed rather than pattern-matched so every conninfo spelling the driver
+    accepts -- URI or keyword/value, percent-encoded password, ``dbname`` or
+    ``database`` -- is compared the same way. Only the name is extracted and
+    only the name is ever returned, because a refusal must be able to say two
+    DSNs collide without carrying either credential into a log line.
+
+    ``None`` covers two cases, and both are answers rather than gaps. A conninfo
+    the driver itself rejects has no database to collide with, and a conninfo
+    that omits ``dbname`` will connect to the role's own default -- which is
+    equally unnamed here. Neither can be shown to be the *same* database, so
+    neither is refused on that basis; the driver answers for a malformed one, and
+    a DSN without a ``dbname`` is a deployment whose ledger database is a
+    guess.
+    """
+
+    try:
+        dbname = conninfo_to_dict(dsn.get_secret_value()).get("dbname")
+    except psycopg.Error:
+        return None
+    return dbname if isinstance(dbname, str) else None
+
+
+def research_ledger_dsn(settings: RuntimeSettings) -> SecretStr:
+    """The research DSN, or the one error a trial command may report for it.
+
+    Two refusals, both here because this is the only boundary that needs a
+    second database at all: the DSN is absent, or it names the database the
+    application already uses. The first is a host that has never run a trial; the
+    second is a misconfiguration that would otherwise be reported as success.
+    """
+
+    research = settings.research_ledger_dsn
+    if research is None:
         raise ConfigurationError()
-    return settings.research_ledger_dsn
+    research_db = _dbname(research)
+    if research_db is not None and research_db == _dbname(settings.database_dsn):
+        raise ConfigurationError()
+    return research
 
 
 def result_recorded_event(bundle: EvidenceBundle) -> LedgerEvent:
@@ -84,10 +128,17 @@ def result_recorded_event(bundle: EvidenceBundle) -> LedgerEvent:
 def evidence_sealed_event(bundle: EvidenceBundle, evidence_sha256: str) -> LedgerEvent:
     """The event an evidence file earns, addressed by the digest that names it.
 
-    Keyed on the evidence digest rather than the attempt, because the digest is
-    what a later reader will hold: this event's job is to say "the bytes
-    ``<digest>`` are the evidence for this attempt", and two attempts sealing
-    identical bytes are one statement, not two.
+    Keyed on the evidence digest rather than on the attempt, because the digest
+    is what a later reader holds: this event's job is to say "the bytes
+    ``<digest>`` are the evidence for this attempt". The retry it has to survive
+    is the *same* attempt recorded twice -- the evidence store is
+    content-addressed, so one bundle seals to one digest, and an id derived from
+    that digest is a row the chain recognises instead of a second row.
+
+    Two *different* attempts of one trial do not collide here, but nothing
+    excludes them: a bundle carries its own ``attempt_id``, so their bytes differ
+    and so do their digests. The key is what the evidence store already keys on,
+    not a claim that only one attempt can ever exist.
     """
 
     return LedgerEvent(
