@@ -53,6 +53,11 @@ GRANT CONNECT, CREATE ON DATABASE trading_house TO trading_house_owner;
 GRANT CONNECT, CREATE ON DATABASE trading_house_research TO trading_house_owner;
 GRANT CONNECT ON DATABASE trading_house TO trading_house_runtime;
 GRANT CONNECT ON DATABASE trading_house_research TO trading_house_runtime;
+-- The same runtime role holds SELECT on the ledger in both databases; what keeps
+-- the chain append-only is the absence of INSERT, not the database boundary.
+-- The migrator is named explicitly rather than left on the default PUBLIC grant
+-- because it is the role that has to reach this database to migrate it.
+GRANT CONNECT ON DATABASE trading_house_research TO trading_house_migrator;
 ALTER DATABASE trading_house SET TIME ZONE 'UTC';
 ALTER DATABASE trading_house_research SET TIME ZONE 'UTC';
 SQL

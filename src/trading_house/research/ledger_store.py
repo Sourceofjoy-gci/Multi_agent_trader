@@ -25,6 +25,13 @@ somebody else committed in between. Retrying the *same* event is safe because
 an event's identity is derived from its content, so the function recognises a
 retry by id before it compares heads. Retrying a *new* event id would be a
 different event, and that is a caller's bug rather than a race to paper over.
+
+``payload_sha256`` is the one column the client supplies rather than the database
+computing, and the reason is in the migration: the digest is over the canonical
+payload bytes, which PostgreSQL's JSON text form is not. It is therefore *not* in
+the chain preimage -- a client could store a wrong payload digest and still chain
+correctly -- which is precisely why ``verify`` re-derives it and reports
+``payload_digest_mismatch`` rather than leaving the column on trust.
 """
 
 from __future__ import annotations
@@ -32,13 +39,14 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from collections.abc import Callable
 from typing import Any, Never, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from trading_house.core.errors import TrialLedgerAppendError
+from trading_house.core.errors import TrialLedgerAppendError, TrialLedgerIntegrityError
 from trading_house.research.canonical import canonical_bytes, canonical_sha256
 from trading_house.research.trial_ledger import (
     LedgerEvent,
@@ -165,6 +173,10 @@ def _event_from_canonical(canonical_event: bytes) -> LedgerEvent:
     return LedgerEvent.model_validate_json(canonical_event)
 
 
+def _event_from_row(row: tuple[Any, ...]) -> LedgerEvent:
+    return _event_from_canonical(row[8])
+
+
 def _record_from_row(row: tuple[Any, ...] | None) -> LedgerRecord:
     if row is None or len(row) != _ROW_WIDTH:
         raise ValueError("trial ledger database returned an invalid row")
@@ -282,6 +294,39 @@ def _raise_trial_ledger_append_error() -> Never:
     raise TrialLedgerAppendError() from _LedgerStoreFailure("trial ledger store operation failed")
 
 
+def _raise_trial_ledger_integrity_error() -> Never:
+    """The ledger could not be *read*, which is not a verdict on it.
+
+    A detected corruption is a ``LedgerIntegrityReport`` an operator can read; a
+    database that would not answer is a failure of the command, and reporting it
+    as anything else would let a script treat "nobody could check" as "nothing is
+    wrong". Same redaction as the append error: the driver's message names the
+    connection, and stays on the private cause.
+    """
+
+    raise TrialLedgerIntegrityError() from _LedgerStoreFailure(
+        "trial ledger store operation failed"
+    )
+
+
+def _rows_mapped[T](
+    rows: tuple[tuple[Any, ...], ...], convert: Callable[[tuple[Any, ...]], T]
+) -> tuple[T, ...]:
+    """Map rows through a parser, turning a parser failure into one typed error.
+
+    A row the store cannot turn into a model is not a ``ValidationError`` a CLI
+    should have to know about: it is an append that cannot be honoured, and
+    ``_raise_trial_ledger_append_error`` is the only error this repository's
+    callers catch. Letting the raw error escape would break the exit-code
+    contract for a condition the caller cannot act on differently.
+    """
+
+    try:
+        return tuple(convert(row) for row in rows)
+    except Exception:
+        _raise_trial_ledger_append_error()
+
+
 class PostgresTrialLedger:
     """Append and read the trial ledger through PostgreSQL transactions."""
 
@@ -345,7 +390,7 @@ class PostgresTrialLedger:
         rows = _read_rows(self._connection_factory, _ALL_EVENTS_SQL, None)
         if isinstance(rows, _OperationFailure):
             _raise_trial_ledger_append_error()
-        return tuple(_event_from_canonical(row[8]) for row in rows)
+        return _rows_mapped(rows, _event_from_row)
 
     def counters(self) -> TrialCounters:
         """The deflation denominator, counted from the chain rather than kept."""
@@ -356,20 +401,21 @@ class PostgresTrialLedger:
         """Re-derive every hash in the chain from the bytes PostgreSQL stored.
 
         Answers rather than raises, because "is the ledger intact?" is a
-        question an operator asks and needs a plain reason back. Only a failure
-        to *read* the ledger is an error, and that one is not an answer.
+        question an operator asks and needs a plain reason back. The one thing
+        that is not an answer is not being able to read the ledger at all, which
+        is why that raises ``TrialLedgerIntegrityError`` instead of reporting.
         """
 
         rows = _read_rows(self._connection_factory, _ALL_EVENTS_SQL, None)
         if isinstance(rows, _OperationFailure):
-            _raise_trial_ledger_append_error()
+            _raise_trial_ledger_integrity_error()
         return _verify_rows(rows)
 
     def _records(self, query: str, parameters: tuple[Any, ...] | None) -> tuple[LedgerRecord, ...]:
         rows = _read_rows(self._connection_factory, query, parameters)
         if isinstance(rows, _OperationFailure):
             _raise_trial_ledger_append_error()
-        return tuple(_record_from_row(row) for row in rows)
+        return _rows_mapped(rows, _record_from_row)
 
 
 def _failure(checked_events: int, reason: str) -> LedgerIntegrityReport:

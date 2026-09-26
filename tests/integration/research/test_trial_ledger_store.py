@@ -14,12 +14,14 @@ with no trigger at all.
 
 from __future__ import annotations
 
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -28,7 +30,7 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 import trading_house.research.ledger_store as ledger_store
-from trading_house.core.errors import TrialLedgerAppendError
+from trading_house.core.errors import TrialLedgerAppendError, TrialLedgerIntegrityError
 from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.models import Timeframe
 from trading_house.research.backtest.costs import CostModel
@@ -451,6 +453,71 @@ def test_rolled_back_sequence_gap_does_not_break_chain(
     assert ledger.verify().valid
 
 
+def test_an_explicit_non_contiguous_sequence_is_a_gap_not_a_break(
+    research_ledger_dsn: str,
+    research_migration_dsn: str,
+    trial_protocol: TrialProtocol,
+) -> None:
+    """A row inserted at sequence 99 chains correctly and verifies as intact.
+
+    This is the head-repair procedure the migration's docstring promises, run as
+    a test: the owner's row is rebuilt from the tail of the event chain, the head
+    is moved to match, and the next append lands on 100. If integrity demanded a
+    contiguous sequence, a single repair would be indistinguishable from the
+    corruption it was repairing.
+    """
+
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_preregistered_event(trial_protocol))
+    previous_hash = bytes.fromhex(ledger.events()[-1].event_hash)
+    event = _execution_started_event("trial-repaired")
+    canonical_event = canonical_bytes(event)
+    event_hash = ledger_store.compute_event_hash(99, previous_hash, canonical_event)
+
+    with psycopg.connect(research_migration_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SET ROLE trading_house_owner")
+        cursor.execute(
+            "INSERT INTO research.trial_ledger_events ("
+            "sequence, event_id, scope_kind, scope_id, trial_id, attempt_id, event_type, "
+            "spec_sha256, canonical_event, event_json, payload_sha256, occurred_at, "
+            "previous_hash, event_hash"
+            ") VALUES (99, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                event.event_id,
+                event.scope_kind.value,
+                event.scope_id,
+                event.trial_id,
+                event.attempt_id,
+                event.event_type.value,
+                bytes.fromhex(event.spec_sha256),
+                canonical_event,
+                Jsonb(event.model_dump(mode="json")),
+                bytes.fromhex(canonical_sha256(event.payload)),
+                event.occurred_at,
+                previous_hash,
+                event_hash,
+            ),
+        )
+        cursor.execute(
+            "UPDATE research.trial_ledger_heads SET last_sequence = 99, last_event_hash = %s "
+            "WHERE singleton",
+            (event_hash,),
+        )
+        connection.commit()
+
+    report = ledger.verify()
+
+    assert report.valid
+    assert report.checked_events == 2
+    assert [record.sequence for record in ledger.events()] == [1, 99]
+    # The repaired head is right, not merely tolerated: the next append chains
+    # onto it instead of failing its 40001 check forever.
+    following = ledger.append(_execution_started_event("trial-after-repair"))
+    assert following.sequence == 100
+    assert following.previous_hash == event_hash.hex()
+    assert ledger.verify().valid
+
+
 def test_concurrent_appends_form_one_continuous_chain(research_ledger_dsn: str) -> None:
     """Eight writers, eight connections, one chain.
 
@@ -685,6 +752,124 @@ def test_the_append_function_refuses_a_stale_expected_head(research_ledger_dsn: 
                 ),
             )
         connection.rollback()
+
+
+def test_an_unreadable_ledger_is_an_integrity_error_not_a_clean_verdict(
+    research_ledger_dsn: str,
+    trial_protocol: TrialProtocol,
+) -> None:
+    """ "Nobody could check" must never be reported as "nothing is wrong".
+
+    A script that reads ``report.valid`` would otherwise treat an unreachable
+    database as an intact ledger, which is the one answer this ledger exists to
+    be unable to give. It is a different error from a refused append -- one means
+    this trial was not recorded, the other means nobody can currently say
+    whether any of it is -- and the two have different exit codes.
+    """
+
+    marker = "sensitive-verify-driver-marker"
+    _ledger(research_ledger_dsn).append(_preregistered_event(trial_protocol))
+
+    def failing_factory() -> psycopg.Connection[Any]:
+        raise psycopg.OperationalError(marker)
+
+    with pytest.raises(TrialLedgerIntegrityError) as raised:
+        PostgresTrialLedger(failing_factory).verify()
+
+    error = raised.value
+    assert error.args == ("trial ledger integrity verification failed",)
+    assert not isinstance(error.__cause__, psycopg.Error)
+    assert error.__context__ is None
+    rendered = "".join(traceback.format_exception(error))
+    assert marker not in rendered
+    assert research_ledger_dsn not in rendered
+
+
+def test_reads_that_fail_stay_append_errors(research_ledger_dsn: str) -> None:
+    """The repository pattern, deliberately unchanged.
+
+    ``events``/``replay``/``counters`` have no second typed error to raise, and
+    inventing one here would give a caller two ways to be told "the database was
+    not there". Only ``verify`` has a second meaning to distinguish.
+    """
+
+    def failing_factory() -> psycopg.Connection[Any]:
+        raise psycopg.OperationalError("sensitive-read-driver-marker")
+
+    ledger = PostgresTrialLedger(failing_factory)
+
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.events()
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.events_for("trial-1")
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.replay()
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.counters()
+
+
+def test_a_row_the_parser_cannot_read_becomes_an_append_error(
+    research_ledger_dsn: str,
+    trial_protocol: TrialProtocol,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed row is a store failure, not a ``ValidationError`` for the CLI.
+
+    ``LedgerRecord`` is strict and closed, so a row the store cannot turn into a
+    model is a database this build does not understand. Letting that escape would
+    break the exit-code contract for a condition the caller cannot act on any
+    differently -- and there is no way to build one through the function, so the
+    shape is injected here rather than waited for.
+    """
+
+    ledger = _ledger(research_ledger_dsn)
+    record = ledger.append(_preregistered_event(trial_protocol))
+    monkeypatch.setattr(ledger_store, "_read_rows", lambda *_args, **_kwargs: (("short",),))
+
+    with pytest.raises(TrialLedgerAppendError) as raised:
+        ledger.events()
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.events_for(record.trial_id or "trial-1")
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.replay()
+
+    assert raised.value.args == ("trial ledger append failed",)
+    assert "short" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_canonical_bytes_that_do_not_parse_become_an_append_error(
+    research_ledger_dsn: str,
+    research_migration_dsn: str,
+    trial_protocol: TrialProtocol,
+) -> None:
+    """Valid JSON that is not an event, stored by the only role that can store it.
+
+    The bytes are what ``replay`` parses, so this is the shape a tampered row
+    takes in practice. ``verify`` answers it as a report; ``replay`` cannot,
+    because there is no event to hand back, so it raises the store's one error.
+    """
+
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_preregistered_event(trial_protocol))
+    ledger.append(_execution_started_event(trial_protocol.candidates[0].trial_id))
+
+    with psycopg.connect(research_migration_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SET ROLE trading_house_owner")
+        cursor.execute(
+            "ALTER TABLE research.trial_ledger_events "
+            "DISABLE TRIGGER reject_trial_ledger_row_mutation"
+        )
+        cursor.execute(
+            "UPDATE research.trial_ledger_events SET canonical_event = "
+            "pg_catalog.convert_to('{\"not\": \"an event\"}', 'UTF8') WHERE sequence = 1"
+        )
+        connection.commit()
+
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.replay()
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.counters()
+    assert ledger.verify().reason == "event_schema_invalid"
 
 
 @pytest.mark.parametrize(

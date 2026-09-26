@@ -14,11 +14,14 @@ from testcontainers.community.postgres import PostgresContainer
 MIGRATION_PASSWORD = "integration-migration-password"  # noqa: S105
 RUNTIME_PASSWORD = "integration-runtime-password"  # noqa: S105
 TEST_SUPERUSER_PASSWORD = "integration-test-superuser-password"  # noqa: S105
-# Phase 8A gave the trial ledger its own database rather than another schema in
-# the application one: the ledger is evidence about the *research process*, and
-# a process that can read live positions must not also be able to read what was
-# tried and discarded. Two databases make that a database fact instead of a
-# grant nobody remembered to revoke.
+# Phase 8A gave the trial ledger its own database, DSN and migration target
+# rather than another schema in the application one. What that buys is
+# operational separation: the ledger can be backed up, restored, migrated or
+# dropped on its own schedule, and no migration of the live application schema
+# can disturb it. It is not a read boundary -- the same
+# ``trading_house_runtime`` role holds SELECT on the ledger in both databases,
+# because 8A grants it, so the privilege that keeps the chain append-only is the
+# absence of INSERT rather than which database the rows live in.
 RESEARCH_DATABASE = "trading_house_research"
 
 
@@ -142,6 +145,15 @@ def _bootstrap_roles(container: PostgresContainer, admin_dsn: str) -> None:
         )
         cursor.execute(
             sql.SQL("GRANT CONNECT ON DATABASE {} TO trading_house_runtime").format(
+                sql.Identifier(RESEARCH_DATABASE)
+            )
+        )
+        # Explicit rather than inherited from the default PUBLIC grant on a
+        # database: this role runs the migrations here, and an environment that
+        # tightened that default would otherwise break the suite's setup with an
+        # error that reads like a migration failure.
+        cursor.execute(
+            sql.SQL("GRANT CONNECT ON DATABASE {} TO trading_house_migrator").format(
                 sql.Identifier(RESEARCH_DATABASE)
             )
         )

@@ -26,6 +26,13 @@ The genesis event's previous hash is 32 zero bytes, and the CHECK constraints
 pin every digest to 32 bytes. Sequence numbers are allowed to skip: a
 rolled-back insert burns one, and integrity is the previous-hash link, never
 ``sequence - 1``.
+
+The heads row is a cache, not a record. A tampered ``last_sequence`` or
+``last_event_hash`` costs availability and nothing else: every append then
+fails its 40001 check, loudly, until the row is rebuilt from the tail of
+``trial_ledger_events`` -- which is possible precisely because that table is
+append-only and self-contained. Repair is a ``SELECT`` and an ``UPDATE`` on a
+row the runtime cannot see; no event is ever at risk from a bad head.
 """
 
 from collections.abc import Sequence
@@ -141,6 +148,14 @@ def upgrade() -> None:
     # verifier would be comparing two definitions of the same field. The
     # alternative, a canonicaliser in plpgsql, is a second canonicalization
     # rule for the whole chain to disagree with; the argument is not.
+    #
+    # The consequence, stated rather than left to be discovered: this column is
+    # client-supplied and is NOT in the chain preimage below, so a client that
+    # supplies the wrong digest still writes a correctly chained row. Nothing
+    # else in the chain notices, which is exactly why the verifier re-derives
+    # this one column and reports ``payload_digest_mismatch``. It is a
+    # convenience index over the payload, and it is only trustworthy because
+    # something independent re-checks it.
     op.execute(
         """
         CREATE FUNCTION research.append_trial_ledger_event(
