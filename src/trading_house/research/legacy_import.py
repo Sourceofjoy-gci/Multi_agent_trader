@@ -106,10 +106,12 @@ def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPo
     inferred either; they were charged inside the fill prices.
 
     The walk runs to ``max(end.date(), every exit day)``, not to
-    ``end.date()``. ``BacktestResult.end`` is ``request.end``, and the engine
-    reads one bar past it to warm the last snapshot
-    (``engine._bars_for``: ``horizon = request.end + duration(timeframe)``), so a
-    position opened on the final bar is closed on that extra one and its
+    ``end.date()``. ``BacktestResult.end`` is ``request.end``, and
+    ``BacktestEngine._replay_bars`` asks the store for one bar more than that:
+    ``request.start``/``end`` are inclusive bar open times while the store's range
+    is half-open, so it moves the end forward a bar's duration
+    (``horizon = request.end + duration(timeframe)``). A position opened on the
+    final bar of the request is therefore closed on that extra bar, and its
     ``exit_at`` is legitimately after ``result.end``. Stopping at ``end.date()``
     would drop that P&L from the series while ``net_pnl`` still counted it -- a
     series that does not reconcile with the result printed beside it, and one no
