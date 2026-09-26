@@ -104,10 +104,22 @@ def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPo
     positions are invisible here, and pretending otherwise is what the
     ``ReturnSeriesBasis`` field exists to prevent. Spread and slippage are not
     inferred either; they were charged inside the fill prices.
+
+    A trade that exits outside the run's own window is refused rather than
+    folded in. The walk below only visits ``start.date()`` through
+    ``end.date()``, so an exit after ``end`` would put its P&L in ``by_day``,
+    never be visited, and be silently dropped from the series while
+    ``BacktestResult.net_pnl`` still counted it -- a return series that does not
+    reconcile with the result it claims to describe. Raising here is also what
+    refuses the import, because the bundle cannot be built without this series;
+    the rule lives in one place so it cannot be enforced on one path and not
+    the other.
     """
 
     by_day: dict[date, Decimal] = {}
     for trade in result.trades:
+        if not result.start <= trade.exit_at <= result.end:
+            raise EvidenceIntegrityError()
         by_day[trade.exit_at.date()] = by_day.get(trade.exit_at.date(), Decimal(0)) + trade.net_pnl
 
     equity = result.firm_equity
@@ -154,6 +166,15 @@ def _verified_artifact(path: Path) -> tuple[BacktestResult, str]:
         # The JSON path rather than model_validate: every research contract is
         # strict, so the dict of JSON strings an artifact is made of would have
         # its timestamps, decimals and UUIDs refused.
+        #
+        # ``margin_modelled`` sits beside the result in the document and is
+        # dropped here. The CLI puts it there precisely because ``BacktestResult``
+        # is frozen and has no field for it (cli.py: the free-margin gate is off
+        # in a replay, and a reader of the JSON cannot see that from the result
+        # alone). The bundle carries the result, so the disclosure cannot ride
+        # inside it; the honest record is that a legacy import is a
+        # constant-notional replay, which ``ReturnSeriesBasis`` and the
+        # non-promotable legacy registration state already say.
         result = BacktestResult.model_validate_json(json.dumps(payload["result"]))
     except (KeyError, TypeError, ValueError) as error:
         raise EvidenceIntegrityError() from error
@@ -219,13 +240,17 @@ def import_phase7_artifact(
     missing -- and the reverse, a ledger row with no evidence, is the failure
     mode verification cannot report its way out of.
 
-    ponytail: ``registered_at`` is the operator's clock, so a crash between the
-    write and the append leaves an orphan document that a retry under a later
-    clock cannot reproduce -- it appends a second event and the ledger refuses
-    the id collision. Loud, never a duplicate, and one wasted file per crash.
-    Take the clock as an argument the caller reuses across a retry (the CLI in
-    Task 5 does), or seal the bundle under an artifact-derived timestamp, if
-    that stops being acceptable.
+    ponytail: that ordering has a ceiling, and it costs a file rather than a
+    trial. A crash between the write and the append leaves an orphan document
+    that no ledger row references; a retry under a *later* clock builds a
+    different bundle, so it succeeds, appends the same deterministic event id
+    (nothing is in the way), and adds a second evidence file. One import, one
+    event, one unreferenced file -- never a duplicate trial and never a
+    collision. Reusing the same ``now`` across a retry is the mitigation: the
+    bundle bytes come out identical, the write lands on the same digest, and
+    ``EvidenceStore.write``'s identical-bytes path keeps it to one file. Task 5's
+    CLI must therefore pass one ``now`` through a retry; if that stops being
+    achievable, seal the bundle under an artifact-derived timestamp instead.
     """
 
     result, source_artifact_sha256 = _verified_artifact(path)
@@ -253,11 +278,19 @@ def import_phase7_artifact(
         # be a fabricated specification.
         parameter_space=(),
     )
+    # A TrialSpec, not a TrialProtocol. ``PostgresTrialLedger.register`` seals a
+    # whole protocol and digests that, so its ``spec_sha256`` covers the data,
+    # execution, cost, validation and holdout specs as well as the candidate
+    # family. A legacy artifact has no such envelope -- there was no protocol --
+    # so this digest covers the one candidate's declaration and nothing else,
+    # and the two digests must never be compared as if they were the same kind
+    # of address.
+    spec_sha256 = canonical_sha256(trial)
     bundle = EvidenceBundle(
         result_schema_version=_RESULT_SCHEMA_VERSION,
         trial_id=trial_id,
         attempt_id=attempt_id,
-        spec_sha256=canonical_sha256(trial),
+        spec_sha256=spec_sha256,
         source_result_sha256=source_result_sha256,
         result=result,
         daily_returns=derive_realized_daily_returns(result),
@@ -291,7 +324,7 @@ def import_phase7_artifact(
             event_type=LedgerEventType.LEGACY_IMPORTED,
             trial_id=trial_id,
             attempt_id=attempt_id,
-            spec_sha256=bundle.spec_sha256,
+            spec_sha256=spec_sha256,
             # The run's own end, not ``now``: it is the only occurrence time the
             # artifact supports, and a wall-clock stamp would make a retry's
             # canonical bytes differ from the original's.

@@ -144,6 +144,42 @@ def _result_with_two_trades() -> BacktestResult:
     )
 
 
+def _result_with_costs() -> BacktestResult:
+    """A legacy result whose trades actually cost something.
+
+    The brief's two-day fixture zeroes commission and swap so its daily returns
+    are exact decimals, which means a cost summary hardcoded to zero would pass
+    every assertion made against it. These two trades carry the helper's real
+    ``commission_per_lot_per_side``-sized charges and *opposite-signed* swap, so
+    the bundle's totals pin a signed sum: 7 + 11 = 18 of commission, -3 + 5 = 2
+    of swap. A zero, a first-trade-only sum, or an unsigned accumulation of the
+    swap all miss.
+    """
+
+    first = _trade(
+        entry_at=_NOW,
+        exit_at=datetime(2024, 1, 2, 12, 0, tzinfo=UTC),
+        gross_pnl=Decimal("1000"),
+        commission=Decimal("7"),
+        swap=Decimal("-3"),
+        net_pnl=Decimal("990"),
+    )
+    second = _trade(
+        entry_at=datetime(2024, 1, 2, 12, 0, tzinfo=UTC),
+        exit_at=datetime(2024, 1, 3, 12, 0, tzinfo=UTC),
+        gross_pnl=Decimal("500"),
+        commission=Decimal("11"),
+        swap=Decimal("5"),
+        net_pnl=Decimal("494"),
+    )
+    return _result(
+        start=_NOW,
+        end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
+        trades=(first, second),
+        net_pnl=Decimal("1484"),
+    )
+
+
 def _write_outer_artifact(path: Path, result: BacktestResult) -> Path:
     artifact = path / "phase7.json"
     artifact.write_text(
@@ -187,7 +223,15 @@ def _fake_ledger() -> FakeLedger:
 
 def _record(event: LedgerEvent) -> LedgerRecord:
     """The row ``PostgresTrialLedger.events_for`` actually returns: the same
-    event with the chain's columns around it and the payload still JSON text."""
+    event with the chain's columns around it and the payload still JSON text.
+
+    ``sequence`` and ``recorded_at`` are the two columns the *database* assigns,
+    and they are enumerated here on purpose rather than left implicit. Design
+    §5.3 excludes them from the request comparison that makes a retry
+    idempotent, so the importer must never read them: it matches on ``event_id``
+    and reports the payload's own ``evidence_sha256``. Their values are
+    therefore arbitrary below, and ``sequence=1`` says exactly that.
+    """
 
     return LedgerRecord(
         sequence=1,
@@ -255,6 +299,84 @@ def test_realized_returns_are_refused_when_equity_is_not_positive() -> None:
         derive_realized_daily_returns(
             _result_with_two_trades().model_copy(update={"firm_equity": Decimal("0")})
         )
+
+
+def test_a_trade_exiting_after_the_run_window_is_refused() -> None:
+    """The silent drop this prevents: the walk only visits ``start.date()``
+    through ``end.date()``, so post-``end`` P&L would vanish from the series
+    while ``net_pnl`` still counted it -- a series that does not reconcile with
+    the result it claims to describe."""
+
+    post_end = _trade(
+        entry_at=datetime(2024, 1, 3, 12, 0, tzinfo=UTC),
+        exit_at=datetime(2024, 1, 4, 9, 0, tzinfo=UTC),
+        gross_pnl=Decimal("5000"),
+        commission=Decimal("0"),
+        swap=Decimal("0"),
+        net_pnl=Decimal("5000"),
+    )
+    result = _result(
+        start=_NOW,
+        end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
+        trades=(post_end,),
+        net_pnl=Decimal("5000"),
+    )
+
+    with pytest.raises(EvidenceIntegrityError):
+        derive_realized_daily_returns(result)
+
+
+def test_a_trade_exiting_before_the_run_window_is_refused() -> None:
+    """The same drop at the other end: an exit before ``start`` is never
+    visited either, and an exit on the first day but earlier than ``start``
+    would be attributed to a day whose equity base is wrong."""
+
+    pre_start = _trade(
+        entry_at=datetime(2023, 12, 31, 12, 0, tzinfo=UTC),
+        exit_at=datetime(2023, 12, 31, 18, 0, tzinfo=UTC),
+        gross_pnl=Decimal("5000"),
+        commission=Decimal("0"),
+        swap=Decimal("0"),
+        net_pnl=Decimal("5000"),
+    )
+    result = _result(
+        start=_NOW,
+        end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
+        trades=(pre_start,),
+        net_pnl=Decimal("5000"),
+    )
+
+    with pytest.raises(EvidenceIntegrityError):
+        derive_realized_daily_returns(result)
+
+
+def test_an_artifact_whose_trades_leave_its_window_is_not_imported(tmp_path: Path) -> None:
+    """The derivation is where the rule lives, so the import inherits it: the
+    bundle cannot be built, and nothing is written to the evidence store or
+    appended to the ledger."""
+
+    post_end = _trade(
+        entry_at=datetime(2024, 1, 3, 12, 0, tzinfo=UTC),
+        exit_at=datetime(2024, 1, 4, 9, 0, tzinfo=UTC),
+        gross_pnl=Decimal("5000"),
+        commission=Decimal("0"),
+        swap=Decimal("0"),
+        net_pnl=Decimal("5000"),
+    )
+    result = _result(
+        start=_NOW,
+        end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
+        trades=(post_end,),
+        net_pnl=Decimal("5000"),
+    )
+    artifact = _write_outer_artifact(tmp_path, result)
+    ledger = _fake_ledger()
+
+    with pytest.raises(EvidenceIntegrityError):
+        _import(artifact, ledger, tmp_path)
+
+    assert ledger.append_count == 0
+    assert not (tmp_path / "evidence").exists()
 
 
 def test_import_verifies_the_original_result_digest(tmp_path: Path) -> None:
@@ -417,9 +539,17 @@ def test_idempotency_reads_the_recorded_digest_back_out_of_a_ledger_row(
     ledger = FakeRecordLedger(inner)
     first = _import(artifact, inner, tmp_path)
     # Ahead of the real event in chain order, so the retry has to walk past it:
-    # the match is by our deterministic event id, not by position. Seeded
-    # directly into the list, so the retry's own append would still be visible.
-    inner.events.insert(0, inner.events[0].model_copy(update={"event_id": uuid4()}))
+    # the match is by our deterministic event id, not by position. The decoy
+    # carries a *different* evidence digest as well as a different id, so a
+    # lookup that dropped the id guard and took the first legacy event it saw
+    # would report that digest instead of the recorded one.
+    decoy = inner.events[0].model_copy(
+        update={
+            "event_id": uuid4(),
+            "payload": inner.events[0].payload.model_copy(update={"evidence_sha256": "c" * 64}),
+        }
+    )
+    inner.events.insert(0, decoy)
     before_retry = len(inner.events)
 
     second = import_phase7_artifact(
@@ -481,8 +611,12 @@ def test_legacy_evidence_records_what_it_cannot_know(tmp_path: Path) -> None:
     assert bundle.costs.status is CostAttributionStatus.PARTIAL
     assert bundle.costs.spread_cost is None
     assert bundle.costs.slippage_cost is None
-    assert bundle.costs.commission == Decimal("0")
-    assert bundle.costs.swap == Decimal("0")
+    # The brief's fixture zeroes both terms, so its totals are zero. The sums
+    # themselves are pinned against a result that carries real ones below.
+    assert bundle.costs.commission == sum(
+        (t.commission for t in _result_with_two_trades().trades), Decimal(0)
+    )
+    assert bundle.costs.swap == sum((t.swap for t in _result_with_two_trades().trades), Decimal(0))
     # Registration is declared at import time, not backdated to the run.
     assert bundle.provenance.registered_at == _NOW
     assert bundle.provenance.occurred_at == _result_with_two_trades().end
@@ -493,6 +627,36 @@ def test_legacy_evidence_records_what_it_cannot_know(tmp_path: Path) -> None:
         bundle.provenance.source_artifact_sha256
         == hashlib.sha256(artifact.read_bytes()).hexdigest()
     )
+
+
+def test_cost_totals_are_the_signed_sums_of_every_trade(tmp_path: Path) -> None:
+    """The aggregation this pins: 7 + 11 of commission, and -3 + 5 of swap.
+
+    Swap is signed, and that is the term a careless sum gets wrong. The two
+    trades carry opposite-signed swap on purpose, so a hardcoded zero, a
+    first-trade-only total, and an unsigned accumulation (which would read 8
+    rather than 2) are three different wrong answers and all three fail.
+    """
+
+    result = _result_with_costs()
+    artifact = _write_outer_artifact(tmp_path, result)
+    store = EvidenceStore(tmp_path / "evidence")
+
+    outcome = _import(artifact, _fake_ledger(), tmp_path)
+    bundle = store.read(outcome.evidence_sha256)
+
+    assert [trade.commission for trade in result.trades] == [
+        Decimal("7"),
+        Decimal("11"),
+    ]
+    assert [trade.swap for trade in result.trades] == [Decimal("-3"), Decimal("5")]
+    assert bundle.costs.commission == Decimal("18")
+    assert bundle.costs.swap == Decimal("2")
+    # PARTIAL still: the terms that *were* attributable are attributed, and the
+    # two that were folded into the fill prices stay unknown.
+    assert bundle.costs.status is CostAttributionStatus.PARTIAL
+    assert bundle.costs.spread_cost is None
+    assert bundle.costs.slippage_cost is None
 
 
 def test_legacy_bundle_carries_the_derived_realized_series(tmp_path: Path) -> None:
