@@ -752,7 +752,7 @@ leaves undone.
 | Database | Role |
 |---|---|
 | `trading_house` | The application database: audit chain, intents, positions, bars, agent runs |
-| `trading_house_research` | The trial ledger's deployment target: where `research.trial_ledger_events` and its head cache live. Carries the full migrated schema like the other database — the ledger tables are what this phase *adds* to it, not all it contains |
+| `trading_house_research` | The trial ledger's deployment target: the database the ledger is *used* from. Carries the same full migrated schema as `trading_house`, the two ledger tables included — they are not absent from the application database, this phase only points the ledger at the second one |
 
 The split is operational, not a security boundary. Both databases run the *same*
 migration history, so `trading_house_research` contains the **full migrated
@@ -814,13 +814,13 @@ are read off the migration file rather than checked against it.
 Neither is read from `.env`; export them into your shell like the rest of
 `TRADING_HOUSE_*`. See `.env.example` for both.
 
-**The two DSNs must name two databases.** That is the whole point of the split,
-and it is the one property of it that no downstream check can see: a ledger
+**The two DSNs must name two different databases.** That is the whole point of the
+split, and it is the one property of it that no downstream check can see: a ledger
 sitting in `trading_house` passes every other test in this section, `verify`
 answers `valid`, and every trial command reports success. So the comparison is
 made where the two DSNs are composed, before a connection is opened — the
-`dbname` is parsed out of both with psycopg's own conninfo parser (so URI and
-keyword/value spellings compare the same) and an equal pair is refused as
+`dbname` is parsed out of both with psycopg's own conninfo parser (so every
+spelling the driver accepts compares the same) and an equal pair is refused as
 `configuration invalid`. Neither DSN appears in the refusal. A DSN that cannot be
 parsed, or that omits `dbname`, is passed through rather than refused on a
 comparison nobody can make: the driver rejects the first and the second is a

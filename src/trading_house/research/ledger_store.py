@@ -127,6 +127,9 @@ SELECT EXISTS (
        OR (event_type = 'preregistered' AND event_json @> %s::pg_catalog.jsonb)
 )
 """
+# ponytail: the containment arm is a sequential scan of a chain that is one row per
+# trial, not per candidate. A GIN index on event_json turns it into a lookup; do that
+# when a chain is large enough to measure, not before.
 _OUTCOME_EVENT_TYPES = frozenset(
     {
         LedgerEventType.RESULT_RECORDED,
@@ -413,8 +416,9 @@ class PostgresTrialLedger:
         The same containment question ``append`` asks before it lets an outcome
         through, exposed as its own read so a caller that writes something
         *beside* the chain can ask it first. It is a preflight and not the rule:
-        the append is still refused if the declaration is withdrawn between the
-        two, which is why nothing here is treated as permission.
+        the chain is append-only, so a declaration cannot be withdrawn between the
+        two reads, and ``append``'s own check is what refuses a caller that
+        skipped this entirely -- which is why nothing here is permission.
         """
 
         rows = _read_rows(self._connection_factory, _LINEAGE_SQL, _lineage_parameters(trial_id))
@@ -542,6 +546,11 @@ def _verify_rows(rows: tuple[tuple[Any, ...], ...]) -> LedgerIntegrityReport:
             if compute_event_hash(sequence, previous_hash, canonical_event) != bytes(row[14]):
                 return _failure(checked_events, "event_hash_mismatch")
         except Exception:
+            # One catch for every way a row fails to verify, deliberately: a row
+            # carrying a non-hex digest makes ``bytes.fromhex`` raise, and that is
+            # an invalid row rather than a broken verifier. The cost is that a bug
+            # in this loop also reports ``event_schema_invalid``; split the catches
+            # per check if a failure here ever has to be told apart.
             return _failure(checked_events, "event_schema_invalid")
 
         expected_previous_hash = bytes(row[14])

@@ -10,6 +10,10 @@ from pydantic import SecretStr, ValidationError
 from trading_house.settings import RuntimeSettings
 
 SECRET_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house"  # noqa: S105
+# The same host, a different database: a research DSN naming the database the
+# application already uses is what ops.ledger.research_ledger_dsn refuses, so one
+# DSN for both would configure a pair no deployment may run.
+RESEARCH_DSN = "postgresql://runtime:super-secret-password@localhost/trading_house_research"
 
 RISK_BEARING_NAMES = frozenset(
     {
@@ -138,13 +142,13 @@ def test_research_dsn_and_evidence_root_are_read_from_the_prefixed_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
-    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", RESEARCH_DSN)
     monkeypatch.setenv("TRADING_HOUSE_EVIDENCE_ROOT", "C:/evidence")
 
     settings = RuntimeSettings()
 
     assert settings.research_ledger_dsn is not None
-    assert settings.research_ledger_dsn.get_secret_value() == SECRET_DSN
+    assert settings.research_ledger_dsn.get_secret_value() == RESEARCH_DSN
     assert settings.evidence_root == Path("C:/evidence")
 
 
@@ -152,7 +156,7 @@ def test_the_research_dsn_is_never_rendered_in_clear(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
-    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", RESEARCH_DSN)
 
     settings = RuntimeSettings()
 

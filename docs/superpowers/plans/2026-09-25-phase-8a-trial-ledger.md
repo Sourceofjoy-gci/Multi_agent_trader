@@ -1055,7 +1055,7 @@ def test_rolled_back_sequence_gap_does_not_break_chain(research_ledger_dsn, rese
 
 Add a `ThreadPoolExecutor(max_workers=8)` test that appends eight events on distinct connections and asserts one continuous chain. Add a mutation test using `research_migration_dsn` (the database owner, which still fires the trigger) that `UPDATE`, `DELETE`, and `TRUNCATE` each raise. Add a test that the runtime role cannot execute direct `INSERT`.
 
-Before implementing `settings.py`, extend `tests/unit/test_settings.py` with the two research environment suffixes and assert that the DSN remains optional while the evidence root defaults to `.local/evidence`:
+Before implementing `settings.py`, extend `tests/unit/test_settings.py` with the two research environment suffixes and assert that the DSN remains optional while the evidence root defaults to `.local/evidence`. The two DSNs must be two different databases, as they are in the code below — a fixture that pointed both at one DSN would configure exactly the collision `ops/ledger.py` refuses:
 
 ```python
 def test_research_dsn_is_optional_for_non_trial_commands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1071,13 +1071,13 @@ def test_research_dsn_and_evidence_root_are_read_from_the_prefixed_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
-    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", RESEARCH_DSN)
     monkeypatch.setenv("TRADING_HOUSE_EVIDENCE_ROOT", "C:/evidence")
 
     settings = RuntimeSettings()
 
     assert settings.research_ledger_dsn is not None
-    assert settings.research_ledger_dsn.get_secret_value() == SECRET_DSN
+    assert settings.research_ledger_dsn.get_secret_value() == RESEARCH_DSN
     assert settings.evidence_root == Path("C:/evidence")
 ```
 

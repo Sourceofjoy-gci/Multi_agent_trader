@@ -53,10 +53,10 @@ def build_evidence_store(settings: RuntimeSettings) -> EvidenceStore:
 def _dbname(dsn: SecretStr) -> str | None:
     """The database a DSN names, or ``None`` when it cannot be read as one.
 
-    Parsed rather than pattern-matched so every conninfo spelling the driver
-    accepts -- URI or keyword/value, percent-encoded password, ``dbname`` or
-    ``database`` -- is compared the same way. Only the name is extracted and
-    only the name is ever returned, because a refusal must be able to say two
+    Parsed rather than pattern-matched so every spelling the driver accepts --
+    URI or keyword/value, percent-encoded password, the database named in the
+    path or in ``dbname`` -- is compared the same way. Only the name is extracted
+    and only the name is ever returned, because a refusal must be able to say two
     DSNs collide without carrying either credential into a log line.
 
     ``None`` covers two cases, and both are answers rather than gaps. A conninfo
