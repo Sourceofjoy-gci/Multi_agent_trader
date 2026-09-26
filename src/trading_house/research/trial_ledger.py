@@ -178,14 +178,16 @@ class HoldoutSpec(CanonicalModel):
 
     @model_validator(mode="after")
     def dates_match_state(self) -> Self:
-        defined = (
-            self.start is not None and self.end is not None and self.dataset_sha256 is not None
-        )
-        if self.state is HoldoutState.NOT_DEFINED and defined:
+        parts = (self.start, self.end, self.dataset_sha256)
+        any_set = any(part is not None for part in parts)
+        all_set = all(part is not None for part in parts)
+        if any_set and not all_set:
+            raise ValueError("a holdout carries its dates and hash together or not at all")
+        if self.state is HoldoutState.NOT_DEFINED and any_set:
             raise ValueError("an undefined holdout cannot carry dates or a hash")
         if (
             self.state in {HoldoutState.LOCKED, HoldoutState.OPENED, HoldoutState.CONSUMED}
-            and not defined
+            and not all_set
         ):
             raise ValueError("a defined holdout requires dates and a hash")
         if self.start is not None and self.end is not None and self.start >= self.end:
@@ -219,9 +221,10 @@ class TrialProtocol(CanonicalModel):
     def candidate_family_is_complete_and_unique(self) -> Self:
         if not self.candidates:
             raise ValueError("a protocol requires at least one candidate")
-        ids = [candidate.trial_id for candidate in self.candidates]
-        if len(set(ids)) != len(ids):
-            raise ValueError("candidate trial ids must be unique")
+        trial_ids = [candidate.trial_id for candidate in self.candidates]
+        spec_ids = [candidate.spec_id for candidate in self.candidates]
+        if len(set(trial_ids)) != len(trial_ids) or len(set(spec_ids)) != len(spec_ids):
+            raise ValueError("candidate trial ids and spec ids must be unique")
         return self
 
 
@@ -270,13 +273,13 @@ class EvidenceSealedPayload(CanonicalModel):
 
 class ValidatedPayload(CanonicalModel):
     event_type: Literal[LedgerEventType.VALIDATED]
-    report_sha256: str
+    report_sha256: NonEmptyStr
 
 
 class GateDecidedPayload(CanonicalModel):
     event_type: Literal[LedgerEventType.GATE_DECIDED]
     decision: Literal["REJECTED", "RESEARCH_PASSED", "PAPER_APPROVED"]
-    report_sha256: str
+    report_sha256: NonEmptyStr
 
 
 LedgerEventPayload = Annotated[

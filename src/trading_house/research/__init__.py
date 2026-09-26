@@ -19,6 +19,7 @@ from trading_house.research.trial_ledger import (
     TrialSpec,
     TrialStatus,
     deflation_trial_count,
+    trial_counters,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "canonical_bytes",
     "canonical_sha256",
     "deflation_trial_count",
+    "trial_counters",
 ]
