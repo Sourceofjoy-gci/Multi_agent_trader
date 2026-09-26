@@ -105,20 +105,30 @@ def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPo
     ``ReturnSeriesBasis`` field exists to prevent. Spread and slippage are not
     inferred either; they were charged inside the fill prices.
 
-    A trade that exits outside the run's own window is refused rather than
-    folded in. The walk below only visits ``start.date()`` through
-    ``end.date()``, so an exit after ``end`` would put its P&L in ``by_day``,
-    never be visited, and be silently dropped from the series while
-    ``BacktestResult.net_pnl`` still counted it -- a return series that does not
-    reconcile with the result it claims to describe. Raising here is also what
-    refuses the import, because the bundle cannot be built without this series;
-    the rule lives in one place so it cannot be enforced on one path and not
-    the other.
+    The walk runs to ``max(end.date(), every exit day)``, not to
+    ``end.date()``. ``BacktestResult.end`` is ``request.end``, and the engine
+    reads one bar past it to warm the last snapshot
+    (``engine._bars_for``: ``horizon = request.end + duration(timeframe)``), so a
+    position opened on the final bar is closed on that extra one and its
+    ``exit_at`` is legitimately after ``result.end``. Stopping at ``end.date()``
+    would drop that P&L from the series while ``net_pnl`` still counted it -- a
+    series that does not reconcile with the result printed beside it, and one no
+    model above would notice, because the series is an opaque tuple. Extending
+    the walk keeps the whole point in the series and keeps the artifact
+    importable, which refusing it would not.
+
+    An exit *before* ``start`` is the opposite and is refused. There is no
+    legitimate route to one: a position cannot be opened on a bar the run never
+    read, and its day precedes the first day the walk visits, so folding it in
+    would attribute P&L to a day that is not in the series at all. Raising here
+    is also what refuses the import, because the bundle cannot be built without
+    this series; the rule lives in one place so it cannot be enforced on one path
+    and not the other.
     """
 
     by_day: dict[date, Decimal] = {}
     for trade in result.trades:
-        if not result.start <= trade.exit_at <= result.end:
+        if trade.exit_at < result.start:
             raise EvidenceIntegrityError()
         by_day[trade.exit_at.date()] = by_day.get(trade.exit_at.date(), Decimal(0)) + trade.net_pnl
 
@@ -126,7 +136,8 @@ def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPo
     previous = equity
     points: list[DailyReturnPoint] = []
     day = result.start.date()
-    while day <= result.end.date():
+    last = max([result.end.date(), *by_day])
+    while day <= last:
         equity += by_day.get(day, Decimal(0))
         if previous <= 0:
             # A return over a non-positive base is not a number. Emitting one
@@ -162,19 +173,13 @@ def _verified_artifact(path: Path) -> tuple[BacktestResult, str]:
     if not isinstance(payload, dict) or payload.get("status") != "ok":
         raise EvidenceIntegrityError()
 
+    # ``margin_modelled`` sits beside the result in the document and is not
+    # read. EvidenceBundle has no field for it, and the pinned artifact bytes
+    # retain it, so nothing is lost by leaving it here.
     try:
         # The JSON path rather than model_validate: every research contract is
         # strict, so the dict of JSON strings an artifact is made of would have
         # its timestamps, decimals and UUIDs refused.
-        #
-        # ``margin_modelled`` sits beside the result in the document and is
-        # dropped here. The CLI puts it there precisely because ``BacktestResult``
-        # is frozen and has no field for it (cli.py: the free-margin gate is off
-        # in a replay, and a reader of the JSON cannot see that from the result
-        # alone). The bundle carries the result, so the disclosure cannot ride
-        # inside it; the honest record is that a legacy import is a
-        # constant-notional replay, which ``ReturnSeriesBasis`` and the
-        # non-promotable legacy registration state already say.
         result = BacktestResult.model_validate_json(json.dumps(payload["result"]))
     except (KeyError, TypeError, ValueError) as error:
         raise EvidenceIntegrityError() from error
@@ -210,6 +215,12 @@ def _recorded_evidence_sha256(
     function of the artifact: ``registered_at`` is the operator's import clock,
     so a retry under a later clock would re-derive a document the ledger has
     never seen and report it as the recorded one.
+
+    The digest is read out of the row's JSONB projection, and ``verify()`` is
+    what keeps that projection honest: it recomputes the canonical bytes and
+    fails with ``event_json_mismatch`` if the column and the chain's own bytes
+    disagree. So the projection is safe to read, and a chain that has drifted is
+    a report an operator can read rather than a silent wrong answer.
     """
 
     for entry in ledger.events_for(trial_id):
@@ -284,7 +295,9 @@ def import_phase7_artifact(
     # family. A legacy artifact has no such envelope -- there was no protocol --
     # so this digest covers the one candidate's declaration and nothing else,
     # and the two digests must never be compared as if they were the same kind
-    # of address.
+    # of address. ``TrialSpec`` embeds ``trial_id``, which is itself derived from
+    # the source result digest, so no two legacy imports can share a spec digest
+    # and each import counts as its own effective specification (design §5.6).
     spec_sha256 = canonical_sha256(trial)
     bundle = EvidenceBundle(
         result_schema_version=_RESULT_SCHEMA_VERSION,

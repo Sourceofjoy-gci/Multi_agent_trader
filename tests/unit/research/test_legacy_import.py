@@ -145,15 +145,16 @@ def _result_with_two_trades() -> BacktestResult:
 
 
 def _result_with_costs() -> BacktestResult:
-    """A legacy result whose trades actually cost something.
+    """A legacy result whose trades carry non-zero commission and opposite-signed
+    swap.
 
-    The brief's two-day fixture zeroes commission and swap so its daily returns
-    are exact decimals, which means a cost summary hardcoded to zero would pass
-    every assertion made against it. These two trades carry the helper's real
-    ``commission_per_lot_per_side``-sized charges and *opposite-signed* swap, so
-    the bundle's totals pin a signed sum: 7 + 11 = 18 of commission, -3 + 5 = 2
-    of swap. A zero, a first-trade-only sum, or an unsigned accumulation of the
-    swap all miss.
+    The brief's two-day fixture zeroes both terms so its daily returns are exact
+    decimals, which means a cost summary hardcoded to zero would pass every
+    assertion made against it. These two trades carry non-zero charges of their
+    own -- 7 and 11 of commission, -3 and +5 of swap -- so the bundle's totals
+    pin a signed sum: 18 of commission, 2 of swap. A zero, a first-trade-only
+    total, and an unsigned accumulation of the swap (which would read 8) are
+    three different wrong answers and all three fail.
     """
 
     first = _trade(
@@ -301,35 +302,68 @@ def test_realized_returns_are_refused_when_equity_is_not_positive() -> None:
         )
 
 
-def test_a_trade_exiting_after_the_run_window_is_refused() -> None:
-    """The silent drop this prevents: the walk only visits ``start.date()``
-    through ``end.date()``, so post-``end`` P&L would vanish from the series
-    while ``net_pnl`` still counted it -- a series that does not reconcile with
-    the result it claims to describe."""
+def test_a_trade_exiting_after_the_run_window_gets_its_own_day(tmp_path: Path) -> None:
+    """The engine reads one bar past ``request.end`` to warm the last snapshot,
+    so a position opened on the final bar closes *after* ``result.end``. That
+    exit is real P&L, and the series must carry it on its own day rather than
+    refusing the artifact: the sum of every point has to equal ``result.net_pnl``,
+    which counted it."""
 
-    post_end = _trade(
+    final_bar = _trade(
         entry_at=datetime(2024, 1, 3, 12, 0, tzinfo=UTC),
         exit_at=datetime(2024, 1, 4, 9, 0, tzinfo=UTC),
-        gross_pnl=Decimal("5000"),
+        gross_pnl=Decimal("500"),
         commission=Decimal("0"),
         swap=Decimal("0"),
-        net_pnl=Decimal("5000"),
+        net_pnl=Decimal("500"),
+    )
+    earlier = _trade(
+        entry_at=_NOW,
+        exit_at=datetime(2024, 1, 2, 12, 0, tzinfo=UTC),
+        gross_pnl=Decimal("1000"),
+        commission=Decimal("0"),
+        swap=Decimal("0"),
+        net_pnl=Decimal("1000"),
     )
     result = _result(
         start=_NOW,
         end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
-        trades=(post_end,),
-        net_pnl=Decimal("5000"),
+        trades=(earlier, final_bar),
+        net_pnl=Decimal("1500"),
     )
 
-    with pytest.raises(EvidenceIntegrityError):
-        derive_realized_daily_returns(result)
+    points = derive_realized_daily_returns(result)
+
+    assert [point.day.isoformat() for point in points] == [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+    assert points[1].value == Decimal("0.01")
+    assert points[2].value == Decimal("0")
+    assert points[3].value == Decimal("500") / Decimal("101000")
+    # The day-4 base is the equity the earlier days produced, so writing the
+    # divisor as firm_equity + the day-2 P&L states the reconciliation exactly:
+    # 1000 lands on day 2, 500 lands on day 4, and the two are result.net_pnl.
+    # (Compounding the returns instead would divide 500/101000 at the default
+    # 28-digit context and not land back on 1.015, so the check would assert
+    # nothing.)
+    assert points[3].value == Decimal("500") / (result.firm_equity + Decimal("1000"))
+    assert result.net_pnl == Decimal("1500")
+
+    # And it imports, rather than being refused.
+    artifact = _write_outer_artifact(tmp_path, result)
+    store = EvidenceStore(tmp_path / "evidence")
+    outcome = _import(artifact, _fake_ledger(), tmp_path)
+    assert store.read(outcome.evidence_sha256).daily_returns == points
 
 
 def test_a_trade_exiting_before_the_run_window_is_refused() -> None:
-    """The same drop at the other end: an exit before ``start`` is never
-    visited either, and an exit on the first day but earlier than ``start``
-    would be attributed to a day whose equity base is wrong."""
+    """The one out-of-window exit that is not a legitimate engine outcome: a
+    position cannot open on a bar the run never read, and its day precedes the
+    first day the walk visits, so folding it in would attribute P&L to a day that
+    is not in the series at all."""
 
     pre_start = _trade(
         entry_at=datetime(2023, 12, 31, 12, 0, tzinfo=UTC),
@@ -350,14 +384,13 @@ def test_a_trade_exiting_before_the_run_window_is_refused() -> None:
         derive_realized_daily_returns(result)
 
 
-def test_an_artifact_whose_trades_leave_its_window_is_not_imported(tmp_path: Path) -> None:
-    """The derivation is where the rule lives, so the import inherits it: the
-    bundle cannot be built, and nothing is written to the evidence store or
-    appended to the ledger."""
+def test_an_artifact_whose_trade_precedes_its_window_is_not_imported(tmp_path: Path) -> None:
+    """The refusal inherits to the import: the bundle cannot be built, so nothing
+    is written to the evidence store and nothing is appended to the ledger."""
 
-    post_end = _trade(
-        entry_at=datetime(2024, 1, 3, 12, 0, tzinfo=UTC),
-        exit_at=datetime(2024, 1, 4, 9, 0, tzinfo=UTC),
+    pre_start = _trade(
+        entry_at=datetime(2023, 12, 31, 12, 0, tzinfo=UTC),
+        exit_at=datetime(2023, 12, 31, 18, 0, tzinfo=UTC),
         gross_pnl=Decimal("5000"),
         commission=Decimal("0"),
         swap=Decimal("0"),
@@ -366,7 +399,7 @@ def test_an_artifact_whose_trades_leave_its_window_is_not_imported(tmp_path: Pat
     result = _result(
         start=_NOW,
         end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
-        trades=(post_end,),
+        trades=(pre_start,),
         net_pnl=Decimal("5000"),
     )
     artifact = _write_outer_artifact(tmp_path, result)
@@ -613,10 +646,8 @@ def test_legacy_evidence_records_what_it_cannot_know(tmp_path: Path) -> None:
     assert bundle.costs.slippage_cost is None
     # The brief's fixture zeroes both terms, so its totals are zero. The sums
     # themselves are pinned against a result that carries real ones below.
-    assert bundle.costs.commission == sum(
-        (t.commission for t in _result_with_two_trades().trades), Decimal(0)
-    )
-    assert bundle.costs.swap == sum((t.swap for t in _result_with_two_trades().trades), Decimal(0))
+    assert bundle.costs.commission == Decimal("0")
+    assert bundle.costs.swap == Decimal("0")
     # Registration is declared at import time, not backdated to the run.
     assert bundle.provenance.registered_at == _NOW
     assert bundle.provenance.occurred_at == _result_with_two_trades().end
