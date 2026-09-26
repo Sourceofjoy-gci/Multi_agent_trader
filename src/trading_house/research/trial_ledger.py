@@ -49,11 +49,6 @@ def deflation_trial_count(trials: Iterable[Trial]) -> int:
     return sum(1 for _ in trials)
 
 
-class TrialLedger(Protocol):
-    def register(self, trial: Trial) -> None: ...
-    def all_trials(self, spec_id: str) -> Sequence[Trial]: ...
-
-
 class ScopeKind(str, Enum):  # noqa: UP042
     PROTOCOL = "protocol"
     TRIAL = "trial"
@@ -388,3 +383,23 @@ def trial_counters(events: Iterable[LedgerEvent]) -> TrialCounters:
         selection_lotteries=len(selection),
         effective_specifications=len(specifications),
     )
+
+
+class TrialLedger(Protocol):
+    """The five things any trial-ledger consumer may ask of a ledger.
+
+    Read and append, and nothing that hands out a connection or a DSN. The
+    operations that need both -- counting the deflation denominators, reading the
+    chain back to re-check the evidence it names -- are methods here rather than
+    something a caller reaches past the ledger to do, because each of them is
+    one read that has to agree with the chain.
+
+    Declared after the models it names, so every annotation below is a real
+    reference rather than a string a type checker has to be told to trust.
+    """
+
+    def register(self, protocol: TrialProtocol) -> Sequence[TrialSpec]: ...
+    def append(self, event: LedgerEvent) -> LedgerRecord: ...
+    def events_for(self, trial_id: str) -> Sequence[LedgerRecord]: ...
+    def counters(self) -> TrialCounters: ...
+    def verify(self) -> LedgerIntegrityReport: ...

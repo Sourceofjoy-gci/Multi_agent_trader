@@ -32,6 +32,14 @@ payload bytes, which PostgreSQL's JSON text form is not. It is therefore *not* i
 the chain preimage -- a client could store a wrong payload digest and still chain
 correctly -- which is precisely why ``verify`` re-derives it and reports
 ``payload_digest_mismatch`` rather than leaving the column on trust.
+
+The same reasoning applies to every column the append function projects out of
+``event_json``: the chain hash covers the canonical bytes, so a projected column
+that drifts leaves the row chaining perfectly while describing a different event.
+``verify`` therefore re-projects them and reports ``identity_column_mismatch``.
+It is the one check that needed a database rather than a code reading to find,
+which is why the tampering test for it is integration-only: the jsonb check passes
+on exactly the row this catches.
 """
 
 from __future__ import annotations
@@ -422,6 +430,34 @@ def _failure(checked_events: int, reason: str) -> LedgerIntegrityReport:
     return LedgerIntegrityReport(valid=False, checked_events=checked_events, reason=reason)
 
 
+def _row_identity(row: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The columns the append function projects out of ``event_json``, in row order.
+
+    Deliberately every projected column and no others. ``sequence`` and
+    ``recorded_at`` are the database's own, ``canonical_event``/``event_json``/
+    ``previous_hash``/``event_hash``/``payload_sha256``/``spec_sha256`` are
+    checked separately, and what is left is the set whose only source is the
+    client document -- so leaving any of them out is what makes a row able to
+    look intact while describing a different event.
+    """
+
+    return (row[1], row[2], row[3], row[4], row[5], row[6], row[11], row[15], row[16])
+
+
+def _event_identity(event: LedgerEvent) -> tuple[Any, ...]:
+    return (
+        event.event_id,
+        event.scope_kind.value,
+        event.scope_id,
+        event.trial_id,
+        event.attempt_id,
+        event.event_type.value,
+        event.occurred_at,
+        event.legacy,
+        event.legacy_reason,
+    )
+
+
 def _verify_rows(rows: tuple[tuple[Any, ...], ...]) -> LedgerIntegrityReport:
     expected_previous_hash = GENESIS_HASH
     checked_events = 0
@@ -449,6 +485,13 @@ def _verify_rows(rows: tuple[tuple[Any, ...], ...]) -> LedgerIntegrityReport:
                 return _failure(checked_events, "canonical_event_mismatch")
             if not isinstance(row[9], dict) or json.loads(canonical_event) != row[9]:
                 return _failure(checked_events, "event_json_mismatch")
+            # And every column the function projected out of that jsonb must
+            # still say what the jsonb says. Without this a row can be entirely
+            # self-consistent -- hash chain, digests and payload all correct --
+            # while its ``event_id`` column names a different event, and the
+            # ledger's own retry-by-id lookup would then miss it.
+            if _row_identity(row) != _event_identity(event):
+                return _failure(checked_events, "identity_column_mismatch")
 
             if bytes(row[7]) != bytes.fromhex(event.spec_sha256):
                 return _failure(checked_events, "spec_digest_mismatch")

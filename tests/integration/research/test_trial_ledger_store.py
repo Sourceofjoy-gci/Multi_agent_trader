@@ -900,6 +900,10 @@ def test_canonical_bytes_that_do_not_parse_become_an_append_error(
             "event_json_mismatch",
         ),
         (
+            "SET event_id = pg_catalog.gen_random_uuid()",
+            "identity_column_mismatch",
+        ),
+        (
             "SET canonical_event = pg_catalog.convert_to('{\"not\": \"an event\"}', 'UTF8')",
             "event_schema_invalid",
         ),
@@ -911,6 +915,7 @@ def test_canonical_bytes_that_do_not_parse_become_an_append_error(
         "payload",
         "non-canonical-bytes",
         "jsonb",
+        "identity-column",
         "unparseable",
     ],
 )
@@ -928,6 +933,12 @@ def test_every_kind_of_tampering_is_reported_rather_than_raised(
     plain reason. Every reason is exercised, because a verifier that reported one
     canned string for every corruption would pass a single-case test while
     telling an operator nothing.
+
+    The ``identity-column`` case is the one the jsonb check alone cannot catch.
+    Every identity column is projected from ``event_json`` by the append function,
+    so a column that drifts leaves the jsonb agreeing with the canonical bytes and
+    the row still looking intact -- the chain, the digests and the payload all
+    check out, and the row's own ``event_id`` is not the event it stores.
 
     The tamper is done by the *owner* with the trigger disabled, which is the
     only role that can do it -- and is exactly why ``verify()`` cannot assume the

@@ -26,6 +26,7 @@ from trading_house.core.errors import (
     ConfigurationError,
     CoverageError,
     DatabaseUnavailableError,
+    EvidenceIntegrityError,
     InsufficientHistoryError,
     MigrationMismatchError,
     SchemaValidationError,
@@ -40,6 +41,15 @@ from trading_house.core.exits import (
     NoExitPolicy,
 )
 from trading_house.marketdata.models import Bar, BarQuality, IngestOutcome, IngestRun, Timeframe
+from trading_house.research.trial_ledger import (
+    EvidenceSealedPayload,
+    LedgerEvent,
+    LedgerEventType,
+    LedgerIntegrityReport,
+    LedgerRecord,
+    ScopeKind,
+    TrialCounters,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -106,7 +116,7 @@ def test_app_help_lists_every_command_group() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
-    for group in ("constitution", "db", "audit", "data", "order", "guard", "health"):
+    for group in ("constitution", "db", "audit", "data", "order", "guard", "health", "research"):
         assert group in result.stdout
 
 
@@ -1546,3 +1556,438 @@ def test_the_magnitude_ceiling_leaves_ordinary_money_alone(
     result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--firm-equity": "1e12"}))
 
     assert result.exit_code == 0, result.stderr
+
+
+# --- research trial commands -------------------------------------------------
+
+RESEARCH_DSN = "postgresql://runtime:research-super-secret@localhost/trading_house_research"
+
+TRIAL_COMMANDS = ("register", "record", "import-legacy", "show", "count", "verify")
+
+
+@pytest.fixture
+def _research_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both DSNs and no evidence root, so settings resolve to real values."""
+
+    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", FAKE_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", RESEARCH_DSN)
+    monkeypatch.delenv("TRADING_HOUSE_EVIDENCE_ROOT", raising=False)
+
+
+def _ledger_record(trial_id: str, event_type: LedgerEventType) -> LedgerRecord:
+    return LedgerRecord(
+        sequence=1,
+        event_id=uuid4(),
+        scope_kind=ScopeKind.TRIAL,
+        scope_id=trial_id,
+        trial_id=trial_id,
+        attempt_id=None,
+        event_type=event_type,
+        spec_sha256="a" * 64,
+        event_json={"trial_id": trial_id, "event_type": event_type.value},
+        payload_sha256="b" * 64,
+        previous_hash="0" * 64,
+        event_hash="c" * 64,
+        legacy=False,
+        legacy_reason=None,
+        recorded_at=_NINE,
+    )
+
+
+def _sealed_event(trial_id: str, evidence_sha256: str = "d" * 64) -> LedgerEvent:
+    return LedgerEvent(
+        event_id=uuid4(),
+        scope_kind=ScopeKind.ATTEMPT,
+        scope_id=f"attempt-{trial_id}",
+        event_type=LedgerEventType.EVIDENCE_SEALED,
+        trial_id=trial_id,
+        attempt_id=f"attempt-{trial_id}",
+        spec_sha256="a" * 64,
+        occurred_at=_NINE,
+        payload=EvidenceSealedPayload(
+            event_type=LedgerEventType.EVIDENCE_SEALED,
+            attempt_id=f"attempt-{trial_id}",
+            evidence_sha256=evidence_sha256,
+        ),
+    )
+
+
+class _FakeTrialLedger:
+    """The composition the commands actually call into, without PostgreSQL.
+
+    Every method here is one of the five the ``TrialLedger`` protocol names, plus
+    ``replay`` because ``verify`` reads the chain a second time to re-check the
+    evidence files the chain points at.
+    """
+
+    def __init__(
+        self,
+        *,
+        report: LedgerIntegrityReport | None = None,
+        failure: Exception | None = None,
+        records: tuple[LedgerRecord, ...] = (),
+        events: tuple[LedgerEvent, ...] = (),
+    ) -> None:
+        self._report = report
+        self._failure = failure
+        self._records = records
+        self._events = events
+
+    def events_for(self, trial_id: str) -> tuple[LedgerRecord, ...]:
+        return tuple(row for row in self._records if row.trial_id == trial_id)
+
+    def counters(self) -> TrialCounters:
+        return TrialCounters(audit_attempts=3, selection_lotteries=2, effective_specifications=1)
+
+    def verify(self) -> LedgerIntegrityReport:
+        if self._failure is not None:
+            raise self._failure
+        assert self._report is not None
+        return self._report
+
+    def replay(self) -> tuple[LedgerEvent, ...]:
+        if self._failure is not None:
+            raise self._failure
+        return self._events
+
+
+class _FakeEvidenceStore:
+    def __init__(self, failure: Exception | None = None) -> None:
+        self._failure = failure
+        self.verified: list[str] = []
+
+    def verify(self, digest: str) -> None:
+        if self._failure is not None:
+            raise self._failure
+        self.verified.append(digest)
+
+
+def _use_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger: _FakeTrialLedger,
+    evidence: _FakeEvidenceStore | None = None,
+) -> _FakeEvidenceStore:
+    """Swap the two composition helpers the trial commands resolve at call time.
+
+    ``raising=False`` so a command that does not exist yet fails on its own
+    assertions rather than on the patch.
+    """
+
+    store = evidence if evidence is not None else _FakeEvidenceStore()
+    monkeypatch.setattr(cli, "_trial_ledger", lambda: ledger, raising=False)
+    monkeypatch.setattr(cli, "_evidence_store", lambda: store, raising=False)
+    return store
+
+
+def test_research_trial_help_lists_every_trial_command() -> None:
+    result = runner.invoke(cli.app, ["research", "trial", "--help"])
+
+    assert result.exit_code == 0
+    for command in TRIAL_COMMANDS:
+        assert command in result.stdout
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_a_missing_research_dsn_is_a_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second database is optional for every other command and required here.
+
+    The refusal belongs to the trial operation rather than to ``RuntimeSettings``,
+    which every other command also reads -- so ``db check`` still runs on a host
+    that has never held a trial, and ``research trial count`` does not.
+    """
+
+    monkeypatch.delenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", raising=False)
+
+    result = runner.invoke(cli.app, ["research", "trial", "count"])
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_a_trial_command_refuses_before_touching_an_unmigrated_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The migration head is checked before the ledger is constructed.
+
+    Constructing it first would mean a command that reports "the trial was not
+    recorded" for a database that has never had the ledger tables at all, which
+    is a different problem with a different remedy.
+    """
+
+    monkeypatch.setattr(cli, "open_runtime_connection", lambda _: _FakeConnection())
+    monkeypatch.setattr(cli, "assert_at_head", _raiser(MigrationMismatchError()))
+
+    result = runner.invoke(cli.app, ["research", "trial", "count"])
+
+    assert result.exit_code == cli.ExitCode.MIGRATION
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_the_research_dsn_is_the_one_the_trial_commands_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second DSN, not the application one, and never on stdout.
+
+    Both properties are invisible from a passing command: a wiring bug that
+    reached for ``database_dsn`` would read the wrong database, and one that
+    echoed either would put a password in operator output.
+    """
+
+    opened: list[str] = []
+
+    def fail(dsn: Any) -> Any:
+        opened.append(dsn.get_secret_value())
+        raise DatabaseUnavailableError()
+
+    monkeypatch.setattr(cli, "open_runtime_connection", fail)
+
+    result = runner.invoke(cli.app, ["research", "trial", "count"])
+
+    assert result.exit_code == cli.ExitCode.DATABASE
+    assert opened == [RESEARCH_DSN]
+    assert "research-super-secret" not in result.stdout + result.stderr
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_count_reports_the_three_denominators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_ledger(monkeypatch, _FakeTrialLedger())
+
+    result = runner.invoke(cli.app, ["research", "trial", "count"])
+
+    assert result.exit_code == cli.ExitCode.OK
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "audit_attempts": 3,
+        "selection_lotteries": 2,
+        "effective_specifications": 1,
+    }
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_show_replays_only_the_requested_trial(monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_ledger(
+        monkeypatch,
+        _FakeTrialLedger(
+            records=(
+                _ledger_record("trial-1", LedgerEventType.EXECUTION_STARTED),
+                _ledger_record("trial-2", LedgerEventType.RESULT_RECORDED),
+                _ledger_record("trial-1", LedgerEventType.RESULT_RECORDED),
+            )
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["research", "trial", "show", "--trial-id", "trial-1"])
+
+    assert result.exit_code == cli.ExitCode.OK
+    payload = json.loads(result.stdout)
+    assert payload["trial_id"] == "trial-1"
+    assert [event["event_type"] for event in payload["events"]] == [
+        "execution_started",
+        "result_recorded",
+    ]
+    assert {event["trial_id"] for event in payload["events"]} == {"trial-1"}
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_show_is_empty_rather_than_absent_for_an_unknown_trial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trial nobody registered is an empty list, not an error and not a guess.
+
+    The command answers "what does the chain hold for this id", and the chain
+    holding nothing is an answer -- inventing a trial there would be the one
+    thing a reader of the ledger must never do.
+    """
+
+    _use_ledger(monkeypatch, _FakeTrialLedger())
+
+    result = runner.invoke(cli.app, ["research", "trial", "show", "--trial-id", "trial-none"])
+
+    assert result.exit_code == cli.ExitCode.OK
+    assert json.loads(result.stdout)["events"] == []
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_verify_reports_a_valid_chain_and_rechecks_its_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``verify`` is two checks, and the second is the one a hash chain cannot do.
+
+    The chain proves the events were not rewritten; only reading the sealed files
+    proves the evidence they point at still exists and still hashes to its name.
+    A verifier that only did the first would call an emptied evidence store
+    intact.
+    """
+
+    store = _use_ledger(
+        monkeypatch,
+        _FakeTrialLedger(
+            report=LedgerIntegrityReport(valid=True, checked_events=4, reason=None),
+            events=(_sealed_event("trial-1", "e" * 64),),
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["research", "trial", "verify"])
+
+    assert result.exit_code == cli.ExitCode.OK
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "valid": True,
+        "checked_events": 4,
+        "reason": None,
+    }
+    assert store.verified == ["e" * 64]
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_verify_exits_with_the_integrity_code_when_the_chain_is_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_ledger(
+        monkeypatch,
+        _FakeTrialLedger(
+            report=LedgerIntegrityReport(
+                valid=False, checked_events=2, reason="event_hash_mismatch"
+            )
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["research", "trial", "verify"])
+
+    assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_INTEGRITY
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "invalid"
+    assert payload["valid"] is False
+    assert payload["checked_events"] == 2
+    assert payload["reason"] == "event_hash_mismatch"
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_verify_reports_a_broken_chain_rather_than_a_missing_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid chain is reported before any file is read.
+
+    Once the chain has failed, the events it holds are not evidence of anything,
+    so re-checking the files they name would report a second opinion on
+    untrustworthy bytes.
+    """
+
+    store = _use_ledger(
+        monkeypatch,
+        _FakeTrialLedger(
+            report=LedgerIntegrityReport(valid=False, checked_events=0, reason="row_invalid"),
+            events=(_sealed_event("trial-1"),),
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["research", "trial", "verify"])
+
+    assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_INTEGRITY
+    assert store.verified == []
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_verify_maps_an_unreadable_ledger_to_the_integrity_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Nobody could check" must never be reported as "nothing is wrong"."""
+
+    _use_ledger(monkeypatch, _FakeTrialLedger(failure=TrialLedgerIntegrityError()))
+
+    result = runner.invoke(cli.app, ["research", "trial", "verify"])
+
+    assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_INTEGRITY
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_verify_maps_an_unreplayable_chain_to_the_append_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chain verified, so the only remaining failure is a read.
+
+    ``replay`` is a read, and the repository's own rule is that a read which
+    cannot be performed is an append error -- so a script branching on the exit
+    code learns this retry could succeed, unlike an intact-looking broken chain.
+    """
+
+    _use_ledger(
+        monkeypatch,
+        _FakeTrialLedger(
+            report=LedgerIntegrityReport(valid=True, checked_events=1, reason=None),
+            failure=TrialLedgerAppendError(),
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["research", "trial", "verify"])
+
+    assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND
+
+
+@pytest.mark.usefixtures("_research_env")
+def test_trial_verify_maps_a_missing_or_altered_evidence_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use_ledger(
+        monkeypatch,
+        _FakeTrialLedger(
+            report=LedgerIntegrityReport(valid=True, checked_events=1, reason=None),
+            events=(_sealed_event("trial-1"),),
+        ),
+        evidence=_FakeEvidenceStore(failure=EvidenceIntegrityError()),
+    )
+
+    result = runner.invoke(cli.app, ["research", "trial", "verify"])
+
+    assert result.exit_code == cli.ExitCode.EVIDENCE_INTEGRITY
+
+
+@pytest.mark.parametrize(
+    "protocol",
+    [None, "not json at all", "{}"],
+    ids=["missing", "unparseable", "wrong-shape"],
+)
+@pytest.mark.usefixtures("_research_env")
+def test_trial_register_types_an_unreadable_protocol_file(
+    tmp_path: Path, protocol: str | None
+) -> None:
+    """A mistyped path or a hand-edited protocol is input, not an internal failure.
+
+    ``_load_json_model`` is the only place either shape is read, so the typing
+    lives there; without it an ``OSError`` reaches the catch-all and the operator
+    gets "unexpected failure" and a correlation id for a file they cannot open.
+    """
+
+    path = tmp_path / "protocol.json"
+    if protocol is not None:
+        path.write_text(protocol, encoding="utf-8")
+
+    result = runner.invoke(cli.app, ["research", "trial", "register", "--protocol", str(path)])
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "error"
+    assert "correlation_id" not in payload
+
+
+def test_import_legacy_exposes_the_clock_a_retry_must_reuse() -> None:
+    """The orphan window is closed by reusing one ``now``, so it has to be settable.
+
+    The importer writes the evidence bundle *before* it appends, so a crash in
+    between leaves a document nothing references. A retry under a *later* clock
+    would build different bundle bytes and seal a second file; passing the first
+    run's value back makes the retry write the same digest, which
+    ``EvidenceStore.write``'s identical-bytes path collapses onto one file.
+    """
+
+    result = runner.invoke(cli.app, ["research", "trial", "import-legacy", "--help"])
+
+    assert result.exit_code == 0
+    assert "--registered-at" in result.stdout

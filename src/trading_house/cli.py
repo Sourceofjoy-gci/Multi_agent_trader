@@ -80,6 +80,7 @@ from trading_house.core.schemas import (
 )
 from trading_house.core.values import (
     BookId,
+    CanonicalModel,
     IntentState,
     TimeInForce,
 )
@@ -102,8 +103,23 @@ from trading_house.marketdata.store import PostgresBarStore
 from trading_house.ops.backtest import build_backtester, build_strategy
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
+from trading_house.ops.ledger import (
+    build_evidence_store,
+    evidence_sealed_event,
+    research_ledger_dsn,
+    result_recorded_event,
+)
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
+from trading_house.research.evidence import EvidenceBundle, EvidenceStore
+from trading_house.research.ledger_store import PostgresTrialLedger
+from trading_house.research.legacy_import import import_phase7_artifact
+from trading_house.research.trial_ledger import (
+    EvidenceSealedPayload,
+    LedgerRecord,
+    LegacyImportedPayload,
+    TrialProtocol,
+)
 from trading_house.settings import RuntimeSettings
 
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
@@ -179,6 +195,8 @@ data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
 order_app = typer.Typer(no_args_is_help=True, help="Order commands.")
 guard_app = typer.Typer(no_args_is_help=True, help="Position-guard commands.")
 backtest_app = typer.Typer(no_args_is_help=True, help="Backtest commands.")
+research_app = typer.Typer(no_args_is_help=True, help="Research commands.")
+trial_app = typer.Typer(no_args_is_help=True, help="Trial-ledger commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
@@ -186,6 +204,8 @@ app.add_typer(data_app, name="data")
 app.add_typer(order_app, name="order")
 app.add_typer(guard_app, name="guard")
 app.add_typer(backtest_app, name="backtest")
+app.add_typer(research_app, name="research")
+research_app.add_typer(trial_app, name="trial")
 
 
 @app.callback()
@@ -1242,6 +1262,240 @@ def backtest_run(
         }
 
     _run(operation)
+
+
+def _load_json_model[T: CanonicalModel](path: Path, model: type[T]) -> T:
+    """One frozen research document, read from a file an operator names.
+
+    ``model_validate_json`` rather than ``model_validate``: every research
+    contract is strict, so the decimals, timestamps and UUIDs a serialized
+    document carries as strings are only coerced on the JSON path. And the read
+    and decode are typed here rather than left to ``_execute``'s catch-all --
+    a mistyped path or a file that is not UTF-8 is input, not an internal
+    failure, and an ``OSError`` would answer it with a correlation id.
+    """
+
+    try:
+        data = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigurationError() from error
+    return model.model_validate_json(data)
+
+
+def _trial_ledger() -> PostgresTrialLedger:
+    """The research ledger, behind the migration check every trial command shares.
+
+    The check lives here rather than in a constructor because "the database is at
+    the wrong revision" is a command-level answer with its own exit code. A
+    ledger constructed first would report "the trial was not recorded" for a
+    database that has never had the ledger tables at all, which is a different
+    problem with a different remedy.
+
+    Both DSN questions -- which DSN, and whether there is one -- belong to
+    ``ops.ledger``, so that a missing second database stays one refusal at one
+    boundary rather than a second copy of the rule in the composition root.
+    """
+
+    dsn = research_ledger_dsn(_settings())
+    connection = open_runtime_connection(dsn)
+    try:
+        assert_at_head(connection, Config(str(DEFAULT_ALEMBIC_CONFIG)))
+    finally:
+        connection.close()
+    return PostgresTrialLedger(lambda: open_runtime_connection(dsn))
+
+
+def _evidence_store() -> EvidenceStore:
+    return build_evidence_store(_settings())
+
+
+def _event_payload(record: LedgerRecord) -> dict[str, JsonValue]:
+    """One chain row as JSON, carrying the sealed payload inside it.
+
+    The row rather than a re-parsed event, because the row is what the ledger
+    holds: it carries the database's own ``recorded_at``, its two digests, and --
+    through ``event_json`` -- the evidence reference a reader needs. No
+    connection and no DSN is reachable from any of it.
+    """
+
+    return cast(dict[str, JsonValue], record.model_dump(mode="json"))
+
+
+@trial_app.command("register")
+def research_trial_register(
+    protocol: Annotated[Path, typer.Option("--protocol", help="Frozen TrialProtocol JSON.")],
+) -> None:
+    """Seal a frozen trial protocol and its whole candidate family.
+
+    One event, not one per candidate: the candidates are declared together or
+    not at all, and the event's id is derived from the protocol's canonical
+    digest, so re-running this on the same file is a recognised retry rather than
+    a second registration.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        parsed = _load_json_model(protocol, TrialProtocol)
+        trials = _trial_ledger().register(parsed)
+        return {
+            "protocol_id": parsed.protocol_id,
+            "trial_count": len(trials),
+            "trial_ids": [trial.trial_id for trial in trials],
+        }
+
+    _run(operation)
+
+
+@trial_app.command("record")
+def research_trial_record(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+    attempt_id: Annotated[str, typer.Option("--attempt-id")],
+    evidence: Annotated[Path, typer.Option("--evidence", help="Evidence bundle JSON.")],
+) -> None:
+    """Seal one attempt's evidence and record that it was written.
+
+    The bundle is the single source of identity, so ``--trial-id`` and
+    ``--attempt-id`` are checked against it rather than trusted: a row whose
+    ``trial_id`` column disagreed with the payload it seals is exactly what
+    nothing else in this system would notice.
+
+    The evidence is written before the events are appended, so a failed append
+    leaves a document nothing points at rather than a ledger row whose document
+    is missing. Both events are derived from the bundle, and both ids are
+    deterministic, so a retried ``record`` is one event read back.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        bundle = _load_json_model(evidence, EvidenceBundle)
+        if bundle.trial_id != trial_id or bundle.attempt_id != attempt_id:
+            raise SchemaValidationError()
+        stored = _evidence_store().write(bundle)
+        ledger = _trial_ledger()
+        ledger.append(result_recorded_event(bundle))
+        ledger.append(evidence_sealed_event(bundle, stored.sha256))
+        return {"trial_id": trial_id, "evidence_sha256": stored.sha256}
+
+    _run(operation)
+
+
+@trial_app.command("import-legacy")
+def research_trial_import_legacy(
+    artifact: Annotated[Path, typer.Option("--artifact", help="Phase 7 outer result JSON.")],
+    registered_at: Annotated[
+        datetime | None,
+        typer.Option(
+            "--registered-at",
+            help=(
+                "Declared import clock, UTC (e.g. 2026-03-01T12:00:00). Pass the "
+                "first run's value when retrying: a later clock builds different "
+                "bundle bytes, and the retry would seal a second evidence file."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Import one preserved Phase 7 result as the legacy evidence it is.
+
+    Never a registration: the event is ``LEGACY_IMPORTED`` and says why it is
+    late. Idempotent by source result digest, so a second import adds no trial,
+    attempt, or selection candidate -- and it answers with the digest the chain
+    actually recorded rather than the one this run would have written.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        result = import_phase7_artifact(
+            artifact,
+            ledger=_trial_ledger(),
+            evidence=_evidence_store(),
+            # Read once, and the same value on every call within this process, so
+            # a retry that reaches the bundle again derives identical bytes.
+            # ``_as_utc`` because a timestamp typed on a command line is naive
+            # and the bundle's provenance refuses a naive one -- the same
+            # convention every other UTC option in this file uses.
+            now=_as_utc(registered_at) if registered_at is not None else datetime.now(UTC),
+        )
+        return {
+            "trial_id": result.trial_id,
+            "source_result_sha256": result.source_result_sha256,
+            "evidence_sha256": result.evidence_sha256,
+            "already_present": result.already_present,
+        }
+
+    _run(operation)
+
+
+@trial_app.command("show")
+def research_trial_show(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Replay one trial's chain rows, and the evidence they reference.
+
+    A trial nobody declared is an empty list rather than an error: the question
+    is what the chain holds for this id, and inventing a trial to answer it would
+    be the one thing a reader of the ledger must never do.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        events = _trial_ledger().events_for(trial_id)
+        return {
+            "trial_id": trial_id,
+            "events": cast(list[JsonValue], [_event_payload(record) for record in events]),
+        }
+
+    _run(operation)
+
+
+@trial_app.command("count")
+def research_trial_count() -> None:
+    """Report the three deflation denominators, counted from the chain.
+
+    Attempts, selection lotteries, and effective specifications answer different
+    questions and are tracked separately: a repeated execution raises the audit
+    count without being a new lottery, and that distinction is the reason these
+    are three numbers rather than one.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        counters = _trial_ledger().counters()
+        return {
+            "audit_attempts": counters.audit_attempts,
+            "selection_lotteries": counters.selection_lotteries,
+            "effective_specifications": counters.effective_specifications,
+        }
+
+    _run(operation)
+
+
+@trial_app.command("verify")
+def research_trial_verify() -> None:
+    """Verify the event chain, then re-read every file the chain points at.
+
+    Two checks, and the second is the one a hash chain cannot do for itself: the
+    hashes prove the events were not rewritten, and only reading the sealed
+    bundles proves the evidence they name still exists and still hashes to its
+    own name. A chain failure is reported rather than raised, because an operator
+    asking "is this intact?" needs a plain reason, not a stack trace.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        ledger = _trial_ledger()
+        report = ledger.verify()
+        if not report.valid:
+            return {
+                "valid": False,
+                "checked_events": report.checked_events,
+                "reason": report.reason,
+            }
+        evidence = _evidence_store()
+        for event in ledger.replay():
+            # A broken chain's events are not evidence of anything, which is why
+            # this loop only runs once the report says the chain is intact.
+            if isinstance(event.payload, (EvidenceSealedPayload, LegacyImportedPayload)):
+                evidence.verify(event.payload.evidence_sha256)
+        return {"valid": True, "checked_events": report.checked_events, "reason": None}
+
+    payload = _execute(operation)
+    _emit(payload, status="ok" if payload["valid"] else "invalid")
+    if not payload["valid"]:
+        raise typer.Exit(code=int(ExitCode.TRIAL_LEDGER_INTEGRITY))
 
 
 if __name__ == "__main__":  # pragma: no cover
