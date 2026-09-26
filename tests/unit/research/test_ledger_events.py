@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -8,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 from trading_house.core.errors import SchemaValidationError
 from trading_house.marketdata.models import Timeframe
 from trading_house.research.backtest.costs import CostModel
-from trading_house.research.canonical import canonical_bytes, canonical_sha256
+from trading_house.research.canonical import DOMAIN_SEPARATOR, canonical_bytes, canonical_sha256
 from trading_house.research.trial_ledger import (
     CostSpec,
     DataSpec,
@@ -107,6 +108,23 @@ def test_canonical_bytes_are_sorted_compact_utf8_and_reject_nan() -> None:
     assert encoded.startswith(b'{"agent_run_id":"run-1"')
     assert b", " not in encoded
     assert canonical_sha256(protocol) == canonical_sha256(protocol)
+
+
+def test_a_research_digest_is_domain_separated() -> None:
+    """A known answer, because the prefix is the only thing standing between
+    the research chain and the audit chain.
+
+    Without the domain prefix this digest is a plain SHA-256 over the canonical
+    bytes, which is a shape the audit chain also produces. With it, the same
+    model hashes to something no other chain in this codebase emits.
+    """
+
+    protocol = _protocol()
+    encoded = canonical_bytes(protocol)
+
+    assert DOMAIN_SEPARATOR == b"trading-house:research:v1"
+    assert canonical_sha256(protocol) == hashlib.sha256(DOMAIN_SEPARATOR + encoded).hexdigest()
+    assert canonical_sha256(protocol) != hashlib.sha256(encoded).hexdigest()
 
 
 def test_canonical_bytes_refuse_a_non_finite_float() -> None:
