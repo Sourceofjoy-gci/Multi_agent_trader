@@ -79,12 +79,24 @@ BACKTEST_ALLOWED = frozenset(
     }
 )
 RESEARCH_ROOT = SOURCE_ROOT / "research"
-# The wider envelope Phase 8A gave research/, and the reason it is an allowlist
-# rather than a denylist again: a research module that could reach brokers/,
-# execution/ or agents/ could place an order, write to the live intent ledger or
-# run agent-authored code while claiming to be analysis. Those three are
-# examples; the rule is the set below, and widening it is then a decision
+# An allowlist, not a denylist again: a research module that could reach
+# brokers/, execution/ or agents/ could place an order, write to the live intent
+# ledger or run agent-authored code while claiming to be analysis. Those three
+# are examples; the rule is the set below, and widening it is then a decision
 # somebody makes on purpose.
+#
+# All seven entries are granted by this phase's specification (the Phase 8A
+# plan, Task 6 Step 2) rather than chosen from what the code happens to do today.
+# ``database`` and ``strategies`` are in that list and no module under research/
+# imports either one -- the ledger's ConnectionFactory is injected by cli.py and
+# nothing here calls ``open_runtime_connection``; and nothing here compares a
+# candidate against the strategy registry. They are reserved: a later phase that
+# does need them widens nothing, and the import that eventually needs it is a use
+# of an already-granted permission rather than a change to the boundary. Keeping
+# an entry whose reach is not yet exercised is the point -- narrowing this set to
+# the five packages currently imported would be the more informative guard and
+# the wrong one, because it would fail a legitimate future module for importing
+# something the specification already permits.
 #
 # research/backtest/ is covered by this loop too, and deliberately is not
 # narrowed by it. BACKTEST_ALLOWED above is the stricter statement about that
@@ -580,11 +592,12 @@ def test_the_research_import_guard_can_still_fail(statement: str) -> None:
 def test_the_research_import_guard_permits_what_the_spec_permits(statement: str) -> None:
     """Guard the guard, the other direction -- which only an allowlist needs.
 
-    Pins the exact set the envelope above grants, so narrowing it is as visible
-    as widening it. ``database`` and ``strategies`` are the two this phase
-    widened, and they are here because a ledger that could not open a connection
-    or a research package that could not name a registered strategy would not be
-    the ledger this phase documents.
+    Pins the exact set the specification grants, so narrowing it is as visible
+    as widening it. ``database`` and ``strategies`` are pinned here even though
+    no module under research/ imports either: they are permitted, not required,
+    and a positive case for each is what lets a future phase drop one by deleting
+    a line, rather than by discovering afterwards which positive case had been
+    load-bearing.
     """
 
     assert _reaches_outside(ast.parse(statement + "\n"), RESEARCH_ALLOWED) == set()
@@ -593,14 +606,26 @@ def test_the_research_import_guard_permits_what_the_spec_permits(statement: str)
 def test_the_backtest_boundary_is_not_widened_by_the_research_one() -> None:
     """Guard the guard, across the two guards.
 
-    research/ is the parent of research/backtest/, and RESEARCH_ALLOWED is wider
-    than BACKTEST_ALLOWED on purpose -- so a widening of the outer envelope that
-    nobody meant as one would silently relax the backtest boundary if only the
-    outer set were checked over the whole package. This pins the relation the
-    comment beside RESEARCH_ALLOWED claims: every backtest-allowed root is either
-    a research-allowed root or lives under one, so the two guards compose to
-    "whichever is stricter" for the subtree they share, and the backtester's own
-    ``database``/``strategies`` refusals cannot be undone from outside.
+    research/ is the parent of research/backtest/, so this loop reads the
+    backtester's files against a set that names more roots than the backtester's
+    own. A widening of this set that nobody meant as one would then relax the
+    backtest boundary, if the backtest guard were not also running. Four
+    assertions pin exactly that, and each says one thing:
+
+    * ``BACKTEST_ROOT.is_relative_to(RESEARCH_ROOT)`` -- both loops really do
+      reach the same files, so the composition below is not vacuous.
+    * ``BACKTEST_ALLOWED - RESEARCH_ALLOWED`` is at most the single entry
+      ``trading_house.research.backtest``. That is the one name the backtester
+      may hold without the research set naming it, and only because
+      ``trading_house.research`` already covers it by prefix. Any other
+      difference would be a root this guard does not cover at all.
+    * ``database`` and ``strategies`` are absent from ``BACKTEST_ALLOWED``. The
+      research set grants them; the backtest set does not, and the two reserved
+      entries must not be usable to undo that refusal from outside.
+    * Taken together: every root the backtester permits is one the research
+      guard also permits, so for the shared subtree the effective boundary is
+      ``BACKTEST_ALLOWED`` -- the stricter of the two -- and no change confined
+      to ``RESEARCH_ALLOWED`` can widen it.
     """
 
     assert BACKTEST_ROOT.is_relative_to(RESEARCH_ROOT)

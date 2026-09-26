@@ -101,10 +101,13 @@ The runtime role cannot `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER` or
 function, which serialises on an advisory lock and computes the chain hash in
 the database. Triggers reject row mutation and truncation as defence in depth.
 
-The same three roles exist in both databases, and the same separation holds in
-each. `trading_house_runtime` holds exactly `SELECT` on
-`research.trial_ledger_events` and `EXECUTE` on the append function there — no
-`INSERT`, no `UPDATE`, and no `SELECT` on the head-cache table. See
+The same three roles exist in both databases and the same separation holds in
+each. On the two ledger tables specifically, `trading_house_runtime` holds
+`SELECT` on `research.trial_ledger_events`, nothing at all on the
+`research.trial_ledger_heads` cache, and `EXECUTE` on the append function — no
+`INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` on either. That claim is scoped to
+those tables, because the research database carries the full migration history
+and the role holds `INSERT` on several other tables there. See
 [Phase 8A](#phase-8a--canonical-evidence-and-trial-ledger).
 
 Database owners and superusers can always alter PostgreSQL data, so permissions
@@ -752,13 +755,28 @@ leaves undone.
 | `trading_house_research` | The trial ledger only: `research.trial_ledger_events` and its head cache |
 
 The split is operational, not a security boundary. Both databases run the *same*
-migration history and both are reached by the same `trading_house_runtime` role,
-so what separates the ledger from the live plane is the absence of `INSERT` — not
-which database the rows are in. What the second database buys is that the ledger
-can be backed up, restored, migrated or dropped on its own schedule, and that no
-migration of the application schema can disturb it. `docker compose` creates it
-from `TRADING_HOUSE_RESEARCH_DATABASE` (default `trading_house_research`) on a
-fresh cluster only; remove the volume and re-initialise if you change it later.
+migration history, so `trading_house_research` contains the **full migrated
+schema** — `audit`, `memory`, `research`, `marketdata`, `execution` and the rest —
+and `trading_house_runtime` reaches both with the grants it has in the
+application database. In particular that role *does* hold `INSERT` on
+`research.trials`, `memory.agent_beliefs`, `marketdata.bars`,
+`marketdata.ingest_runs`, `execution.intent_events` and
+`execution.position_events` in the research database. What keeps the ledger
+append-only is narrower than that: on the two ledger tables the runtime role
+holds no write privilege at all. What the second database buys is that the
+ledger can be backed up, restored, migrated or dropped on its own schedule, and
+that no migration of the application schema can disturb it.
+`docker compose` creates it from `TRADING_HOUSE_RESEARCH_DATABASE` (default
+`trading_house_research`) on a fresh cluster only; remove the volume and
+re-initialise if you change it later.
+
+**Nothing in Phase 8A writes `research.trials`.** That is the legacy
+Phase 0.5 table the deprecated `Trial`/`deflation_trial_count` models describe;
+the trial ledger replaced it with `research.trial_ledger_events`, and no
+migration, command or store in this phase touches the old one. It is still
+migrated, and the runtime role can still insert into it — that is inherited from
+`0002`, not granted by this phase, and it is the clearest example of why the
+privilege separation above is stated per table rather than per database.
 
 ### Configuration
 
@@ -787,12 +805,19 @@ from one can never be replayed into the other.
 
 ### Append-only, and fail-closed
 
-- **The runtime role holds no write privilege at all** in the research database
-  — not `INSERT`, none. The chain advances only through
-  `research.append_trial_ledger_event`, which is `SECURITY DEFINER` with
-  `search_path` pinned to `pg_catalog` and computes the event hash server-side
-  from the sequence and previous hash it holds under an advisory lock. Triggers
-  reject row mutation and truncation, and the owner role is `NOLOGIN`.
+- **The runtime role holds no write privilege at all on the two ledger tables** —
+  no `INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` on
+  `research.trial_ledger_events` or `research.trial_ledger_heads`, in either
+  database. The chain advances only through `research.append_trial_ledger_event`,
+  which is `SECURITY DEFINER` with `search_path` pinned to `pg_catalog` and
+  computes the event hash server-side from the sequence and previous hash it
+  holds under an advisory lock. Triggers reject row mutation and truncation, and
+  the owner role is `NOLOGIN`. Scoped to those two tables on purpose: the
+  research database runs the full migration history, so the same role *does*
+  hold `INSERT` on `research.trials`, `memory.agent_beliefs`,
+  `marketdata.bars`, `marketdata.ingest_runs`, `execution.intent_events` and
+  `execution.position_events` there. No code in Phase 8A writes any of them, and
+  no code in this repository writes `research.trials` at all.
 - **Every trial command refuses if the ledger database is not at Alembic head**
   (exit 5), *before* the first evidence byte is written. A database that has
   never had the ledger tables cannot record the seal either, so writing first
