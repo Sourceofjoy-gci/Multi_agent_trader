@@ -28,7 +28,6 @@ from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.result import BacktestResult, SimulatedTrade
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceStore
-from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.legacy_import import (
     LegacyImportResult,
     derive_realized_daily_returns,
@@ -45,6 +44,7 @@ from trading_house.research.trial_ledger import (
     ReturnSeriesBasis,
     ScopeKind,
     TrialCounters,
+    TrialLedger,
     TrialSpec,
     trial_counters,
 )
@@ -223,7 +223,7 @@ def _fake_ledger() -> FakeLedger:
 
 
 def _record(event: LedgerEvent) -> LedgerRecord:
-    """The row ``PostgresTrialLedger.events_for`` actually returns: the same
+    """The row the ledger's ``events_for`` actually returns: the same
     event with the chain's columns around it and the payload still JSON text.
 
     ``sequence`` and ``recorded_at`` are the two columns the *database* assigns,
@@ -274,7 +274,7 @@ class FakeRecordLedger:
 def _import(artifact: Path, ledger: FakeLedger, tmp_path: Path) -> LegacyImportResult:
     return import_phase7_artifact(
         artifact,
-        ledger=cast(PostgresTrialLedger, ledger),
+        ledger=cast(TrialLedger, ledger),
         evidence=EvidenceStore(tmp_path / "evidence"),
         now=_NOW,
     )
@@ -421,7 +421,7 @@ def test_import_verifies_the_original_result_digest(tmp_path: Path) -> None:
     with pytest.raises(EvidenceIntegrityError):
         import_phase7_artifact(
             artifact,
-            ledger=cast(PostgresTrialLedger, _fake_ledger()),
+            ledger=cast(TrialLedger, _fake_ledger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )
@@ -439,7 +439,7 @@ def test_import_refuses_a_result_that_disagrees_with_its_digest(tmp_path: Path) 
     with pytest.raises(EvidenceIntegrityError):
         import_phase7_artifact(
             artifact,
-            ledger=cast(PostgresTrialLedger, _fake_ledger()),
+            ledger=cast(TrialLedger, _fake_ledger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )
@@ -471,7 +471,7 @@ def test_a_failed_phase7_artifact_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EvidenceIntegrityError):
         import_phase7_artifact(
             tmp_path / "phase7.json",
-            ledger=cast(PostgresTrialLedger, _fake_ledger()),
+            ledger=cast(TrialLedger, _fake_ledger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )
@@ -481,7 +481,7 @@ def test_a_missing_artifact_is_an_integrity_error(tmp_path: Path) -> None:
     with pytest.raises(EvidenceIntegrityError) as error:
         import_phase7_artifact(
             tmp_path / "absent.json",
-            ledger=cast(PostgresTrialLedger, _fake_ledger()),
+            ledger=cast(TrialLedger, _fake_ledger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )
@@ -497,7 +497,7 @@ def test_a_truncated_artifact_is_an_integrity_error(tmp_path: Path) -> None:
     with pytest.raises(EvidenceIntegrityError) as error:
         import_phase7_artifact(
             tmp_path / "phase7.json",
-            ledger=cast(PostgresTrialLedger, _fake_ledger()),
+            ledger=cast(TrialLedger, _fake_ledger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )
@@ -513,7 +513,7 @@ def test_an_artifact_whose_result_does_not_parse_is_refused(tmp_path: Path) -> N
     with pytest.raises(EvidenceIntegrityError) as error:
         import_phase7_artifact(
             tmp_path / "phase7.json",
-            ledger=cast(PostgresTrialLedger, _fake_ledger()),
+            ledger=cast(TrialLedger, _fake_ledger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )
@@ -549,7 +549,7 @@ def test_a_second_import_under_a_different_clock_reports_the_recorded_digest(
 
     later = import_phase7_artifact(
         artifact,
-        ledger=cast(PostgresTrialLedger, ledger),
+        ledger=cast(TrialLedger, ledger),
         evidence=EvidenceStore(tmp_path / "evidence"),
         now=_NOW + timedelta(days=30),
     )
@@ -587,7 +587,7 @@ def test_idempotency_reads_the_recorded_digest_back_out_of_a_ledger_row(
 
     second = import_phase7_artifact(
         artifact,
-        ledger=cast(PostgresTrialLedger, ledger),
+        ledger=cast(TrialLedger, ledger),
         evidence=EvidenceStore(tmp_path / "evidence"),
         now=_NOW,
     )
@@ -617,7 +617,7 @@ def test_a_chain_row_the_importer_cannot_read_is_refused(tmp_path: Path) -> None
     with pytest.raises(EvidenceIntegrityError) as error:
         import_phase7_artifact(
             artifact,
-            ledger=cast(PostgresTrialLedger, BrokenRowLedger()),
+            ledger=cast(TrialLedger, BrokenRowLedger()),
             evidence=EvidenceStore(tmp_path / "evidence"),
             now=_NOW,
         )

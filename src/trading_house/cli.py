@@ -1360,16 +1360,30 @@ def research_trial_record(
 
     The evidence is written before the events are appended, so a failed append
     leaves a document nothing points at rather than a ledger row whose document
-    is missing. Both events are derived from the bundle, and both ids are
-    deterministic, so a retried ``record`` is one event read back.
+    is missing -- the unreferenced side of that pair is the recoverable one. Both
+    events are derived from the bundle, and both ids are deterministic, so a
+    retried ``record`` is one event read back.
     """
 
     def operation() -> dict[str, JsonValue]:
         bundle = _load_json_model(evidence, EvidenceBundle)
         if bundle.trial_id != trial_id or bundle.attempt_id != attempt_id:
             raise SchemaValidationError()
-        stored = _evidence_store().write(bundle)
+        # The ledger is resolved -- and the migration head checked -- before the
+        # first byte is written. A database that has never had the ledger tables
+        # cannot record the seal either, so writing first would leave a document
+        # behind for a command that then refuses to name it.
         ledger = _trial_ledger()
+        stored = _evidence_store().write(bundle)
+        # ponytail: two appends, two transactions. A crash between them commits
+        # RESULT_RECORDED without EVIDENCE_SEALED, and ``verify()`` still reports
+        # a valid chain -- the bytes it holds are intact, only the reference to
+        # the file is absent, and a verifier is asked whether the ledger lies,
+        # not whether it is complete. Re-running ``record`` with the same bundle
+        # closes the pair, because both event ids are content-derived. The fix is
+        # one store transaction appending both events; it changes
+        # ``PostgresTrialLedger``'s public surface, so add ``append_all(events)``
+        # when an operator is bitten, not before.
         ledger.append(result_recorded_event(bundle))
         ledger.append(evidence_sealed_event(bundle, stored.sha256))
         return {"trial_id": trial_id, "evidence_sha256": stored.sha256}

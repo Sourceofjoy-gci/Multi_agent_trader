@@ -20,6 +20,7 @@ Two things only a real database can catch, and both are here for that reason:
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
@@ -28,9 +29,11 @@ from typing import Any
 
 import psycopg
 import pytest
+from alembic import command
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
+from tests.conftest import DatabaseHarness
 from trading_house import cli
 from trading_house.core.exits import NoExitPolicy
 from trading_house.core.schemas import Side
@@ -249,12 +252,33 @@ def _write_phase7_artifact(path: Path, result: BacktestResult) -> Path:
 def research_env(
     monkeypatch: pytest.MonkeyPatch, research_ledger_dsn: str, research_evidence_root: Path
 ) -> Path:
-    """The two DSNs and the evidence root, read from the environment like production."""
+    """The two DSNs and an emptied evidence root, read from the environment like production.
 
+    The root is cleared here rather than merely pointed at, because half of this
+    file's assertions are an exact count of the files under it -- "one import, one
+    file" and "a refused record wrote nothing" are only statements if the root
+    started empty. ``research_evidence_root`` is already per-test, so this makes
+    the isolation a property of the assertion rather than an accident of the
+    fixture's scope.
+    """
+
+    shutil.rmtree(research_evidence_root, ignore_errors=True)
+    research_evidence_root.mkdir(parents=True)
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", research_ledger_dsn)
     monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", research_ledger_dsn)
     monkeypatch.setenv("TRADING_HOUSE_EVIDENCE_ROOT", str(research_evidence_root))
     return research_evidence_root
+
+
+def _drop_research_schema(database: DatabaseHarness) -> None:
+    """Leave the research database with no schema at all.
+
+    What a host that has never run ``alembic upgrade head`` looks like, and the
+    state ``assert_at_head`` exists to refuse. ``isolated_research_ledger``
+    re-upgrades the database in its teardown, whether this test passes or fails.
+    """
+
+    command.downgrade(database.research_alembic_config, "base")
 
 
 def _store(root: Path) -> EvidenceStore:
@@ -306,6 +330,12 @@ def _import_legacy(path: Path, clock: str = _IMPORT_CLOCK_ARGUMENT) -> dict[str,
     return json.loads(result.stdout)
 
 
+def _import_legacy_on_the_default_clock(path: Path) -> Any:
+    """The command as an operator runs it: no ``--registered-at`` at all."""
+
+    return runner.invoke(cli.app, ["research", "trial", "import-legacy", "--artifact", str(path)])
+
+
 def _verify() -> Any:
     return runner.invoke(cli.app, ["research", "trial", "verify"])
 
@@ -341,6 +371,39 @@ def test_registering_the_same_protocol_twice_adds_no_second_candidate(
 
 
 # --- record ------------------------------------------------------------------
+
+
+def test_record_on_an_unmigrated_ledger_leaves_no_evidence_behind(
+    tmp_path: Path, research_env: Path, database: DatabaseHarness
+) -> None:
+    """The migration check runs before the first byte is written.
+
+    A host that has never run ``alembic upgrade head`` cannot record the seal
+    either, so writing first would leave a document on disk that no ledger row
+    references and that the operator was told nothing about. The order is the
+    whole assertion here: the exit code alone would be satisfied either way.
+    """
+
+    bundle = _write_json(tmp_path / "bundle.json", _bundle("trial-1", "attempt-1", _result()))
+    _drop_research_schema(database)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "record",
+            "--trial-id",
+            "trial-1",
+            "--attempt-id",
+            "attempt-1",
+            "--evidence",
+            str(bundle),
+        ],
+    )
+
+    assert result.exit_code == cli.ExitCode.MIGRATION
+    assert not list(research_env.rglob("*.json"))
 
 
 def test_record_writes_the_bundle_and_seals_its_digest(
@@ -514,6 +577,51 @@ def test_a_repeated_import_under_the_same_clock_cannot_add_a_second_file(
 
     assert len(list(research_env.rglob("*.json"))) == 1
     assert len(_ledger(research_ledger_dsn).events()) == 1
+
+
+def test_import_legacy_on_the_default_clock_declares_a_fresh_time_and_stays_idempotent(
+    tmp_path: Path, research_env: Path, research_ledger_dsn: str
+) -> None:
+    """The command an operator actually runs, with no ``--registered-at`` at all.
+
+    The wall-clock default is a *fresh declared* time, not a memoised one and not
+    the run's own end: bracketing the invocation with two clock reads here is what
+    pins that without depending on the platform's tick resolution. What matters
+    for idempotency is that the default does not need to be stable at all -- the
+    retry recognises its own event by the source result digest and answers from
+    the row the chain holds, so a later clock never produces a second trial, a
+    second attempt, or a second file. That is the property the option exists to
+    *strengthen* (the crash-window orphan), not to create.
+    """
+
+    artifact = _write_phase7_artifact(tmp_path / "phase7.json", _result())
+
+    before = datetime.now(UTC)
+    first_result = _import_legacy_on_the_default_clock(artifact)
+    after = datetime.now(UTC)
+
+    assert first_result.exit_code == cli.ExitCode.OK, first_result.stderr
+    first = json.loads(first_result.stdout)
+    assert first["already_present"] is False
+    assert first["trial_id"] == f"legacy-{_result().digest()[:16]}"
+
+    sealed = _store(research_env).read(first["evidence_sha256"])
+    assert before <= sealed.provenance.registered_at <= after
+    assert sealed.provenance.registration_state is RegistrationState.LEGACY_UNPREGISTERED
+    assert sealed.provenance.occurred_at == _result().end
+
+    # A second invocation on a later wall clock: recognised, unchanged, and
+    # writing nothing.
+    second = json.loads(_import_legacy_on_the_default_clock(artifact).stdout)
+    records = _ledger(research_ledger_dsn).events()
+
+    assert second["already_present"] is True
+    assert second["trial_id"] == first["trial_id"]
+    assert second["evidence_sha256"] == first["evidence_sha256"]
+    assert [record.event_type for record in records] == [LedgerEventType.LEGACY_IMPORTED]
+    assert records[0].trial_id == first["trial_id"]
+    assert len(list(research_env.rglob("*.json"))) == 1
+    assert _verify().exit_code == cli.ExitCode.OK
 
 
 def test_two_artifacts_import_as_two_independent_trials(

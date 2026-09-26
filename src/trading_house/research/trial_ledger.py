@@ -386,13 +386,22 @@ def trial_counters(events: Iterable[LedgerEvent]) -> TrialCounters:
 
 
 class TrialLedger(Protocol):
-    """The five things any trial-ledger consumer may ask of a ledger.
+    """The six things any trial-ledger consumer may ask of a ledger.
 
     Read and append, and nothing that hands out a connection or a DSN. The
     operations that need both -- counting the deflation denominators, reading the
     chain back to re-check the evidence it names -- are methods here rather than
     something a caller reaches past the ledger to do, because each of them is
     one read that has to agree with the chain.
+
+    ``events_for`` answers rows and ``replay`` answers events, and that asymmetry
+    is the store's, not an oversight: a row is what the chain holds (it carries
+    the database's own ``recorded_at`` and both digests), while ``replay`` exists
+    so a caller can re-derive the payloads ``events_for`` leaves as JSON text --
+    which is what the CLI's ``verify`` does to re-read every sealed document.
+    Both are here rather than split across a second interface, because there is
+    one ledger and one chain, and a consumer that needed only part of it would
+    still be reading that chain.
 
     Declared after the models it names, so every annotation below is a real
     reference rather than a string a type checker has to be told to trust.
@@ -403,3 +412,4 @@ class TrialLedger(Protocol):
     def events_for(self, trial_id: str) -> Sequence[LedgerRecord]: ...
     def counters(self) -> TrialCounters: ...
     def verify(self) -> LedgerIntegrityReport: ...
+    def replay(self) -> Sequence[LedgerEvent]: ...

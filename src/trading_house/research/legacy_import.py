@@ -53,7 +53,6 @@ from trading_house.research.evidence import (
     EvidenceProvenance,
     EvidenceStore,
 )
-from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     HoldoutState,
@@ -64,6 +63,7 @@ from trading_house.research.trial_ledger import (
     RegistrationState,
     ReturnSeriesBasis,
     ScopeKind,
+    TrialLedger,
     TrialSpec,
 )
 
@@ -193,7 +193,7 @@ def _verified_artifact(path: Path) -> tuple[BacktestResult, str]:
 def _recorded_event(entry: LedgerEvent | LedgerRecord) -> LedgerEvent:
     """The event behind one chain row.
 
-    ``PostgresTrialLedger.events_for`` returns ``LedgerRecord`` and a test double
+    The ledger's ``events_for`` returns ``LedgerRecord`` and a test double
     returns ``LedgerEvent``; only the second has a parsed payload. Both carry the
     same jsonb, and re-parsing it through the JSON path is what ``ledger_store``
     does for the same reason -- a strict model will not accept the strings that
@@ -208,9 +208,7 @@ def _recorded_event(entry: LedgerEvent | LedgerRecord) -> LedgerEvent:
         raise EvidenceIntegrityError() from error
 
 
-def _recorded_evidence_sha256(
-    ledger: PostgresTrialLedger, trial_id: str, event_id: UUID
-) -> str | None:
+def _recorded_evidence_sha256(ledger: TrialLedger, trial_id: str, event_id: UUID) -> str | None:
     """The evidence digest this import already recorded, or ``None``.
 
     Read from the chain rather than recomputed, because the bundle is not a pure
@@ -242,7 +240,7 @@ def _recorded_evidence_sha256(
 def import_phase7_artifact(
     path: Path,
     *,
-    ledger: PostgresTrialLedger,
+    ledger: TrialLedger,
     evidence: EvidenceStore,
     now: datetime,
 ) -> LegacyImportResult:
@@ -291,7 +289,7 @@ def import_phase7_artifact(
         # be a fabricated specification.
         parameter_space=(),
     )
-    # A TrialSpec, not a TrialProtocol. ``PostgresTrialLedger.register`` seals a
+    # A TrialSpec, not a TrialProtocol. The ledger's ``register`` seals a
     # whole protocol and digests that, so its ``spec_sha256`` covers the data,
     # execution, cost, validation and holdout specs as well as the candidate
     # family. A legacy artifact has no such envelope -- there was no protocol --
