@@ -775,11 +775,17 @@ table, and the live public `Trial` and `deflation_trial_count` models describe
 it — they are not deprecated, and nothing under `src/` writes the table. What
 changed is the *role*, not the models: the ledger computes its own deflation
 denominators with `trial_counters(events)`, counting from the chain, and
-`research.trial_ledger_events` is what a trial is now recorded in. The table is
-still migrated, the runtime role can still insert into it (inherited from `0002`,
-not granted by this phase), and the memory-migration integration test does
-exactly that to prove the `0002` grants still hold. It is the clearest example of
-why the privilege separation above is stated per table rather than per database.
+`research.trial_ledger_events` is what a trial is now recorded in.
+
+The table is still migrated, and the runtime role still holds the `INSERT` on it
+that `0002` granted — inherited, not granted by this phase. No test asserts that
+privilege today: the memory-migration suite's append-only test connects as the
+migrator and does `SET ROLE trading_house_owner` to put a row in place so the
+row-level trigger has something to fire on, then rolls back. The ledger tables
+are the one place in this repository where a role's privileges *are* asserted
+against the migration that grants them
+(`tests/integration/research/test_trial_ledger_store.py`), which is why the
+separation above is stated per table rather than per database.
 
 ### Configuration
 
