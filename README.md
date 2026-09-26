@@ -76,8 +76,17 @@ automatically at startup.
 uv run alembic -x url=postgresql+psycopg://trading_house_migrator:PASSWORD@127.0.0.1/trading_house upgrade head
 ```
 
-If you prefer, set `sqlalchemy.url` in `alembic.ini` for local use. Do not commit
-a password into that file.
+Phase 8A added a **second database**, `trading_house_research`, and it is a
+second deployment target for the *same* migration history — not a schema of its
+own. Migrate it too, or every `research trial` command refuses with exit code 5:
+
+```bash
+uv run alembic -x url=postgresql+psycopg://trading_house_migrator:PASSWORD@127.0.0.1/trading_house_research upgrade head
+```
+
+Both databases must sit at the same head. If you prefer, set `sqlalchemy.url`
+in `alembic.ini` for local use — once per database — and do not commit a
+password into that file.
 
 ## Database authority separation
 
@@ -85,12 +94,18 @@ a password into that file.
 |---|---|---|
 | `trading_house_owner` | no | Own the schema; created by migrations |
 | `trading_house_migrator` | yes | Assume the owner role and run migrations |
-| `trading_house_runtime` | yes | Connect, `SELECT` the ledger, `EXECUTE audit.append_event`, read `alembic_version` |
+| `trading_house_runtime` | yes | Connect, `SELECT` the ledger, `EXECUTE audit.append_event` and `EXECUTE research.append_trial_ledger_event`, read `alembic_version` |
 
 The runtime role cannot `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER` or
 `DROP` the ledger. Append authority exists only through the security-definer
 function, which serialises on an advisory lock and computes the chain hash in
 the database. Triggers reject row mutation and truncation as defence in depth.
+
+The same three roles exist in both databases, and the same separation holds in
+each. `trading_house_runtime` holds exactly `SELECT` on
+`research.trial_ledger_events` and `EXECUTE` on the append function there — no
+`INSERT`, no `UPDATE`, and no `SELECT` on the head-cache table. See
+[Phase 8A](#phase-8a--canonical-evidence-and-trial-ledger).
 
 Database owners and superusers can always alter PostgreSQL data, so permissions
 alone are not presented as tamper-proof. The independently recomputed hash chain
@@ -721,6 +736,183 @@ saved result digests and run IDs above are the evidence of those three runs.
   numeric options below one. No boundary failure carries free text from a DSN,
   path, or broker message.
 
+## Phase 8A — Canonical evidence and trial ledger
+
+Phase 8A makes one promise: **every trial the foundry runs is recorded before it
+runs, its evidence is sealed to a digest, and neither can be edited afterwards.**
+It is the bookkeeping half of Phase 8. It implements no validation, no
+statistics and no promotion, and the last section below says exactly what that
+leaves undone.
+
+### Two databases, and why
+
+| Database | Role |
+|---|---|
+| `trading_house` | The application database: audit chain, intents, positions, bars, agent runs |
+| `trading_house_research` | The trial ledger only: `research.trial_ledger_events` and its head cache |
+
+The split is operational, not a security boundary. Both databases run the *same*
+migration history and both are reached by the same `trading_house_runtime` role,
+so what separates the ledger from the live plane is the absence of `INSERT` — not
+which database the rows are in. What the second database buys is that the ledger
+can be backed up, restored, migrated or dropped on its own schedule, and that no
+migration of the application schema can disturb it. `docker compose` creates it
+from `TRADING_HOUSE_RESEARCH_DATABASE` (default `trading_house_research`) on a
+fresh cluster only; remove the volume and re-initialise if you change it later.
+
+### Configuration
+
+| Variable | Meaning |
+|---|---|
+| `TRADING_HOUSE_RESEARCH_LEDGER_DSN` | The trial ledger's connection string. **Optional** in `RuntimeSettings` — only a `research trial` command needs it, so `order submit` and `guard run` start on a host that has never run a trial. Its absence is a `configuration invalid` (exit 2) at the single boundary that cannot work without it. |
+| `TRADING_HOUSE_EVIDENCE_ROOT` | Where sealed evidence bundles live. Content-addressed: `<root>/<first two hex>/<digest>.json`. Defaults to `.local/evidence`, which is gitignored. |
+
+Neither is read from `.env`; export them into your shell like the rest of
+`TRADING_HOUSE_*`. See `.env.example` for both.
+
+### What is stored, and what it means
+
+An **evidence bundle** is one attempt's complete evidence: the backtest result it
+came from, the return series and cost attribution derived from that result, and
+the provenance that says when and under which registration state it was
+produced. It is serialised canonically — sorted keys, compact separators, no
+NaN — and addressed by a domain-separated SHA-256, so the digest is **not** a
+bare `sha256sum` of the file. The store is a CAS with no index: the path *is* the
+index, so a copied or rsynced root is still verifiable with no repair step.
+
+A **ledger event** is one fact about one trial, appended to a PostgreSQL hash
+chain under a second, different domain separator from the audit chain
+(`trading-house:trial-ledger:v1` against `trading-house:audit:v1`), so a digest
+from one can never be replayed into the other.
+
+### Append-only, and fail-closed
+
+- **The runtime role holds no write privilege at all** in the research database
+  — not `INSERT`, none. The chain advances only through
+  `research.append_trial_ledger_event`, which is `SECURITY DEFINER` with
+  `search_path` pinned to `pg_catalog` and computes the event hash server-side
+  from the sequence and previous hash it holds under an advisory lock. Triggers
+  reject row mutation and truncation, and the owner role is `NOLOGIN`.
+- **Every trial command refuses if the ledger database is not at Alembic head**
+  (exit 5), *before* the first evidence byte is written. A database that has
+  never had the ledger tables cannot record the seal either, so writing first
+  would leave a document behind for a command that then refuses to name it.
+- **An outcome against an undeclared trial is refused** (exit 15). `RESULT_RECORDED`,
+  `FAILED` and `EVIDENCE_SEALED` are admissible only against a trial some
+  `preregistered` protocol declared, or an explicit legacy import. Containment,
+  not a column: a protocol seals its whole candidate family inside one event.
+- **A protocol with no candidate family is refused.** No candidates is not "one
+  candidate whose values are unknown" — a trial that is not declared cannot be
+  counted, and that is the denominator every later statistic divides by.
+- **A lost race is told apart from a lost write.** The caller submits the head it
+  chained onto; if that head has moved the database raises 40001 and the caller
+  retries the *same* event. Silently appending onto a head the caller never saw
+  would let it believe its event sits where it does not. An event id is an
+  identity, not a receipt, so a genuine retry is idempotent rather than a
+  spurious conflict.
+- **An existing digest is never overwritten with different bytes.** The publish
+  is an `os.link`, which is the only publish that is atomic *and* refuses to
+  clobber, so the check and the publish are one step. Two writers producing the
+  same bytes both succeed; two producing different documents at one digest is a
+  conflict, and it raises rather than picking a winner.
+- **Verification answers with a reason; being unable to verify is not an
+  answer.** A detected chain break is reported as `{"valid": false, "reason":
+  …}` with exit 16. A ledger that could not be *read* raises exit 16 as well, so
+  a script cannot mistake "nobody could check" for "nothing is wrong".
+- **Absences are recorded as absences.** No dataset hash, partial cost
+  attribution with spread and slippage left `null`, a return series of realized
+  closed trades over UTC calendar days — never a mark-to-market series, and never
+  a plausible-looking zero where nothing was measured.
+
+### The Phase 7 runs, imported as legacy evidence
+
+The three completed Phase 7 arms are not preregistrations, and importing them
+does not pretend otherwise. Each becomes a `LEGACY_IMPORTED` event flagged
+`legacy`, with `RegistrationState.LEGACY_UNPREGISTERED` and
+`HoldoutState.CONTAMINATED` in its provenance — never a synthesised
+`PREREGISTERED` event, and `registered_at` is the operator's import clock rather
+than the run's own timestamps, because a date typed in after the fact cannot
+order anything.
+
+| Arm | Result digest | Status |
+|---|---|---|
+| `none` | `a10b0fa43fc4ddb0185b3a376caab7c9369ec49e3e347d13171d31ab989f022b` | `LEGACY_UNPREGISTERED` |
+| `fixed_target` | `fe5efadef7f5ea2448957e0bec507f2133755df676ade140b05a120cfb5fbc6b` | `LEGACY_UNPREGISTERED` |
+| `chandelier` | `69867de09ef3993e5aabca78b225b21bb1ef82a4aa4fbcd63a9fd52dfe2e0c54` | `LEGACY_UNPREGISTERED` |
+
+All three lost money after costs. The import is idempotent by source result
+digest — a second import adds no trial, attempt or selection candidate, and
+answers with the digest *the chain recorded* rather than the one that run would
+have written. The artifact's own `digest` field is re-derived from the result it
+carries before the file is read at all, so a result edited after the run still
+carries 64 hex characters and is still refused.
+
+**A legacy import is a `TrialSpec`, not a `TrialProtocol`.** The ledger's
+`register` seals a whole protocol and digests that, so its `spec_sha256` covers
+the data, execution, cost, validation and holdout specs too; a Phase 7 artifact
+has no such envelope, so its digest covers the one candidate's declaration and
+nothing else. The two digests are different kinds of address and must never be
+compared as if they were the same.
+
+### Commands
+
+Six commands, all under `research trial`. Every one of them is read-only on the
+filesystem except `record` and `import-legacy`, which write evidence.
+
+```bash
+# Seal a frozen protocol and its whole candidate family -- one event, not one per candidate.
+uv run trading-house research trial register --protocol protocol.json
+
+# Seal one attempt's evidence and record that it was written.
+uv run trading-house research trial record \
+  --trial-id trial-1 --attempt-id attempt-1 --evidence bundle.json
+
+# Import one preserved Phase 7 result. Pass the FIRST run's --registered-at on
+# any retry: a later clock derives different bundle bytes and would seal a
+# second evidence file for the same result.
+uv run trading-house research trial import-legacy \
+  --artifact none.json --registered-at 2026-03-01T12:00:00
+
+# Replay one trial's chain rows. A trial nobody declared is an empty list, not
+# an error: the question is what the chain holds for that id.
+uv run trading-house research trial show --trial-id trial-1
+
+# The three deflation denominators, counted from the chain rather than kept.
+uv run trading-house research trial count
+
+# Re-derive every hash, then re-read every file the chain points at.
+uv run trading-house research trial verify
+```
+
+- **`register`** takes a frozen `TrialProtocol` JSON document and writes one
+  `preregistered` event whose id is derived from the protocol's canonical
+  digest, so re-running it on the same file is a recognised retry rather than a
+  second registration. `occurred_at` is the end of the declared data window, not
+  a wall clock, for the same reason.
+- **`record`** takes an `EvidenceBundle` JSON document. The bundle is the single
+  source of identity, so `--trial-id` and `--attempt-id` are *checked against it*
+  rather than trusted. Evidence is written before the events are appended: a
+  failed append then leaves a document nothing points at rather than a ledger row
+  whose document is missing.
+- **`count`** reports three numbers, not one: audit attempts, selection
+  lotteries, and effective specifications. A repeated execution raises the audit
+  count without being a new lottery, and that distinction is why they are three.
+
+### What Phase 8A does not implement
+
+**It imports evidence; it does not analyse it.** There is no walk-forward
+analysis, no Deflated Sharpe Ratio, no Probability of Backtest Overfitting, no
+combinatorially-purged cross-validation, and no promotion gate. The
+`ValidationSpec` a protocol must declare records those *parameters* — fold
+counts, purge and embargo hours, bootstrap replicates — and nothing in this
+repository consumes them yet. `StrategyPackage.stage` exists and is
+unreachable; `GATE_DECIDED` is a payload type no command emits.
+
+The three deflation denominators are counted and readable today, which is the
+part everything later divides by. Everything that divides by them lands in a
+later phase, and until it does, no strategy in this repository can pass a
+promotion gate because there is no promotion gate.
+
 ## Operator commands
 
 ```bash
@@ -736,6 +928,12 @@ uv run trading-house --help
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
 | `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
+| `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
+| `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal |
+| `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
+| `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
+| `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |
+| `trading-house research trial verify` | Re-derive the chain hashes, then re-read every sealed bundle |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on
@@ -821,6 +1019,9 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 7 | `audit append failed` | The append transaction did not complete | Check connectivity and privileges; the ledger is unchanged because appends are transactional |
 | 8 | `broker terminal unavailable` | MetaTrader 5 is not running, will not initialise, or the server-clock probe read a stale tick from a closed market | Start the terminal and log in. During the venue step of `health` this degrades to "not performed" rather than failing the gate |
 | 9 | `refusing to operate a non-demo account` | The terminal reports a real or contest account | **Stop.** Log into a demo account. This never degrades to a skipped step — it is the one venue failure that fails the gate |
+| 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an outcome against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race |
+| 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
+| 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates

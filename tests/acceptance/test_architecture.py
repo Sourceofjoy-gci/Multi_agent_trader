@@ -78,6 +78,32 @@ BACKTEST_ALLOWED = frozenset(
         "trading_house.research.backtest",
     }
 )
+RESEARCH_ROOT = SOURCE_ROOT / "research"
+# The wider envelope Phase 8A gave research/, and the reason it is an allowlist
+# rather than a denylist again: a research module that could reach brokers/,
+# execution/ or agents/ could place an order, write to the live intent ledger or
+# run agent-authored code while claiming to be analysis. Those three are
+# examples; the rule is the set below, and widening it is then a decision
+# somebody makes on purpose.
+#
+# research/backtest/ is covered by this loop too, and deliberately is not
+# narrowed by it. BACKTEST_ALLOWED above is the stricter statement about that
+# subtree and is still enforced on its own, so backtest/ ends up held to
+# whatever the two agree on -- and the note on BACKTEST_ALLOWED that research/
+# is admitted there at research.backtest rather than whole still stands. A
+# widening of this envelope that was not meant as one therefore cannot relax the
+# backtester, because that subtree is held by both.
+RESEARCH_ALLOWED = frozenset(
+    {
+        "trading_house.core",
+        "trading_house.database",
+        "trading_house.features",
+        "trading_house.marketdata",
+        "trading_house.research",
+        "trading_house.risk",
+        "trading_house.strategies",
+    }
+)
 STRATEGIES_ROOT = SOURCE_ROOT / "strategies"
 STRATEGIES_ALLOWED = frozenset(
     {
@@ -485,6 +511,107 @@ def test_the_backtest_import_guard_permits_what_the_spec_permits(statement: str)
     """
 
     assert _reaches_outside(ast.parse(statement + "\n"), BACKTEST_ALLOWED) == set()
+
+
+def test_no_research_module_imports_outside_its_allowlist() -> None:
+    """research/ may reach core/, database/, features/, marketdata/, its own
+    modules, risk/ and strategies/ -- and nothing else this project owns.
+
+    The ledger and the evidence store are the reason this envelope is wider than
+    the backtester's: sealing a trial needs the same PostgreSQL and the same
+    stored bars the run was built from, and comparing a candidate against the
+    registry's strategies is what a research module is for. The boundary that
+    has to hold is the one at brokers/, execution/ and agents/: a research
+    process that could send an order, write to the live intent ledger, or run
+    agent-authored code would not be research, and the phrase "it is only
+    analysis" is exactly the claim that must be made unfalsifiable by the
+    import graph rather than trusted.
+    """
+
+    offenders: dict[str, list[str]] = {}
+    for path, tree in _parsed():
+        if not path.is_relative_to(RESEARCH_ROOT):
+            continue
+        reached = _reaches_outside(tree, RESEARCH_ALLOWED)
+        if reached:
+            offenders[path.relative_to(PROJECT_ROOT).as_posix()] = sorted(reached)
+
+    assert offenders == {}
+
+
+def test_the_research_package_is_not_empty() -> None:
+    """Guard the guard: an empty research/ would make the loop above pass
+    vacuously, so a passing check reflects clean code rather than no code."""
+
+    assert sorted(RESEARCH_ROOT.rglob("*.py"))
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.brokers.mt5.gateway import Mt5Gateway",
+        "import trading_house.brokers",
+        "from trading_house.execution.manager import OrderManager",
+        "from trading_house.agents.providers.base import AgentRun",
+        "from trading_house.constitution.signing import sign_bytes",
+        "import trading_house",
+    ],
+)
+def test_the_research_import_guard_can_still_fail(statement: str) -> None:
+    """Guard the guard: prove the detector flags a real import, so a passing
+    check reflects research/ staying clean rather than a detector gone blind."""
+
+    assert _reaches_outside(ast.parse(statement + "\n"), RESEARCH_ALLOWED)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from trading_house.research.backtest.result import BacktestResult",
+        "from trading_house.database.connection import open_runtime_connection",
+        "from trading_house.core.errors import ConfigurationError",
+        "from trading_house.marketdata.models import Bar",
+        "from trading_house.features.sessions import Session",
+        "from trading_house.risk.engine import RiskEngine",
+        "from trading_house.strategies.spec import StrategySpec",
+        "import json",
+    ],
+)
+def test_the_research_import_guard_permits_what_the_spec_permits(statement: str) -> None:
+    """Guard the guard, the other direction -- which only an allowlist needs.
+
+    Pins the exact set the envelope above grants, so narrowing it is as visible
+    as widening it. ``database`` and ``strategies`` are the two this phase
+    widened, and they are here because a ledger that could not open a connection
+    or a research package that could not name a registered strategy would not be
+    the ledger this phase documents.
+    """
+
+    assert _reaches_outside(ast.parse(statement + "\n"), RESEARCH_ALLOWED) == set()
+
+
+def test_the_backtest_boundary_is_not_widened_by_the_research_one() -> None:
+    """Guard the guard, across the two guards.
+
+    research/ is the parent of research/backtest/, and RESEARCH_ALLOWED is wider
+    than BACKTEST_ALLOWED on purpose -- so a widening of the outer envelope that
+    nobody meant as one would silently relax the backtest boundary if only the
+    outer set were checked over the whole package. This pins the relation the
+    comment beside RESEARCH_ALLOWED claims: every backtest-allowed root is either
+    a research-allowed root or lives under one, so the two guards compose to
+    "whichever is stricter" for the subtree they share, and the backtester's own
+    ``database``/``strategies`` refusals cannot be undone from outside.
+    """
+
+    assert BACKTEST_ROOT.is_relative_to(RESEARCH_ROOT)
+    # Stated as the difference rather than as an ordering: the backtest set may
+    # name ``trading_house.research.backtest`` only because it is *narrower* than
+    # the research set's ``trading_house.research``, and that one entry is the
+    # whole of what it adds.
+    backtest_only = BACKTEST_ALLOWED - RESEARCH_ALLOWED
+    assert backtest_only <= {"trading_house.research.backtest"}
+    assert "trading_house.database" not in BACKTEST_ALLOWED
+    assert "trading_house.strategies" not in BACKTEST_ALLOWED
 
 
 def test_no_strategy_module_imports_outside_its_allowlist() -> None:
