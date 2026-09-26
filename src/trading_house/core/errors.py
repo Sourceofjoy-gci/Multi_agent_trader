@@ -77,6 +77,19 @@ class AuditIntegrityError(TradingHouseError):
     public_message = "audit integrity verification failed"
 
 
+class EvidenceIntegrityError(TradingHouseError):
+    """Raised when stored research evidence is missing, altered, or not the
+    canonical bytes its digest names.
+
+    Deliberately uninformative. The public message says only that verification
+    failed; the ``OSError`` or parse failure that caused it stays on the private
+    ``__cause__`` for an operator reading a log, because the filesystem path that
+    failed is not something to echo back out of a failed seal.
+    """
+
+    public_message = "evidence integrity verification failed"
+
+
 class BrokerUnavailableError(TradingHouseError):
     """Raised when the broker terminal cannot be reached or initialised."""
 

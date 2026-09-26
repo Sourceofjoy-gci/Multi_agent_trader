@@ -1,6 +1,14 @@
 """The strategy foundry boundary: what a candidate strategy is, and what it took to get there."""
 
 from trading_house.research.canonical import canonical_bytes, canonical_sha256
+from trading_house.research.evidence import (
+    CostSummary,
+    DailyReturnPoint,
+    EvidenceBundle,
+    EvidenceProvenance,
+    EvidenceStore,
+    StoredEvidence,
+)
 from trading_house.research.packages import PromotionStage, StrategyPackage, StrategySpec
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
@@ -24,6 +32,11 @@ from trading_house.research.trial_ledger import (
 
 __all__ = [
     "CostAttributionStatus",
+    "CostSummary",
+    "DailyReturnPoint",
+    "EvidenceBundle",
+    "EvidenceProvenance",
+    "EvidenceStore",
     "HoldoutState",
     "LedgerEvent",
     "LedgerEventType",
@@ -33,6 +46,7 @@ __all__ = [
     "RegistrationState",
     "ReturnSeriesBasis",
     "ScopeKind",
+    "StoredEvidence",
     "StrategyPackage",
     "StrategySpec",
     "Trial",
