@@ -107,7 +107,7 @@ def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPo
 
     The walk runs to ``max(end.date(), every exit day)``, not to
     ``end.date()``. ``BacktestResult.end`` is ``request.end``, and
-    ``BacktestEngine._replay_bars`` asks the store for one bar more than that:
+    ``Backtester._replay_bars`` asks the store for one bar more than that:
     ``request.start``/``end`` are inclusive bar open times while the store's range
     is half-open, so it moves the end forward a bar's duration
     (``horizon = request.end + duration(timeframe)``). A position opened on the
