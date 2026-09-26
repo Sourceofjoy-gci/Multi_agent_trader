@@ -25,6 +25,12 @@ class RuntimeSettings(BaseSettings):
     )
 
     database_dsn: SecretStr
+    # Optional because only a research-ledger operation needs a second
+    # database. Required here, `order submit` and `guard run` would refuse to
+    # start on a host that has never run a trial; `ops/ledger.py` turns its
+    # absence into a ConfigurationError at the one boundary that needs it.
+    research_ledger_dsn: SecretStr | None = None
+    evidence_root: Path = Path(".local/evidence")
     constitution_path: Path = Path("config/risk_constitution.yaml")
     constitution_signature_path: Path = Path("config/risk_constitution.yaml.sig")
     constitution_public_key_path: Path = Path("config/risk_constitution.public.pem")

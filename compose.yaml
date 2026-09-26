@@ -7,6 +7,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD}
       TRADING_HOUSE_MIGRATION_PASSWORD: ${TRADING_HOUSE_MIGRATION_PASSWORD:?set TRADING_HOUSE_MIGRATION_PASSWORD}
       TRADING_HOUSE_RUNTIME_PASSWORD: ${TRADING_HOUSE_RUNTIME_PASSWORD:?set TRADING_HOUSE_RUNTIME_PASSWORD}
+      # Phase 8A: the trial ledger gets its own database, so a process that can
+      # read live positions cannot read what the foundry tried and discarded.
+      TRADING_HOUSE_RESEARCH_DATABASE: trading_house_research
       TZ: UTC
       PGTZ: UTC
     ports:

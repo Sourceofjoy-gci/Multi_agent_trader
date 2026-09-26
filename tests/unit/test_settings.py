@@ -32,6 +32,8 @@ def _clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for suffix in (
         "DATABASE_DSN",
+        "RESEARCH_LEDGER_DSN",
+        "EVIDENCE_ROOT",
         "CONSTITUTION_PATH",
         "CONSTITUTION_SIGNATURE_PATH",
         "CONSTITUTION_PUBLIC_KEY_PATH",
@@ -113,3 +115,47 @@ def test_settings_are_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValidationError):
         settings.database_dsn = SecretStr("replaced")
+
+
+def test_research_dsn_is_optional_for_non_trial_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a research-ledger operation may demand a second database.
+
+    Required here, every command that is not a trial -- `order submit`,
+    `audit verify`, `guard run` -- would fail to start without one.
+    """
+
+    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
+
+    settings = RuntimeSettings()
+
+    assert settings.research_ledger_dsn is None
+    assert settings.evidence_root == Path(".local/evidence")
+
+
+def test_research_dsn_and_evidence_root_are_read_from_the_prefixed_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_EVIDENCE_ROOT", "C:/evidence")
+
+    settings = RuntimeSettings()
+
+    assert settings.research_ledger_dsn is not None
+    assert settings.research_ledger_dsn.get_secret_value() == SECRET_DSN
+    assert settings.evidence_root == Path("C:/evidence")
+
+
+def test_the_research_dsn_is_never_rendered_in_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", SECRET_DSN)
+    monkeypatch.setenv("TRADING_HOUSE_RESEARCH_LEDGER_DSN", SECRET_DSN)
+
+    settings = RuntimeSettings()
+
+    assert (
+        "super-secret-password" not in f"{settings!r} {settings} {settings.research_ledger_dsn!r}"
+    )

@@ -31,6 +31,8 @@ from trading_house.core.errors import (
     SchemaValidationError,
     SignatureVerificationError,
     TradingHouseError,
+    TrialLedgerAppendError,
+    TrialLedgerIntegrityError,
 )
 from trading_house.core.exits import (
     ChandelierPolicy,
@@ -318,6 +320,18 @@ def test_exit_codes_are_distinct_per_failure_domain() -> None:
     assert cli.EXIT_CODES[AuditAppendError] == cli.ExitCode.AUDIT_APPEND
     assert cli.EXIT_CODES[SchemaValidationError] == cli.ExitCode.CONFIGURATION
     assert cli.EXIT_CODES[CoverageError] == cli.ExitCode.COVERAGE
+
+
+def test_the_two_trial_ledger_domains_have_their_own_exit_codes() -> None:
+    """A refused append and an unreadable ledger are different operator problems.
+
+    One means "this trial was not recorded, do not treat it as run"; the other
+    means "nobody can currently say whether any of it is intact". A script that
+    cannot tell them apart retries the wrong one.
+    """
+
+    assert cli.EXIT_CODES[TrialLedgerAppendError] == cli.ExitCode.TRIAL_LEDGER_APPEND
+    assert cli.EXIT_CODES[TrialLedgerIntegrityError] == cli.ExitCode.TRIAL_LEDGER_INTEGRITY
 
 
 def test_insufficient_history_is_distinguishable_from_missing_coverage() -> None:

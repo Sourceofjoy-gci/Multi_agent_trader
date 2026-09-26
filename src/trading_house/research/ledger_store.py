@@ -1,0 +1,419 @@
+"""The trial ledger's PostgreSQL repository: append, read, replay, verify.
+
+The audit repository is the template for every decision here, because it
+already answers the question this chain asks -- how does a process append to a
+hash chain it is not allowed to hold the keys to? -- and its answers were
+reviewed. Three of them are worth restating:
+
+* **One connection per operation, committed by the context manager.** The store
+  never calls ``commit`` or ``rollback``; a transaction that ends because an
+  exception left the ``with`` block is the only rollback there is, so a failed
+  append cannot leave a partial row behind.
+* **Failures are one error.** Every driver failure becomes
+  ``TrialLedgerAppendError`` with a credential-free private cause. The driver's
+  own message names the constraint or the connection string, which is exactly
+  what must not be echoed out of a refused append.
+* **The chain is the authority, not a summary row.** The head the store submits
+  is re-derived from the last event in the chain rather than read from
+  ``research.trial_ledger_heads``, so no role is trusted to keep a mutable
+  counter in step with the events. The heads table exists for the function to
+  lock under the advisory lock, and the runtime holds no privilege on it.
+
+The optimistic read-then-append is what makes concurrent writers work without a
+client-side lock: each writer reads the head, submits it, and is told 40001 if
+somebody else committed in between. Retrying the *same* event is safe because
+an event's identity is derived from its content, so the function recognises a
+retry by id before it compares heads. Retrying a *new* event id would be a
+different event, and that is a caller's bug rather than a race to paper over.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import struct
+from typing import Any, Never, Protocol
+from uuid import NAMESPACE_URL, uuid5
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from trading_house.core.errors import TrialLedgerAppendError
+from trading_house.research.canonical import canonical_bytes, canonical_sha256
+from trading_house.research.trial_ledger import (
+    LedgerEvent,
+    LedgerEventType,
+    LedgerIntegrityReport,
+    LedgerRecord,
+    PreregisteredPayload,
+    RegistrationState,
+    ScopeKind,
+    TrialCounters,
+    TrialProtocol,
+    TrialSpec,
+    trial_counters,
+)
+
+# The chain's own separator, and not ``research.canonical``'s: this chain links
+# a sequence and a previous hash, so its preimage has three parts the evidence
+# chain's has not got. Matching the value migration 0007 hashes with is the only
+# thing that keeps a Python-computed hash equal to a database-computed one, and
+# every ``verify()`` that passes is that agreement being tested.
+DOMAIN_SEPARATOR = b"trading-house:trial-ledger:v1"
+GENESIS_HASH = bytes(32)
+
+# ponytail: eight writers can each lose the race to the seven that commit ahead
+# of them, so a three-retry budget can refuse a run that raced nothing. This is
+# a liveness budget, not a safety property -- the chain check is what keeps the
+# ledger correct, and every attempt still submits the same deterministic event.
+MAX_STALE_HEAD_RETRIES = 8
+
+# The column list is written out in full, in the table's own order, and the row
+# indexes below are positions in it. ``SELECT *`` from the append function uses
+# that same order, so the two readers cannot disagree about a column -- and a
+# column list that did drift would fail every test that reads a record, rather
+# than quietly returning the wrong digest.
+_ROW_WIDTH = 17
+_ALL_EVENTS_SQL = (
+    "SELECT sequence, event_id, scope_kind, scope_id, trial_id, attempt_id, event_type, "
+    "spec_sha256, canonical_event, event_json, payload_sha256, occurred_at, "
+    "recorded_at, previous_hash, event_hash, legacy_import, legacy_reason "
+    "FROM research.trial_ledger_events ORDER BY sequence"
+)
+_TRIAL_EVENTS_SQL = (
+    "SELECT sequence, event_id, scope_kind, scope_id, trial_id, attempt_id, event_type, "
+    "spec_sha256, canonical_event, event_json, payload_sha256, occurred_at, "
+    "recorded_at, previous_hash, event_hash, legacy_import, legacy_reason "
+    "FROM research.trial_ledger_events WHERE trial_id = %s ORDER BY sequence"
+)
+_TAIL_HASH_SQL = (
+    "SELECT event_hash FROM research.trial_ledger_events ORDER BY sequence DESC LIMIT 1"
+)
+# An outcome recorded against a trial is only admissible if that trial was
+# declared, either by a preregistered protocol naming it as a candidate or by an
+# explicit legacy import. Containment, not a column: a protocol seals its whole
+# candidate family inside one event, so "was this trial declared" is a question
+# about the payload's contents.
+_LINEAGE_SQL = """
+SELECT EXISTS (
+    SELECT 1
+    FROM research.trial_ledger_events
+    WHERE (event_type = 'legacy_imported' AND trial_id = %s)
+       OR (event_type = 'preregistered' AND event_json @> %s::pg_catalog.jsonb)
+)
+"""
+_OUTCOME_EVENT_TYPES = frozenset(
+    {
+        LedgerEventType.RESULT_RECORDED,
+        LedgerEventType.FAILED,
+        LedgerEventType.EVIDENCE_SEALED,
+    }
+)
+
+
+class ConnectionFactory(Protocol):
+    """Open one distinct runtime connection for a repository operation."""
+
+    def __call__(self) -> psycopg.Connection[tuple[Any, ...]]: ...
+
+
+class _LedgerStoreFailure(Exception):
+    """Credential- and event-free diagnostic cause for store failures."""
+
+
+class _OperationFailure:
+    """Non-sensitive sentinel returned after discarding an operation failure."""
+
+
+class _StaleHead(_OperationFailure):
+    """A concurrent append moved the head; the same event may be retried."""
+
+
+class _UnregisteredTrial(Exception):
+    """Internal marker: the trial this outcome names was never declared."""
+
+
+_OPERATION_FAILED = _OperationFailure()
+_STALE_HEAD = _StaleHead()
+
+
+def compute_event_hash(sequence: int, previous_hash: bytes, canonical_event: bytes) -> bytes:
+    """Hash one ledger event the way ``0007`` does, byte for byte.
+
+    Signed big-endian int64 for the sequence, because that is what
+    ``pg_catalog.int8send`` produces; anything else is a different preimage and
+    a verifier that agreed with itself while disagreeing with the database would
+    be worse than no verifier at all.
+    """
+
+    return hashlib.sha256(
+        DOMAIN_SEPARATOR + struct.pack(">q", sequence) + previous_hash + canonical_event
+    ).digest()
+
+
+def _event_from_canonical(canonical_event: bytes) -> LedgerEvent:
+    """Rebuild an event from the bytes, not from the jsonb.
+
+    The canonical bytes are the chain's own representation, and the function
+    refuses to store a row whose bytes and jsonb disagree -- so parsing the
+    bytes is parsing the authority. It also sidesteps a trap the models set
+    deliberately: ``CanonicalModel`` is strict, so a UUID or a timestamp that
+    arrives as a JSON string is only coerced on the JSON path, and
+    ``model_validate`` on the jsonb column would refuse every row.
+    """
+
+    return LedgerEvent.model_validate_json(canonical_event)
+
+
+def _record_from_row(row: tuple[Any, ...] | None) -> LedgerRecord:
+    if row is None or len(row) != _ROW_WIDTH:
+        raise ValueError("trial ledger database returned an invalid row")
+    return LedgerRecord(
+        sequence=row[0],
+        event_id=row[1],
+        # The CHECK constraints make these two closed sets in the database and
+        # the models make them closed in Python, so a value the column accepted
+        # and the model does not is a schema change, not a row to guess at: it
+        # raises here and becomes one TrialLedgerAppendError.
+        scope_kind=ScopeKind(row[2]),
+        scope_id=row[3],
+        trial_id=row[4],
+        attempt_id=row[5],
+        event_type=LedgerEventType(row[6]),
+        spec_sha256=bytes(row[7]).hex(),
+        event_json=row[9],
+        payload_sha256=bytes(row[10]).hex(),
+        previous_hash=bytes(row[13]).hex(),
+        event_hash=bytes(row[14]).hex(),
+        legacy=row[15],
+        legacy_reason=row[16],
+        recorded_at=row[12],
+    )
+
+
+def _close_connection(connection: psycopg.Connection[tuple[Any, ...]]) -> bool:
+    try:
+        connection.close()
+    except Exception:
+        return False
+    return True
+
+
+def _read_rows(
+    connection_factory: ConnectionFactory,
+    query: str,
+    parameters: tuple[Any, ...] | None,
+) -> tuple[tuple[Any, ...], ...] | _OperationFailure:
+    connection: psycopg.Connection[tuple[Any, ...]] | None = None
+    outcome: tuple[tuple[Any, ...], ...] | _OperationFailure = _OPERATION_FAILED
+    try:
+        connection = connection_factory()
+        with connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute(query, parameters)
+            outcome = tuple(cursor.fetchall())
+    except Exception:
+        outcome = _OPERATION_FAILED
+    finally:
+        if connection is not None and not _close_connection(connection):
+            outcome = _OPERATION_FAILED
+    return outcome
+
+
+def _is_registered(cursor: psycopg.Cursor[tuple[Any, ...]], trial_id: str) -> bool:
+    cursor.execute(
+        _LINEAGE_SQL,
+        (
+            trial_id,
+            Jsonb({"payload": {"protocol": {"candidates": [{"trial_id": trial_id}]}}}),
+        ),
+    )
+    row = cursor.fetchone()
+    return bool(row is not None and row[0])
+
+
+def _tail_hash(cursor: psycopg.Cursor[tuple[Any, ...]]) -> bytes:
+    cursor.execute(_TAIL_HASH_SQL)
+    row = cursor.fetchone()
+    return GENESIS_HASH if row is None else bytes(row[0])
+
+
+def _append_operation(
+    connection_factory: ConnectionFactory,
+    event: LedgerEvent,
+) -> LedgerRecord | _OperationFailure:
+    connection: psycopg.Connection[tuple[Any, ...]] | None = None
+    outcome: LedgerRecord | _OperationFailure = _OPERATION_FAILED
+    try:
+        canonical_event = canonical_bytes(event)
+        event_json = event.model_dump(mode="json")
+        payload_sha256 = bytes.fromhex(canonical_sha256(event.payload))
+        connection = connection_factory()
+        with connection, connection.cursor() as cursor:
+            # An outcome that names no trial names nothing at all: it would be
+            # invisible to trial_counters, unattributable to any protocol, and
+            # still a permanent row nobody can remove. Treated as unregistered.
+            unregistered = event.event_type in _OUTCOME_EVENT_TYPES and (
+                event.trial_id is None or not _is_registered(cursor, event.trial_id)
+            )
+            if unregistered:
+                raise _UnregisteredTrial()
+            expected_previous_hash = _tail_hash(cursor)
+            cursor.execute(
+                "SELECT * FROM research.append_trial_ledger_event(%s, %s, %s, %s)",
+                (canonical_event, Jsonb(event_json), expected_previous_hash, payload_sha256),
+            )
+            outcome = _record_from_row(cursor.fetchone())
+    except psycopg.errors.SerializationFailure:
+        # The only retryable failure: somebody else appended between this
+        # writer's head read and its append. Everything else -- a duplicate
+        # event, a constraint, an unreachable database -- is an answer, and
+        # asking again would only get the same one.
+        outcome = _STALE_HEAD
+    except Exception:
+        outcome = _OPERATION_FAILED
+    finally:
+        if connection is not None and not _close_connection(connection):
+            outcome = _OPERATION_FAILED
+    return outcome
+
+
+def _raise_trial_ledger_append_error() -> Never:
+    raise TrialLedgerAppendError() from _LedgerStoreFailure("trial ledger store operation failed")
+
+
+class PostgresTrialLedger:
+    """Append and read the trial ledger through PostgreSQL transactions."""
+
+    def __init__(self, connection_factory: ConnectionFactory) -> None:
+        self._connection_factory = connection_factory
+
+    def register(self, protocol: TrialProtocol) -> tuple[TrialSpec, ...]:
+        """Seal one protocol with its whole candidate family, and return it.
+
+        The event id is derived from the protocol's canonical digest, so
+        registering the same protocol twice is one event read back rather than a
+        second registration -- and a protocol that differs in any byte is a
+        different id, not a conflict. ``occurred_at`` is the end of the data
+        window the protocol declares, for the same reason: a wall-clock stamp
+        would make the retry's canonical bytes differ from the original's, and
+        the idempotency would be an accident of timing instead of a property.
+        """
+
+        digest = canonical_sha256(protocol)
+        self.append(
+            LedgerEvent(
+                event_id=uuid5(NAMESPACE_URL, f"trading-house:trial-protocol:{digest}"),
+                scope_kind=ScopeKind.PROTOCOL,
+                scope_id=protocol.protocol_id,
+                event_type=LedgerEventType.PREREGISTERED,
+                spec_sha256=digest,
+                occurred_at=protocol.data.end,
+                payload=PreregisteredPayload(
+                    event_type=LedgerEventType.PREREGISTERED,
+                    protocol=protocol,
+                    registration_state=RegistrationState.PROSPECTIVE,
+                ),
+            )
+        )
+        return protocol.candidates
+
+    def append(self, event: LedgerEvent) -> LedgerRecord:
+        """Append one canonical event, retrying only a lost race."""
+
+        for _ in range(MAX_STALE_HEAD_RETRIES + 1):
+            outcome = _append_operation(self._connection_factory, event)
+            if not isinstance(outcome, _OperationFailure):
+                return outcome
+            if not isinstance(outcome, _StaleHead):
+                break
+        _raise_trial_ledger_append_error()
+
+    def events(self) -> tuple[LedgerRecord, ...]:
+        """Return the whole chain from a short, read-only transaction."""
+
+        return self._records(_ALL_EVENTS_SQL, None)
+
+    def events_for(self, trial_id: str) -> tuple[LedgerRecord, ...]:
+        """Return one trial's events, in chain order, through the index."""
+
+        return self._records(_TRIAL_EVENTS_SQL, (trial_id,))
+
+    def replay(self) -> tuple[LedgerEvent, ...]:
+        """Return the chain as validated events, for counters and readers."""
+
+        rows = _read_rows(self._connection_factory, _ALL_EVENTS_SQL, None)
+        if isinstance(rows, _OperationFailure):
+            _raise_trial_ledger_append_error()
+        return tuple(_event_from_canonical(row[8]) for row in rows)
+
+    def counters(self) -> TrialCounters:
+        """The deflation denominator, counted from the chain rather than kept."""
+
+        return trial_counters(self.replay())
+
+    def verify(self) -> LedgerIntegrityReport:
+        """Re-derive every hash in the chain from the bytes PostgreSQL stored.
+
+        Answers rather than raises, because "is the ledger intact?" is a
+        question an operator asks and needs a plain reason back. Only a failure
+        to *read* the ledger is an error, and that one is not an answer.
+        """
+
+        rows = _read_rows(self._connection_factory, _ALL_EVENTS_SQL, None)
+        if isinstance(rows, _OperationFailure):
+            _raise_trial_ledger_append_error()
+        return _verify_rows(rows)
+
+    def _records(self, query: str, parameters: tuple[Any, ...] | None) -> tuple[LedgerRecord, ...]:
+        rows = _read_rows(self._connection_factory, query, parameters)
+        if isinstance(rows, _OperationFailure):
+            _raise_trial_ledger_append_error()
+        return tuple(_record_from_row(row) for row in rows)
+
+
+def _failure(checked_events: int, reason: str) -> LedgerIntegrityReport:
+    return LedgerIntegrityReport(valid=False, checked_events=checked_events, reason=reason)
+
+
+def _verify_rows(rows: tuple[tuple[Any, ...], ...]) -> LedgerIntegrityReport:
+    expected_previous_hash = GENESIS_HASH
+    checked_events = 0
+
+    for row in rows:
+        try:
+            if len(row) != _ROW_WIDTH:
+                return _failure(checked_events, "row_invalid")
+            sequence = row[0]
+            if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+                return _failure(checked_events, "row_invalid")
+
+            previous_hash = bytes(row[13])
+            if previous_hash != expected_previous_hash:
+                return _failure(checked_events, "previous_hash_mismatch")
+
+            canonical_event = row[8]
+            if not isinstance(canonical_event, bytes):
+                return _failure(checked_events, "row_invalid")
+            event = _event_from_canonical(canonical_event)
+            # The stored bytes must be the canonical encoding of what they
+            # decode to, and must agree with the jsonb column. One check, two
+            # ways for the row to be lying.
+            if canonical_bytes(event) != canonical_event:
+                return _failure(checked_events, "canonical_event_mismatch")
+            if not isinstance(row[9], dict) or json.loads(canonical_event) != row[9]:
+                return _failure(checked_events, "event_json_mismatch")
+
+            if bytes(row[7]) != bytes.fromhex(event.spec_sha256):
+                return _failure(checked_events, "spec_digest_mismatch")
+            if bytes(row[10]) != bytes.fromhex(canonical_sha256(event.payload)):
+                return _failure(checked_events, "payload_digest_mismatch")
+            if compute_event_hash(sequence, previous_hash, canonical_event) != bytes(row[14]):
+                return _failure(checked_events, "event_hash_mismatch")
+        except Exception:
+            return _failure(checked_events, "event_schema_invalid")
+
+        expected_previous_hash = bytes(row[14])
+        checked_events += 1
+
+    return LedgerIntegrityReport(valid=True, checked_events=checked_events, reason=None)

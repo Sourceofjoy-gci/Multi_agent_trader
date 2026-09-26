@@ -61,6 +61,8 @@ from trading_house.core.errors import (
     SignatureVerificationError,
     TimestampError,
     TradingHouseError,
+    TrialLedgerAppendError,
+    TrialLedgerIntegrityError,
     UnresolvedIntentsError,
 )
 from trading_house.core.exits import (
@@ -150,6 +152,8 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     IntentAlreadySubmittedError: ExitCode.DUPLICATE_INTENT,
     UnresolvedIntentsError: ExitCode.UNRESOLVED_INTENTS,
     ConcurrentSubmissionError: ExitCode.CONCURRENT_SUBMISSION,
+    TrialLedgerAppendError: ExitCode.TRIAL_LEDGER_APPEND,
+    TrialLedgerIntegrityError: ExitCode.TRIAL_LEDGER_INTEGRITY,
     EvidenceIntegrityError: ExitCode.EVIDENCE_INTEGRITY,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --

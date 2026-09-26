@@ -13,6 +13,8 @@ from trading_house.core.errors import (
     SignatureVerificationError,
     TimestampError,
     TradingHouseError,
+    TrialLedgerAppendError,
+    TrialLedgerIntegrityError,
 )
 
 
@@ -36,6 +38,8 @@ def test_exit_codes_are_stable() -> None:
         (MigrationMismatchError, "migration revision mismatch"),
         (AuditAppendError, "audit append failed"),
         (AuditIntegrityError, "audit integrity verification failed"),
+        (TrialLedgerAppendError, "trial ledger append failed"),
+        (TrialLedgerIntegrityError, "trial ledger integrity verification failed"),
     ],
 )
 def test_errors_expose_only_canonical_public_messages(
@@ -56,6 +60,8 @@ def test_errors_expose_only_canonical_public_messages(
         MigrationMismatchError,
         AuditAppendError,
         AuditIntegrityError,
+        TrialLedgerAppendError,
+        TrialLedgerIntegrityError,
     ],
 )
 def test_errors_reject_secret_bearing_positional_details(

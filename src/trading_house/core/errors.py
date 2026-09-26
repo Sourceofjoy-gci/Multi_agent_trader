@@ -18,6 +18,8 @@ class ExitCode(IntEnum):
     DUPLICATE_INTENT = 12
     UNRESOLVED_INTENTS = 13
     CONCURRENT_SUBMISSION = 14
+    TRIAL_LEDGER_APPEND = 15
+    TRIAL_LEDGER_INTEGRITY = 16
     EVIDENCE_INTEGRITY = 17
 
 
@@ -160,3 +162,28 @@ class ConcurrentSubmissionError(TradingHouseError):
     """
 
     public_message = "another order submission is in progress"
+
+
+class TrialLedgerAppendError(TradingHouseError):
+    """Raised when a trial ledger event cannot be appended.
+
+    One error for every append failure -- a lost race, a duplicate event id, a
+    result recorded against no registration, an unreachable database -- because
+    the caller has exactly one remedy for all of them: do not record the trial
+    as run. The driver's message, which names the constraint or the connection
+    string, stays on the private cause.
+    """
+
+    public_message = "trial ledger append failed"
+
+
+class TrialLedgerIntegrityError(TradingHouseError):
+    """Raised when trial ledger integrity verification cannot be completed.
+
+    Distinct from a *failed* verification, which ``PostgresTrialLedger.verify``
+    returns as a ``LedgerIntegrityReport`` so an operator can be told what is
+    wrong. This is for "the ledger could not be read to be checked at all",
+    which is not an answer and must not be reported as one.
+    """
+
+    public_message = "trial ledger integrity verification failed"

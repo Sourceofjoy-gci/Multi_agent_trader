@@ -14,6 +14,12 @@ from testcontainers.community.postgres import PostgresContainer
 MIGRATION_PASSWORD = "integration-migration-password"  # noqa: S105
 RUNTIME_PASSWORD = "integration-runtime-password"  # noqa: S105
 TEST_SUPERUSER_PASSWORD = "integration-test-superuser-password"  # noqa: S105
+# Phase 8A gave the trial ledger its own database rather than another schema in
+# the application one: the ledger is evidence about the *research process*, and
+# a process that can read live positions must not also be able to read what was
+# tried and discarded. Two databases make that a database fact instead of a
+# grant nobody remembered to revoke.
+RESEARCH_DATABASE = "trading_house_research"
 
 
 def printed_strings(*streams: str) -> str:
@@ -60,26 +66,31 @@ class DatabaseHarness:
     runtime_dsn: str = field(repr=False)
     test_superuser_dsn: str = field(repr=False)
     alembic_config: Config
+    research_migration_dsn: str = field(repr=False)
+    research_runtime_dsn: str = field(repr=False)
+    research_alembic_config: Config
 
 
-def _dsn(container: PostgresContainer, *, user: str, password: str) -> str:
+def _dsn(
+    container: PostgresContainer, *, user: str, password: str, dbname: str | None = None
+) -> str:
     return psycopg.conninfo.make_conninfo(
         host=container.get_container_host_ip(),
         port=container.get_exposed_port(container.port),
-        dbname=container.dbname,
+        dbname=dbname if dbname is not None else container.dbname,
         user=user,
         password=password,
     )
 
 
-def _migration_url(container: PostgresContainer) -> str:
+def _migration_url(container: PostgresContainer, *, dbname: str | None = None) -> str:
     url = URL.create(
         "postgresql+psycopg",
         username="trading_house_migrator",
         password=MIGRATION_PASSWORD,
         host=container.get_container_host_ip(),
         port=int(container.get_exposed_port(container.port)),
-        database=container.dbname,
+        database=dbname if dbname is not None else container.dbname,
     )
     return url.render_as_string(hide_password=False)
 
@@ -123,6 +134,42 @@ def _bootstrap_roles(container: PostgresContainer, admin_dsn: str) -> None:
             )
         )
 
+        cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(RESEARCH_DATABASE)))
+        cursor.execute(
+            sql.SQL("GRANT CONNECT, CREATE ON DATABASE {} TO trading_house_owner").format(
+                sql.Identifier(RESEARCH_DATABASE)
+            )
+        )
+        cursor.execute(
+            sql.SQL("GRANT CONNECT ON DATABASE {} TO trading_house_runtime").format(
+                sql.Identifier(RESEARCH_DATABASE)
+            )
+        )
+        cursor.execute(
+            sql.SQL("ALTER DATABASE {} SET TIME ZONE 'UTC'").format(
+                sql.Identifier(RESEARCH_DATABASE)
+            )
+        )
+
+    # alembic's own version table lands in `public`, and `public` in a database
+    # whose owner is the container superuser grants nothing to the roles this
+    # suite creates. The application database gets the same grant above, against
+    # a connection to itself; this is that line again for the second database,
+    # without which `upgrade` cannot create alembic_version there at all.
+    with (
+        psycopg.connect(
+            _dsn(
+                container,
+                user=container.username,
+                password=container.password,
+                dbname=RESEARCH_DATABASE,
+            ),
+            autocommit=True,
+        ) as research_connection,
+        research_connection.cursor() as research_cursor,
+    ):
+        research_cursor.execute("GRANT CREATE ON SCHEMA public TO trading_house_owner")
+
 
 @pytest.fixture(scope="session")
 def database() -> Iterator[DatabaseHarness]:
@@ -141,7 +188,17 @@ def database() -> Iterator[DatabaseHarness]:
         alembic_config.set_main_option(
             "sqlalchemy.url", _migration_url(container).replace("%", "%%")
         )
+        research_alembic_config = Config(str(project_root / "alembic.ini"))
+        research_alembic_config.set_main_option(
+            "sqlalchemy.url",
+            _migration_url(container, dbname=RESEARCH_DATABASE).replace("%", "%%"),
+        )
+        # Both databases run the same migration history: the research database
+        # is a second *deployment target* for this repository's schema, not a
+        # schema of its own, so it gets the audit schema and the extension
+        # ``0007`` hashes with, and the same 0007 at the same revision.
         command.upgrade(alembic_config, "head")
+        command.upgrade(research_alembic_config, "head")
 
         yield DatabaseHarness(
             admin_dsn=admin_dsn,
@@ -161,6 +218,19 @@ def database() -> Iterator[DatabaseHarness]:
                 password=TEST_SUPERUSER_PASSWORD,
             ),
             alembic_config=alembic_config,
+            research_migration_dsn=_dsn(
+                container,
+                user="trading_house_migrator",
+                password=MIGRATION_PASSWORD,
+                dbname=RESEARCH_DATABASE,
+            ),
+            research_runtime_dsn=_dsn(
+                container,
+                user="trading_house_runtime",
+                password=RUNTIME_PASSWORD,
+                dbname=RESEARCH_DATABASE,
+            ),
+            research_alembic_config=research_alembic_config,
         )
 
 
@@ -175,3 +245,36 @@ def isolated_audit_ledger(database: DatabaseHarness) -> Iterator[None]:
     finally:
         command.downgrade(database.alembic_config, "base")
         command.upgrade(database.alembic_config, "head")
+
+
+@pytest.fixture
+def isolated_research_ledger(database: DatabaseHarness) -> Iterator[None]:
+    """Give one test a fresh trial ledger, in the research database only.
+
+    The application database is never reset for a research test: a phase 8 test
+    that could silently empty `trading_house` would be able to hide a real
+    regression in every other suite that runs after it.
+    """
+
+    command.downgrade(database.research_alembic_config, "base")
+    command.upgrade(database.research_alembic_config, "head")
+    try:
+        yield
+    finally:
+        command.downgrade(database.research_alembic_config, "base")
+        command.upgrade(database.research_alembic_config, "head")
+
+
+@pytest.fixture
+def research_ledger_dsn(database: DatabaseHarness) -> str:
+    return database.research_runtime_dsn
+
+
+@pytest.fixture
+def research_migration_dsn(database: DatabaseHarness) -> str:
+    return database.research_migration_dsn
+
+
+@pytest.fixture
+def research_evidence_root(tmp_path: Path) -> Path:
+    return tmp_path / "evidence"
