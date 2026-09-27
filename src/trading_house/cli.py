@@ -51,6 +51,7 @@ from trading_house.core.errors import (
     ConfigurationError,
     CoverageError,
     DatabaseUnavailableError,
+    EquityEvidenceError,
     EvidenceIntegrityError,
     ExitCode,
     InsufficientHistoryError,
@@ -172,6 +173,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     TrialLedgerAppendError: ExitCode.TRIAL_LEDGER_APPEND,
     TrialLedgerIntegrityError: ExitCode.TRIAL_LEDGER_INTEGRITY,
     EvidenceIntegrityError: ExitCode.EVIDENCE_INTEGRITY,
+    EquityEvidenceError: ExitCode.EQUITY_EVIDENCE,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --
     # but they are all "the run you asked for cannot be simulated honestly", and
