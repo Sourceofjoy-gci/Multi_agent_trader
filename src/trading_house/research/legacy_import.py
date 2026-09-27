@@ -150,6 +150,11 @@ def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPo
         points.append(DailyReturnPoint(day=day, value=(equity - previous) / previous))
         previous = equity
         day += timedelta(days=1)
+    if previous <= 0:
+        # The final day took the account to zero or below and the walk has run
+        # out of days to notice it on. Same refusal as the in-loop check, and
+        # for the same reason: the next day's divisor would be this equity.
+        raise EvidenceIntegrityError()
     return tuple(points)
 
 

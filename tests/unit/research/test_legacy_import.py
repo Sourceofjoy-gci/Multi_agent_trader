@@ -302,6 +302,43 @@ def test_realized_returns_are_refused_when_equity_is_not_positive() -> None:
         )
 
 
+def test_a_wipeout_on_the_final_day_is_refused() -> None:
+    """The in-loop guard tests the base *before* the day's return, so it cannot
+    see a final day that lands equity on zero or below: the walk simply ends.
+    The day itself is still a legal division -- it divides by the equity the day
+    started from -- so the check has to run once more after the loop or the run
+    reports a clean series ending in ``-1``."""
+
+    first = _trade(
+        entry_at=_NOW,
+        exit_at=datetime(2024, 1, 2, 12, 0, tzinfo=UTC),
+        gross_pnl=Decimal("1000"),
+        commission=Decimal("0"),
+        swap=Decimal("0"),
+        net_pnl=Decimal("1000"),
+    )
+    closing = _trade(
+        entry_at=datetime(2024, 1, 2, 12, 0, tzinfo=UTC),
+        exit_at=datetime(2024, 1, 3, 12, 0, tzinfo=UTC),
+        gross_pnl=Decimal("-101000"),
+        commission=Decimal("0"),
+        swap=Decimal("0"),
+        net_pnl=Decimal("-101000"),
+    )
+    result = _result(
+        start=_NOW,
+        end=datetime(2024, 1, 3, 23, 59, tzinfo=UTC),
+        trades=(first, closing),
+        net_pnl=Decimal("-100000"),
+    )
+    # Exactly zero and not below, so this is the post-loop guard and not the
+    # in-loop one: every in-loop base is 100000 and then 101000.
+    assert result.firm_equity + result.net_pnl == Decimal("0")
+
+    with pytest.raises(EvidenceIntegrityError):
+        derive_realized_daily_returns(result)
+
+
 def test_a_trade_exiting_after_the_run_window_gets_its_own_day(tmp_path: Path) -> None:
     """The engine reads one bar past ``request.end`` to warm the last snapshot,
     so a position opened on the final bar closes *after* ``result.end``. That
