@@ -137,9 +137,25 @@ def test_is_flat_reads_the_final_open_position_count_not_a_stored_flag() -> None
 
 
 def test_daily_returns_are_rectangular_across_the_requested_range() -> None:
+    # Two marks on the first and last day of the range, so the days between
+    # them have no mark and must still appear. Building the marks from _NOW
+    # would place them in 2026 and silently make every requested day a
+    # carried-forward zero, which is rectangular for the wrong reason.
     series = _series(
-        _point(minutes=0, realized=Decimal("100")),
-        _point(minutes=60 * 30, realized=Decimal("250")),
+        EquityObservation(
+            marked_at=datetime(2024, 1, 1, 21, 0, tzinfo=UTC),
+            equity=_FIRM + Decimal("100"),
+            cumulative_realized_pnl=Decimal("100"),
+            unrealized_pnl=Decimal(0),
+            open_positions=0,
+        ),
+        EquityObservation(
+            marked_at=datetime(2024, 1, 4, 21, 0, tzinfo=UTC),
+            equity=_FIRM + Decimal("400"),
+            cumulative_realized_pnl=Decimal("400"),
+            unrealized_pnl=Decimal(0),
+            open_positions=0,
+        ),
     )
 
     points = derive_daily_returns(series, first_day=date(2024, 1, 1), last_day=date(2024, 1, 4))
@@ -150,6 +166,9 @@ def test_daily_returns_are_rectangular_across_the_requested_range() -> None:
         "2024-01-03",
         "2024-01-04",
     ]
+    # The interior days carry the prior close forward rather than being absent.
+    assert points[1].value == Decimal(0)
+    assert points[3].value == Decimal("300") / (_FIRM + Decimal("100"))
 
 
 def test_a_day_with_no_mark_carries_the_prior_close_and_returns_zero() -> None:
@@ -255,6 +274,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from typing import Self
 
 from pydantic import NonNegativeInt, field_validator, model_validator
@@ -321,7 +341,9 @@ class EquitySeries(CanonicalModel):
     def time_only_moves_forward_and_every_point_reconciles(self) -> Self:
         if not self.observations:
             raise ValueError("an equity series needs at least one observation")
-        for earlier, later in zip(self.observations, self.observations[1:], strict=True):
+        # pairwise, not zip(series, series[1:]): the two are different lengths by
+        # exactly one, so strict=True would raise on every real series.
+        for earlier, later in pairwise(self.observations):
             if later.marked_at <= earlier.marked_at:
                 raise ValueError("equity observations must be strictly increasing in UTC time")
         for point in self.observations:
