@@ -21,6 +21,7 @@ class ExitCode(IntEnum):
     TRIAL_LEDGER_APPEND = 15
     TRIAL_LEDGER_INTEGRITY = 16
     EVIDENCE_INTEGRITY = 17
+    EQUITY_EVIDENCE = 18
 
 
 class TradingHouseError(Exception):
@@ -91,6 +92,19 @@ class EvidenceIntegrityError(TradingHouseError):
     """
 
     public_message = "evidence integrity verification failed"
+
+
+class EquityEvidenceError(TradingHouseError):
+    """Raised when mark-to-market equity evidence cannot be produced honestly.
+
+    One error for both ways that happens: a series that cannot satisfy its own
+    identity, and a run whose observation count exceeds the storage ceiling. The
+    caller has one remedy for each -- do not record this run as evidence -- and
+    the count that broke the ceiling travels on the private cause rather than in
+    the message, which stays as uninformative as every other code here.
+    """
+
+    public_message = "mark-to-market equity evidence is not trustworthy"
 
 
 class BrokerUnavailableError(TradingHouseError):

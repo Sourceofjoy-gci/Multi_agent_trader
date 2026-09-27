@@ -47,6 +47,7 @@ from trading_house.marketdata.models import (
 from trading_house.memory.models import AgentBelief, MemoryStore, ObservedFact, WriterKind
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.fills import ExitKind
+from trading_house.research.backtest.mark import EquityObservation
 from trading_house.research.backtest.result import BacktestResult, SimulatedTrade
 from trading_house.research.backtest.snapshot import FeatureSnapshot
 from trading_house.research.evidence import EvidenceProvenance
@@ -354,6 +355,13 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "prior_session_return": None,
         "session_open_price": Decimal("1.10000"),
         "bars_since_session_open": 0,
+    },
+    EquityObservation: {
+        "marked_at": AWARE,
+        "equity": Decimal("100000"),
+        "cumulative_realized_pnl": Decimal("0"),
+        "unrealized_pnl": Decimal("0"),
+        "open_positions": 0,
     },
     SimulatedTrade: {
         "proposal_id": "p-1",

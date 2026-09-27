@@ -37,7 +37,7 @@ and never compared to each other.
 import hashlib
 import os
 import tempfile
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
@@ -47,6 +47,14 @@ from pydantic import NonNegativeInt, PositiveInt, field_validator, model_validat
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import EvidenceIntegrityError, TimestampError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
+
+# Re-exported, not defined here: the type now lives in research/backtest/mark.py
+# because BACKTEST_ALLOWED admits trading_house.research.backtest and not
+# trading_house.research, so the direction of the dependency had to invert. The
+# redundant alias is PEP 484's explicit re-export marker, which strict mypy's
+# no_implicit_reexport requires and this module's many importers depend on. The
+# serialized shape is byte-identical, so no digest moves.
+from trading_house.research.backtest.mark import DailyReturnPoint as DailyReturnPoint
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.canonical import DOMAIN_SEPARATOR, canonical_bytes, canonical_sha256
 from trading_house.research.trial_ledger import (
@@ -75,15 +83,6 @@ def _utc(value: datetime) -> datetime:
         return ensure_utc(value)
     except TimestampError as error:
         raise ValueError(str(error)) from error
-
-
-class DailyReturnPoint(CanonicalModel):
-    """One day's return. A ``date`` and not a timestamp: a daily series whose
-    entries carry a time of day has to be truncated before anyone can compare
-    two of them."""
-
-    day: date
-    value: Decimal
 
 
 class CostSummary(CanonicalModel):
