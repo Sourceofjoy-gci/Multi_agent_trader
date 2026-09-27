@@ -26,6 +26,7 @@ from trading_house.core.errors import (
     ConfigurationError,
     CoverageError,
     DatabaseUnavailableError,
+    EquityEvidenceError,
     EvidenceIntegrityError,
     InsufficientHistoryError,
     MigrationMismatchError,
@@ -116,7 +117,17 @@ def test_app_help_lists_every_command_group() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
-    for group in ("constitution", "db", "audit", "data", "order", "guard", "health", "research"):
+    for group in (
+        "constitution",
+        "db",
+        "audit",
+        "data",
+        "order",
+        "guard",
+        "backtest",
+        "health",
+        "research",
+    ):
         assert group in result.stdout
 
 
@@ -342,6 +353,19 @@ def test_the_two_trial_ledger_domains_have_their_own_exit_codes() -> None:
 
     assert cli.EXIT_CODES[TrialLedgerAppendError] == cli.ExitCode.TRIAL_LEDGER_APPEND
     assert cli.EXIT_CODES[TrialLedgerIntegrityError] == cli.ExitCode.TRIAL_LEDGER_INTEGRITY
+
+
+def test_equity_evidence_error_maps_to_its_own_exit_code() -> None:
+    """The 18 the equity series earns, pinned as a number and not just a member.
+
+    An operator's script branches on this one, and it is the only code in the
+    file whose value is a contract with a caller rather than a fresh name: the
+    suite above would still pass if 18 were reused for another domain, so the
+    literal is asserted here.
+    """
+
+    assert cli.EXIT_CODES[EquityEvidenceError] is cli.ExitCode.EQUITY_EVIDENCE
+    assert int(cli.ExitCode.EQUITY_EVIDENCE) == 18
 
 
 def test_insufficient_history_is_distinguishable_from_missing_coverage() -> None:
@@ -1219,6 +1243,70 @@ def test_backtest_refuses_an_invalid_exit_policy(tmp_path: Path) -> None:
     result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--exit-policy": "not-an-arm"}))
 
     _assert_redacted_configuration_error(result)
+
+
+# --- backtest run --mark-to-market: the identity guard ------------------------
+#
+# Six options that are required with the flag and refused without it. A Typer
+# signature cannot express "required only when", so the rule lives in the command
+# body -- and a rule that lives in a body is a rule nothing else holds, which is
+# what the two tests below are for. Neither needs a bar store: the guard runs
+# before the run does, so an operator who mistypes the identity finds out
+# without a database having been consulted.
+
+_IDENTITY_OPTIONS = {
+    "--trial-id": "trial-1",
+    "--attempt-id": "attempt-1",
+    "--spec-sha256": "a" * 64,
+    "--agent-run-id": "run-1",
+    "--occurred-at": "2026-03-01T12:00:00",
+    "--registered-at": "2026-03-01T13:00:00",
+}
+
+
+def _marked_to_market_args(tmp_path: Path, **overrides: str) -> list[str]:
+    args = _backtest_args(tmp_path, **{**_IDENTITY_OPTIONS, **overrides})
+    # Inserted rather than passed through ``_backtest_args``, which spells every
+    # option as a name/value pair and a flag has no value.
+    return [*args[:2], "--mark-to-market", *args[2:]]
+
+
+@pytest.mark.parametrize("omitted", sorted(_IDENTITY_OPTIONS))
+def test_backtest_refuses_a_bundle_missing_one_identity_option(
+    tmp_path: Path, omitted: str
+) -> None:
+    """A bundle that cannot name its attempt is not evidence of a trial.
+
+    ``ConfigurationError`` rather than the equity code, and the distinction is
+    the point: an operator who left a flag off has made a mistake, while exit 18
+    is reserved for a run whose equity cannot honestly be valued. Reporting this
+    as an equity failure would train an operator to retry a run that never
+    started.
+    """
+
+    argv = _marked_to_market_args(tmp_path)
+    index = argv.index(omitted)
+    del argv[index : index + 2]
+
+    result = runner.invoke(cli.app, argv)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert result.stdout == ""
+
+
+def test_backtest_refuses_identity_passed_without_the_flag(tmp_path: Path) -> None:
+    """The other direction, which a one-sided guard would miss.
+
+    With the flag off the six options are unreachable, and a command that
+    ignored them would let an operator believe a bundle had been produced when
+    the payload still holds the Phase 7 artifact. The mismatch is refused
+    instead, so the pair is symmetric.
+    """
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **_IDENTITY_OPTIONS))
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert result.stdout == ""
 
 
 @pytest.mark.usefixtures("_dsn")

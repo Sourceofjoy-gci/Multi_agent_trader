@@ -15,11 +15,18 @@ stored bar is stale by years: the run finishes with zero trades and one
 rather than an error -- the worst failure shape available. ``build_backtester``
 constructs the clock and hands it to both, so there is no call site at which the
 two can drift apart.
+
+``mark_to_market_bundle`` is here for the same reason ``ops/ledger.py`` holds the
+trial events rather than ``cli.py``: a payload shape is not the CLI's to invent,
+and the questions a bundle answers -- what the costs were, where the series came
+from, what is *not* known about it -- are ones about the run, not about how it
+was typed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Final
 
@@ -29,6 +36,15 @@ from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import Side
 from trading_house.features.engine import BarReader
 from trading_house.research.backtest.engine import Backtester, ReplayClock
+from trading_house.research.backtest.mark import BacktestOutcome, derive_daily_returns
+from trading_house.research.canonical import canonical_sha256
+from trading_house.research.evidence import CostSummary, EvidenceBundle, EvidenceProvenance
+from trading_house.research.trial_ledger import (
+    CostAttributionStatus,
+    HoldoutState,
+    RegistrationState,
+    ReturnSeriesBasis,
+)
 from trading_house.risk.engine import MARGIN_HEADROOM_MULTIPLE, RiskEngine
 from trading_house.strategies.registry import registered
 
@@ -85,4 +101,66 @@ def build_backtester(
         contract=contract,
         clock=clock,
         constitution_sha256=constitution.constitution_sha256,
+    )
+
+
+def mark_to_market_bundle(
+    outcome: BacktestOutcome,
+    *,
+    trial_id: str,
+    attempt_id: str,
+    spec_sha256: str,
+    agent_run_id: str,
+    occurred_at: datetime,
+    registered_at: datetime,
+) -> EvidenceBundle:
+    """The bundle ``research trial record`` seals for one mark-to-market run.
+
+    ``costs`` is PARTIAL and never COMPLETE: 8B1 does not separate spread from
+    slippage, because the fill model folds both into the entry price and
+    discards the components. Writing a zero for either would turn an unmeasured
+    term into a measured one, which is the substitution this framework exists
+    to prevent.
+
+    ``dataset_sha256`` is None rather than a digest of the bar store. 8B1 does
+    not compute one, and an unavailable hash is the honest record; fabricating
+    one from a query the store cannot reproduce is what the legacy importer
+    refuses to do.
+
+    ``source_artifact_sha256`` is the domain-separated canonical digest of the
+    result, not of a file: ``backtest run`` builds this bundle in memory and
+    writes no artifact, so there is no file to hash. It is a real digest of real
+    bytes and it is *not* the same value as ``source_result_sha256``, which is
+    the result's own declaration-ordered digest -- two different serialisations
+    of the same model, deliberately.
+    """
+
+    result = outcome.result
+    return EvidenceBundle(
+        result_schema_version=1,
+        trial_id=trial_id,
+        attempt_id=attempt_id,
+        spec_sha256=spec_sha256,
+        source_result_sha256=result.digest(),
+        result=result,
+        daily_returns=derive_daily_returns(
+            outcome.equity, first_day=result.start.date(), last_day=result.end.date()
+        ),
+        return_series_basis=ReturnSeriesBasis.MARK_TO_MARKET,
+        costs=CostSummary(
+            status=CostAttributionStatus.PARTIAL,
+            commission=sum((trade.commission for trade in result.trades), Decimal(0)),
+            swap=sum((trade.swap for trade in result.trades), Decimal(0)),
+            spread_cost=None,
+            slippage_cost=None,
+        ),
+        provenance=EvidenceProvenance(
+            agent_run_id=agent_run_id,
+            source_artifact_sha256=canonical_sha256(result),
+            dataset_sha256=None,
+            registered_at=registered_at,
+            occurred_at=occurred_at,
+            registration_state=RegistrationState.PROSPECTIVE,
+            holdout_state=HoldoutState.NOT_DEFINED,
+        ),
     )

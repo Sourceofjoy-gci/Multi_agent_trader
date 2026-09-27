@@ -101,7 +101,7 @@ from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
-from trading_house.ops.backtest import build_backtester, build_strategy
+from trading_house.ops.backtest import build_backtester, build_strategy, mark_to_market_bundle
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.ops.ledger import (
@@ -113,6 +113,7 @@ from trading_house.ops.ledger import (
 )
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
+from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.legacy_import import import_phase7_artifact
@@ -1176,6 +1177,54 @@ def backtest_run(
     triple_swap_weekday: Annotated[int, typer.Option("--triple-swap-weekday")],
     defective_bar_tolerance: Annotated[str, typer.Option("--defective-bar-tolerance")] = "0",
     stress_multiplier: Annotated[str, typer.Option("--stress-multiplier")] = "1",
+    mark_to_market: Annotated[
+        bool,
+        typer.Option(
+            "--mark-to-market",
+            help=(
+                "Emit a sealable mark-to-market evidence bundle instead of the bare "
+                "result artifact."
+            ),
+        ),
+    ] = False,
+    trial_id: Annotated[
+        str | None,
+        typer.Option(
+            "--trial-id",
+            help="Declared candidate this run belongs to. Required with --mark-to-market.",
+        ),
+    ] = None,
+    attempt_id: Annotated[
+        str | None,
+        typer.Option(
+            "--attempt-id",
+            help="Started attempt this run belongs to. Required with --mark-to-market.",
+        ),
+    ] = None,
+    spec_sha256: Annotated[
+        str | None,
+        typer.Option(
+            "--spec-sha256",
+            help="Preregistered specification digest. Required with --mark-to-market.",
+        ),
+    ] = None,
+    agent_run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--agent-run-id",
+            help="Agent run that produced the candidate. Required with --mark-to-market.",
+        ),
+    ] = None,
+    occurred_at: Annotated[
+        datetime | None,
+        typer.Option("--occurred-at", help="The run's own UTC timestamp, as declared provenance."),
+    ] = None,
+    registered_at: Annotated[
+        datetime | None,
+        typer.Option(
+            "--registered-at", help="When the attempt was registered, as declared provenance."
+        ),
+    ] = None,
 ) -> None:
     """Replay one registered strategy over stored EURUSD M15 bars.
 
@@ -1191,9 +1240,26 @@ def backtest_run(
 
     ``--defective-bar-tolerance`` is a decimal fraction in ``[0, 1]``. Zero
     preserves strict refusal; a real-data run may state its allowance exactly.
+
+    ``--mark-to-market`` emits the evidence bundle ``research trial record``
+    seals, in place of the bare result. The six options beside it are what name
+    the attempt a bundle belongs to, and all six are required with the flag: a
+    bundle that cannot be traced to one declared candidate is not evidence of
+    anything in particular. They are all-or-nothing in both directions, so
+    identity passed without the flag is refused too rather than silently
+    ignored. The declared timestamps are provenance rather than evidence of
+    order -- the ledger's own ``recorded_at`` is the only registration-order
+    authority -- for the reason ``trial start`` gives.
     """
 
     def operation() -> dict[str, JsonValue]:
+        identity = (trial_id, attempt_id, spec_sha256, agent_run_id, occurred_at, registered_at)
+        if mark_to_market != all(value is not None for value in identity):
+            # An operator who left a flag off has made a mistake, not produced
+            # evidence that cannot be trusted, so this is configuration rather
+            # than an equity failure. A bundle is only sealable if it names the
+            # attempt it belongs to.
+            raise ConfigurationError()
         policy = _exit_policy(exit_policy)
         settings = _settings()
         cost_model = CostModel(
@@ -1244,28 +1310,45 @@ def backtest_run(
             settings.constitution_signature_path,
             settings.constitution_public_key_path,
         )
-        result = (
-            build_backtester(
-                bars=_bar_store(),
-                contract=instrument_contract,
-                constitution=loaded_constitution,
-            )
-            .run(request)
-            .result
+        outcome = build_backtester(
+            bars=_bar_store(),
+            contract=instrument_contract,
+            constitution=loaded_constitution,
+        ).run(request)
+        if not mark_to_market:
+            # The result is re-parsed rather than embedded as a string so the whole
+            # payload is one key-sorted JSON document, like every other command's.
+            # The digest is still taken over the model's own declaration-ordered
+            # serialisation, which is what Phase 8 will hash.
+            return {
+                "result": cast(JsonValue, json.loads(outcome.result.model_dump_json())),
+                "digest": outcome.result.digest(),
+                # Section 8.1's free-margin headroom gate is switched off in a
+                # replay (``NeverBindingMargin``), and a reader of the JSON --
+                # Phase 8's trial ledger included -- cannot see that from the
+                # result alone. ``result.py`` is frozen, so the disclosure rides on
+                # the payload beside the digest rather than inside the model.
+                "margin_modelled": False,
+            }
+        bundle = mark_to_market_bundle(
+            outcome,
+            trial_id=cast(str, trial_id),
+            attempt_id=cast(str, attempt_id),
+            spec_sha256=cast(str, spec_sha256),
+            agent_run_id=cast(str, agent_run_id),
+            # ``_as_utc`` because a timestamp typed on a command line is naive and
+            # the provenance validator refuses a naive one -- the same convention
+            # every other UTC option in this file uses.
+            occurred_at=_as_utc(cast(datetime, occurred_at)),
+            registered_at=_as_utc(cast(datetime, registered_at)),
         )
-        # The result is re-parsed rather than embedded as a string so the whole
-        # payload is one key-sorted JSON document, like every other command's.
-        # The digest is still taken over the model's own declaration-ordered
-        # serialisation, which is what Phase 8 will hash.
         return {
-            "result": cast(JsonValue, json.loads(result.model_dump_json())),
-            "digest": result.digest(),
-            # Section 8.1's free-margin headroom gate is switched off in a
-            # replay (``NeverBindingMargin``), and a reader of the JSON --
-            # Phase 8's trial ledger included -- cannot see that from the
-            # result alone. ``result.py`` is frozen, so the disclosure rides on
-            # the payload beside the digest rather than inside the model.
-            "margin_modelled": False,
+            "bundle": cast(JsonValue, json.loads(bundle.model_dump_json())),
+            "digest": canonical_sha256(bundle),
+            # Reported rather than enforced: a non-flat run is honest evidence
+            # that a later gate will refuse, and hiding it here would only move
+            # the surprise.
+            "mark_to_market_flat": outcome.equity.is_flat,
         }
 
     _run(operation)
