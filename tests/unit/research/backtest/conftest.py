@@ -27,6 +27,7 @@ from trading_house.research.backtest.engine import (
     BacktestRequest,
     ReplayClock,
 )
+from trading_house.research.backtest.mark import BacktestOutcome
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.snapshot import FeatureSnapshot
 from trading_house.research.backtest.strategy import ExitPolicy, NoExitPolicy
@@ -403,7 +404,7 @@ class PeekingStrategy(ToyStrategy):
         }
 
 
-def _run(
+def _outcome(
     *,
     bars: tuple[Bar, ...],
     strategy: ToyStrategy,
@@ -416,7 +417,7 @@ def _run(
     atr_period: int = ATR_PERIOD,
     spread_window: int = SPREAD_WINDOW,
     reader: FakeBarReader | None = None,
-) -> BacktestResult:
+) -> BacktestOutcome:
     source = reader if reader is not None else FakeBarReader(bars)
     # One clock, shared: the risk engine's tick-freshness gate compares its own
     # clock to the snapshot's tick_time, so the backtester must advance the
@@ -455,3 +456,42 @@ def _run(
             **tolerance_kwargs,
         )
     )
+
+
+def _run(
+    *,
+    bars: tuple[Bar, ...],
+    strategy: ToyStrategy,
+    firm_equity: Decimal = Decimal("100000"),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    defective_bar_tolerance: Decimal | None = None,
+    contract: InstrumentContract | None = None,
+    constitution_sha256: str | None = None,
+    atr_period: int = ATR_PERIOD,
+    spread_window: int = SPREAD_WINDOW,
+    reader: FakeBarReader | None = None,
+) -> BacktestResult:
+    """The result, for the many tests that only care about trades and their totals.
+
+    Every one of the 50 call sites below wants the result and not the series, so
+    this keeps them untouched. The series is reached through ``_outcome``, and
+    the two cannot drift because one calls the other. The keywords stay explicit
+    here rather than collapsing to ``**kwargs: Any``, because a mistyped keyword
+    at those call sites is a type error the moment it is written and a runtime
+    surprise long after.
+    """
+
+    return _outcome(
+        bars=bars,
+        strategy=strategy,
+        firm_equity=firm_equity,
+        start=start,
+        end=end,
+        defective_bar_tolerance=defective_bar_tolerance,
+        contract=contract,
+        constitution_sha256=constitution_sha256,
+        atr_period=atr_period,
+        spread_window=spread_window,
+        reader=reader,
+    ).result

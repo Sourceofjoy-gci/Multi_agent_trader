@@ -1,5 +1,12 @@
 """The strategy foundry boundary: what a candidate strategy is, and what it took to get there."""
 
+from trading_house.research.backtest.mark import (
+    MAX_EQUITY_OBSERVATIONS,
+    BacktestOutcome,
+    EquityObservation,
+    EquitySeries,
+    derive_daily_returns,
+)
 from trading_house.research.canonical import canonical_bytes, canonical_sha256
 from trading_house.research.evidence import (
     CostSummary,
@@ -31,9 +38,13 @@ from trading_house.research.trial_ledger import (
 )
 
 __all__ = [
+    "MAX_EQUITY_OBSERVATIONS",
+    "BacktestOutcome",
     "CostAttributionStatus",
     "CostSummary",
     "DailyReturnPoint",
+    "EquityObservation",
+    "EquitySeries",
     "EvidenceBundle",
     "EvidenceProvenance",
     "EvidenceStore",
@@ -58,5 +69,6 @@ __all__ = [
     "canonical_bytes",
     "canonical_sha256",
     "deflation_trial_count",
+    "derive_daily_returns",
     "trial_counters",
 ]

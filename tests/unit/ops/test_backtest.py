@@ -61,7 +61,7 @@ def _composed_run(policy: ExitPolicy) -> BacktestResult:
             atr_period=ATR_PERIOD,
             spread_window=SPREAD_WINDOW,
         )
-    )
+    ).result
 
 
 def test_the_composed_backtester_shares_its_clock_with_its_risk_engine() -> None:

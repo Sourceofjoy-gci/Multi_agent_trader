@@ -9,6 +9,10 @@ doing the right things in the wrong sequence. Per bar:
    signal -- section 11.1's named violation.
 2. Any open position is resolved against this bar: ``resolve_exit`` first (the
    stop before the target, D-2), then the engine's own time stop.
+2a. The bar is marked to market: the equity observation for this bar, with an
+   open position valued at the close and nothing carried unrealized once the
+   slot is empty. Phase 8B1's series is a run's shape, and a point that missed a
+   bar would describe a period the result never replayed.
 3. ``as_of`` becomes the bar's ``availability_time``, and the shared
    ``ReplayClock`` is advanced to it.
 4. A ``FeatureSnapshot`` is built at that ``as_of``, or the bar is skipped
@@ -48,7 +52,11 @@ from fractions import Fraction
 from typing import assert_never
 
 from trading_house.core.clock import ensure_utc
-from trading_house.core.errors import InsufficientHistoryError, TradingHouseError
+from trading_house.core.errors import (
+    EquityEvidenceError,
+    InsufficientHistoryError,
+    TradingHouseError,
+)
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import RejectedRiskDecision, Side
 from trading_house.features.engine import BarReader, FeatureEngine, MaterializedBarReader
@@ -56,6 +64,12 @@ from trading_house.features.sessions import session_of
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel, commission_cost, swap_cost
 from trading_house.research.backtest.fills import Exit, ExitKind, Fill, entry_fill, resolve_exit
+from trading_house.research.backtest.mark import (
+    MAX_EQUITY_OBSERVATIONS,
+    BacktestOutcome,
+    EquityObservation,
+    EquitySeries,
+)
 from trading_house.research.backtest.result import BacktestResult, RefusalKind, SimulatedTrade
 from trading_house.research.backtest.snapshot import FeatureSnapshot, horizon_is_simulatable
 from trading_house.research.backtest.strategy import (
@@ -311,7 +325,7 @@ class Backtester:
         self._constitution_sha256 = constitution_sha256
         self._contract_sha256 = contract.digest()
 
-    def run(self, request: BacktestRequest) -> BacktestResult:
+    def run(self, request: BacktestRequest) -> BacktestOutcome:
         strategy = request.strategy
         if not horizon_is_simulatable(
             horizon_seconds=strategy.horizon_seconds, timeframe=request.timeframe
@@ -344,6 +358,8 @@ class Backtester:
         queued: _Signal | None = None
         bars_seen = 0
         snapshots_skipped = 0
+        realized = Decimal(0)
+        observations: list[EquityObservation] = []
 
         for bar in replay_bars:
             if bar.quality is not BarQuality.OK:
@@ -357,7 +373,44 @@ class Backtester:
                 closed = self._close_if_done(position, bar, request)
                 if closed is not None:
                     trades.append(closed)
+                    realized += closed.net_pnl
                     position = None
+
+            # The mark is the state at this bar's close, so it is taken after
+            # the open and the close have been applied and before the snapshot
+            # that may skip the bar entirely. A bar that reached here was
+            # processed -- it is already counted in ``bars_seen`` -- so it gets
+            # a mark even when the strategy proposed nothing and the risk engine
+            # rejected the idea. ``_gross_pnl`` is the same conversion the
+            # eventual exit uses, with the bar's mid close standing in for an
+            # exit price: a mark is a valuation, and pricing it through the
+            # fill model would invent an exit that did not happen.
+            if position is None:
+                unrealized = Decimal(0)
+            else:
+                unrealized = self._gross_pnl(
+                    side=position.signal.side,
+                    entry_price=position.entry.price,
+                    exit_price=bar.close,
+                    lots=position.signal.lots,
+                )
+            if len(observations) >= MAX_EQUITY_OBSERVATIONS:
+                # The count that broke the ceiling and the ceiling itself ride
+                # the private cause, never the public message, which stays as
+                # uninformative as every other code in this repo's errors.
+                raise EquityEvidenceError() from ValueError(
+                    f"equity observations exceed the ceiling: {len(observations) + 1}"
+                    f" > {MAX_EQUITY_OBSERVATIONS}"
+                )
+            observations.append(
+                EquityObservation(
+                    marked_at=bar.availability_time,
+                    equity=request.firm_equity + realized + unrealized,
+                    cumulative_realized_pnl=realized,
+                    unrealized_pnl=unrealized,
+                    open_positions=0 if position is None else 1,
+                )
+            )
 
             as_of = bar.availability_time
             self._clock.instant = as_of
@@ -432,7 +485,7 @@ class Backtester:
         # trade the requested period cannot justify -- the exit price would
         # come from the range's edge rather than from anything the position's
         # own rules asked for. An unfinished trade is not a result.
-        return self._result(
+        result = self._result(
             request,
             trades=tuple(trades),
             rejections=tuple(rejections),
@@ -441,6 +494,10 @@ class Backtester:
             tolerance_fraction=tolerance_fraction,
             exit_policy=policy,
             snapshots_skipped=snapshots_skipped,
+        )
+        return BacktestOutcome(
+            result=result,
+            equity=EquitySeries(firm_equity=request.firm_equity, observations=tuple(observations)),
         )
 
     def _refuse_outside_coverage(self, request: BacktestRequest, coverage: Coverage) -> None:

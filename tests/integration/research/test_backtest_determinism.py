@@ -33,6 +33,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BARS = 65
 SECRET_IN_THE_DSN = "integration-runtime-password"  # noqa: S105
 
+_ENGINE_PROGRAM = (
+    "from tests.unit.research.backtest.conftest import _outcome, _ramp, ToyStrategy;"
+    "print(_outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20)).model_dump_json())"
+)
+"""The whole outcome -- result and series -- printed by one interpreter.
+
+The CLI payload above carries the result and not the equity path, so a series
+that drifted between processes would reach no comparison in this file. Same ramp,
+same real ``RiskEngine`` and same real constitution as the unit tests; the
+subprocess is the only thing that differs.
+"""
+
 
 class Fixture(NamedTuple):
     dsn: str
@@ -190,3 +202,44 @@ def test_the_emitted_result_carries_no_credential_or_path(seeded: Fixture) -> No
     assert SECRET_IN_THE_DSN not in printed
     assert str(seeded.contract) not in printed
     assert str(PROJECT_ROOT) not in printed
+
+
+def _run_engine(*, hash_seed: str) -> str:
+    """One ``Backtester.run`` in its own interpreter, under its own hash seed."""
+
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _ENGINE_PROGRAM],
+        env={**os.environ, "PYTHONHASHSEED": hash_seed},
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout
+
+
+def test_two_engines_under_different_hash_seeds_agree_on_the_series() -> None:
+    """The equity path is reproducible on the same terms as the result.
+
+    The result's cross-process proof is the CLI test above, and the CLI payload
+    carries the result and not the series -- ``result.py`` is frozen and the
+    series is its sibling, not a field on it. So without this the marks are
+    only ever compared against marks the comparing process made itself, and a
+    Decimal that serialised differently under another interpreter's hash seed
+    would ship.
+
+    The last two assertions are what keep the first from being vacuous: sixty
+    flat rows at one equity are byte-identical across any two processes and say
+    nothing about the marks.
+    """
+
+    first = _run_engine(hash_seed="0")
+    second = _run_engine(hash_seed="12345")
+
+    assert first == second
+    outcome = json.loads(first)
+    observations = outcome["equity"]["observations"]
+    assert len(observations) == outcome["result"]["bars_seen"] == 60
+    assert any(point["unrealized_pnl"] != "0" for point in observations)
+    assert observations[-1]["equity"] != observations[0]["equity"]

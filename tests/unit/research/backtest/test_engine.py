@@ -17,6 +17,7 @@ from tests.unit.research.backtest.conftest import (
     _bar,
     _contract,
     _loaded_constitution,
+    _outcome,
     _ramp,
     _run,
     ramp_price,
@@ -68,7 +69,8 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
         net = 3.37 - 23.59 = -$20.22 a trade, -$40.44 over the run
     """
 
-    result = _run(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
+    outcome = _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
+    result = outcome.result
 
     assert [trade.exit_kind for trade in result.trades] == [ExitKind.TIME, ExitKind.TIME]
     assert result.trades[0].entry_price == ramp_price(21) + HALF_SPREAD
@@ -88,6 +90,30 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     # Only the hand-computed absolute can fail.
     assert result.net_pnl == Decimal("-40.44")
     assert result.bars_seen == 60
+    # Phase 8B1: one mark per processed bar, and the run closed flat, so the
+    # final observation reconciles to net PnL. Both trades were TIME exits, so
+    # cumulative realized at the close is exactly the -40.44 above.
+    assert len(outcome.equity.observations) == outcome.result.bars_seen
+    assert outcome.equity.is_flat is True
+    assert outcome.equity.observations[-1].cumulative_realized_pnl == Decimal("-40.44")
+    assert outcome.equity.observations[-1].unrealized_pnl == Decimal(0)
+    assert outcome.equity.observations[-1].equity == Decimal("100000") + Decimal("-40.44")
+
+
+def test_a_processed_bar_with_no_proposal_still_gets_a_mark() -> None:
+    """One mark per bar the engine looked at, not per bar it traded.
+
+    ``_ramp(60)`` gives 60 bars and the strategy asks for a proposal on every
+    twentieth, so most bars are processed and untraded. The count is the whole
+    claim: a mark per *trade* would understate the path, and a mark per raw bar
+    would include bars the defective-bar check skipped.
+    """
+
+    outcome = _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
+
+    assert len(outcome.equity.observations) == 60
+    assert outcome.result.bars_seen == 60
+    assert len(outcome.result.trades) < 60
 
 
 def test_an_assembled_run_materializes_the_source_once_and_keeps_the_known_answer() -> None:
@@ -274,11 +300,20 @@ def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None
     strategy with it reports a trade the period cannot justify.
     """
 
-    result = _run(bars=_ramp(40), strategy=ToyStrategy(every_n=20, proposal_holding_seconds=7200))
+    outcome = _outcome(
+        bars=_ramp(40), strategy=ToyStrategy(every_n=20, proposal_holding_seconds=7200)
+    )
+    result = outcome.result
 
     assert result.trades == ()
     assert result.net_pnl == Decimal(0)
     assert result.bars_seen == 40
+    # Phase 8B1: the discarded position is why the final observation is not
+    # flat, and a not-flat series is why BacktestOutcome's reconciliation is
+    # conditional. Without this the conditional could be vacuously satisfied.
+    assert outcome.equity.is_flat is False
+    assert outcome.equity.observations[-1].open_positions == 1
+    assert len(outcome.equity.observations) == outcome.result.bars_seen
 
 
 def test_a_rejected_decision_is_recorded_with_its_reasons() -> None:

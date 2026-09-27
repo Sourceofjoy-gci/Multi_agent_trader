@@ -1248,7 +1248,7 @@ def backtest_run(
             bars=_bar_store(),
             contract=instrument_contract,
             constitution=loaded_constitution,
-        ).run(request)
+        ).run(request).result
         # The result is re-parsed rather than embedded as a string so the whole
         # payload is one key-sorted JSON document, like every other command's.
         # The digest is still taken over the model's own declaration-ordered
