@@ -28,6 +28,7 @@ that claim false. A refusal is cheap and a silent collapse is not.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -38,6 +39,7 @@ from trading_house.core.errors import ConfigurationError
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.trial_ledger import (
     EvidenceSealedPayload,
+    ExecutionStartedPayload,
     LedgerEvent,
     LedgerEventType,
     ResultRecordedPayload,
@@ -91,6 +93,50 @@ def research_ledger_dsn(settings: RuntimeSettings) -> SecretStr:
     if research_db is not None and research_db == _dbname(settings.database_dsn):
         raise ConfigurationError()
     return research
+
+
+def execution_started_event(trial_id: str, attempt_id: str, spec_sha256: str) -> LedgerEvent:
+    """The event an operator's own start earns, before any bundle exists.
+
+    The id is derived from the trial and the attempt alone -- the two things that
+    say *which* execution this is -- so it names one attempt rather than one run
+    of it. A different specification under the same attempt id is a different
+    event in every other way and is refused as the conflict it is.
+
+    ``occurred_at`` is a clock read here rather than a time recovered from a
+    document, and that is not an inconsistency with the two builders below: a
+    start has no bundle, so there is nothing to recover it from. Claiming
+    otherwise -- borrowing a protocol's data-window end, or a result's
+    ``occurred_at`` -- would put a time on the row that no artefact supports, and
+    this event's entire claim is that the execution began when the operator said
+    it began. The cost is stated rather than hidden: the bytes therefore differ
+    between two attempts at starting the same attempt, so the chain's retry-by-id
+    path cannot recognise the second one as the first and refuses it.
+    """
+
+    started_at = datetime.now(UTC)
+    return LedgerEvent(
+        event_id=uuid5(
+            NAMESPACE_URL,
+            f"trading-house:trial-event:start:{trial_id}:{attempt_id}",
+        ),
+        scope_kind=ScopeKind.ATTEMPT,
+        scope_id=attempt_id,
+        event_type=LedgerEventType.EXECUTION_STARTED,
+        trial_id=trial_id,
+        attempt_id=attempt_id,
+        # Carried, not checked. Nothing in this phase can tell whether the digest
+        # names the candidate the preregistration declared, so the chain preserves
+        # what the operator supplied and ``count`` counts distinct supplied
+        # digests. See the README's "What Phase 8A does not implement".
+        spec_sha256=spec_sha256,
+        occurred_at=started_at,
+        payload=ExecutionStartedPayload(
+            event_type=LedgerEventType.EXECUTION_STARTED,
+            attempt_id=attempt_id,
+            execution_started_at=started_at,
+        ),
+    )
 
 
 def result_recorded_event(bundle: EvidenceBundle) -> LedgerEvent:

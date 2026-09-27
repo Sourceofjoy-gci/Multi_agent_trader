@@ -106,6 +106,7 @@ from trading_house.ops.health import BookReconciler, HealthService, build_audit_
 from trading_house.ops.ledger import (
     build_evidence_store,
     evidence_sealed_event,
+    execution_started_event,
     research_ledger_dsn,
     result_recorded_event,
 )
@@ -1340,6 +1341,45 @@ def research_trial_register(
             "protocol_id": parsed.protocol_id,
             "trial_count": len(trials),
             "trial_ids": [trial.trial_id for trial in trials],
+        }
+
+    _run(operation)
+
+
+@trial_app.command("start")
+def research_trial_start(
+    trial_id: Annotated[str, typer.Option("--trial-id", help="Declared trial id to run.")],
+    attempt_id: Annotated[
+        str, typer.Option("--attempt-id", help="Id of this execution of that trial.")
+    ],
+    spec_sha256: Annotated[
+        str,
+        typer.Option(
+            "--spec-sha256",
+            help="Digest of the preregistered specification being run, as the trial declares it.",
+        ),
+    ],
+) -> None:
+    """Record that one execution of a declared trial began.
+
+    This is the event the three deflation denominators are counted from, so a
+    trial that is run without it counts as though it never ran. It is refused
+    (exit 15) against a trial no protocol declared, for the same reason ``record``
+    is: an execution nobody declared is still a draw from the search space, and
+    admitting one would let the denominator be widened by whoever cares to.
+
+    ``--spec-sha256`` is the operator's word, not a lookup. The preregistration
+    seals a whole protocol and does not publish a per-candidate digest, so the
+    chain preserves what it is given and ``count`` counts distinct digests. That
+    is stated in the README rather than left to be discovered.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        record = _trial_ledger().append(execution_started_event(trial_id, attempt_id, spec_sha256))
+        return {
+            "trial_id": trial_id,
+            "attempt_id": attempt_id,
+            "sequence": record.sequence,
         }
 
     _run(operation)

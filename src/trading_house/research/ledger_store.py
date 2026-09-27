@@ -130,8 +130,15 @@ SELECT EXISTS (
 # ponytail: the containment arm is a sequential scan of a chain that is one row per
 # trial, not per candidate. A GIN index on event_json turns it into a lookup; do that
 # when a chain is large enough to measure, not before.
-_OUTCOME_EVENT_TYPES = frozenset(
+#
+# The event types that may not be appended for a trial with no preregistration and
+# no legacy lineage. A start belongs here rather than only with the outcomes
+# because an execution nobody declared is still a draw from the search space: it
+# is the one row here whose absence from the chain would be invisible, because
+# ``record`` is only ever reached by somebody who already holds an attempt id.
+_REQUIRES_REGISTRATION = frozenset(
     {
+        LedgerEventType.EXECUTION_STARTED,
         LedgerEventType.RESULT_RECORDED,
         LedgerEventType.FAILED,
         LedgerEventType.EVIDENCE_SEALED,
@@ -288,10 +295,12 @@ def _append_operation(
         payload_sha256 = bytes.fromhex(canonical_sha256(event.payload))
         connection = connection_factory()
         with connection, connection.cursor() as cursor:
-            # An outcome that names no trial names nothing at all: it would be
-            # invisible to trial_counters, unattributable to any protocol, and
-            # still a permanent row nobody can remove. Treated as unregistered.
-            unregistered = event.event_type in _OUTCOME_EVENT_TYPES and (
+            # An event that names no trial names nothing at all: it is
+            # unattributable to any protocol and a permanent row nobody can
+            # remove, and a start counted without its trial would raise the audit
+            # count while leaving the lottery it was drawn from unnamed -- the
+            # worst shape a row in this chain can have. Treated as unregistered.
+            unregistered = event.event_type in _REQUIRES_REGISTRATION and (
                 event.trial_id is None or not _is_registered(cursor, event.trial_id)
             )
             if unregistered:
