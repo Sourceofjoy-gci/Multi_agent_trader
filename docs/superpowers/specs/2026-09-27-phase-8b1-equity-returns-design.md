@@ -296,7 +296,7 @@ bundle records, and the payload reports `"mark_to_market_flat": false`.
 
 ## 8. CLI surface
 
-`backtest run` gains five options (`cli.py:1160-1265`):
+`backtest run` gains seven options (`cli.py:1160-1265`):
 
 | Option | Meaning |
 |---|---|
@@ -304,19 +304,37 @@ bundle records, and the payload reports `"mark_to_market_flat": false`.
 | `--trial-id` | The declared candidate this run belongs to. |
 | `--attempt-id` | The started attempt this run belongs to. |
 | `--spec-sha256` | The preregistered specification's digest. |
+| `--agent-run-id` | The agent run that produced the candidate, recorded in `EvidenceProvenance.agent_run_id`. |
 | `--occurred-at` | The run's own timestamp, carried into `EvidenceProvenance.occurred_at`. |
+| `--registered-at` | When the operator registered the attempt, carried into `EvidenceProvenance.registered_at`. |
 
-The four identity options are required together with `--mark-to-market` and
-refused without it, so a bundle cannot be produced without the identity it
-claims. Together with 8A's `research trial start` this closes the hole the 8A
-review found in `effective_specifications`: the identity is still operator-supplied,
-but it is now checked against a started, preregistered attempt rather than merely
-preserved. The README's existing statement that the ledger cannot vouch that
-`spec_sha256` matches a declared candidate stays true and stays written down.
+All six identity and provenance options are required together with
+`--mark-to-market` and refused without it, so a bundle cannot be produced without
+the identity it claims.
 
-`--occurred-at` follows the same declared-provenance rule as `start`'s
-`--started-at`: operator-declared, with the database event's `recorded_at`
-remaining the only registration-order authority.
+`--agent-run-id` and `--registered-at` exist because `EvidenceBundle` requires
+`EvidenceProvenance.agent_run_id` and `registered_at` (8A,
+`research/evidence.py:116-137`), and neither can be derived without lying.
+`backtest run` deliberately holds no ledger connection, so it cannot read the
+authoritative `agent_run_id` off the `PREREGISTERED` event the way a
+ledger-coupled command could; and `registered_at` is not `occurred_at`, because a
+run happens before it is recorded and defaulting one to the other would assert
+they were simultaneous. Both are declared provenance on the same footing as
+`--spec-sha256` and `--occurred-at`: the operator states them, the bundle carries
+them, and the ledger's own `recorded_at` remains the only registration-order
+authority. The authoritative `agent_run_id` stays on the `PREREGISTERED` event,
+so a later phase can cross-check the declared value rather than trust it.
+
+Together with 8A's `research trial start` this closes the hole the 8A
+review found in `effective_specifications`: the identity is still
+operator-supplied, but it is now checked against a started, preregistered
+attempt rather than merely preserved. The README's existing statement that the
+ledger cannot vouch that `spec_sha256` matches a declared candidate stays true
+and stays written down.
+
+A missing or extra identity option is a `ConfigurationError` (exit 2), not an
+`EquityEvidenceError`: an operator who left a flag off has made a mistake, not
+produced evidence that cannot be trusted.
 
 Without `--mark-to-market`, output is byte-identical to today. The emitted
 document keeps the exact shape `research/legacy_import.py:180-197` reads —
