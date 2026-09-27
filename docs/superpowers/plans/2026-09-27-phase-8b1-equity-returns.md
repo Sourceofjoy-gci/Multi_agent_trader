@@ -62,13 +62,16 @@
 **Files:**
 - Create: `src/trading_house/research/backtest/mark.py`
 - Modify: `src/trading_house/core/errors.py`
+- Modify: `src/trading_house/cli.py` (the `EXIT_CODES` entry only)
+- Modify: `src/trading_house/research/evidence.py` (the `DailyReturnPoint` move)
+- Modify: `tests/property/test_schema_boundaries.py` (the `EquityObservation` builder, or Task 1's naive-datetime sweep is vacuous for this phase's one new timestamp)
 - Test: `tests/unit/research/backtest/test_mark.py`
 - Test: `tests/property/test_mark.py`
 
 **Interfaces:**
 - Consumes: `CanonicalModel` (`core/values.py:13`), `ensure_utc` (`core/clock.py:8`), `TimestampError`, `BacktestResult` (`research/backtest/result.py:89`), pydantic's `NonNegativeInt`.
 - Produces: `DailyReturnPoint`, `EquityObservation`, `EquitySeries`, `BacktestOutcome`, `derive_daily_returns(series, *, first_day, last_day) -> tuple[DailyReturnPoint, ...]`, `MAX_EQUITY_OBSERVATIONS`.
-- Produces: `ExitCode.EQUITY_EVIDENCE = 18` and `EquityEvidenceError` in `core/errors.py`. The `cli.EXIT_CODES` mapping is Task 3's, because that is where `cli.py` is edited.
+- Produces: `ExitCode.EQUITY_EVIDENCE = 18`, `EquityEvidenceError` in `core/errors.py`, and the `cli.EXIT_CODES` entry in the same change — `tests/unit/test_cli.py::test_every_typed_error_has_a_stable_exit_code` fails while a concrete error type is unmapped.
 - `DailyReturnPoint` **moves** here from `research/evidence.py:80-86`, same shape. Task 1 also removes it from `evidence.py`; Task 3 re-exports it.
 
 - [ ] **Step 1: Write the failing unit tests**
@@ -506,7 +509,7 @@ Expected: all tests pass, Ruff clean, mypy reports no errors.
 - [ ] **Step 7: Commit the series**
 
 ```powershell
-git add src/trading_house/research/backtest/mark.py src/trading_house/core/errors.py src/trading_house/research/evidence.py tests/unit/research/backtest/test_mark.py tests/property/test_mark.py
+git add src/trading_house/research/backtest/mark.py src/trading_house/core/errors.py src/trading_house/cli.py src/trading_house/research/evidence.py tests/property/test_schema_boundaries.py tests/unit/research/backtest/test_mark.py tests/property/test_mark.py
 git commit -m "feat: define the mark-to-market series and the daily return reduction"
 ```
 
@@ -776,7 +779,7 @@ git commit -m "feat: mark equity at every processed bar"
 
 **Interfaces:**
 - Consumes: `BacktestOutcome` (Task 2), `derive_daily_returns` (Task 1), `EvidenceBundle` / `EvidenceProvenance` / `CostSummary` / `ReturnSeriesBasis` / `RegistrationState` / `HoldoutState` (8A), `EquityEvidenceError` (Task 1).
-- Produces: `mark_to_market_bundle(...) -> EvidenceBundle` in `ops/backtest.py`; seven options on `backtest run`; `EquityEvidenceError: ExitCode.EQUITY_EVIDENCE` in `EXIT_CODES`.
+- Produces: `mark_to_market_bundle(...) -> EvidenceBundle` in `ops/backtest.py`; seven options on `backtest run`. The `EXIT_CODES` mapping for `EquityEvidenceError` is Task 1's, because the suite's typed-error guard requires the definition and its mapping to land together.
 
 - [ ] **Step 1: Write the failing unit tests for the identity guard**
 
@@ -793,9 +796,15 @@ def test_equity_evidence_error_maps_to_its_own_exit_code() -> None:
 Run: `uv run pytest tests/unit/test_cli.py -q --no-cov`
 
 Expected: failure — `EquityEvidenceError` is not in `EXIT_CODES` and `ExitCode.EQUITY_EVIDENCE` does not exist.
-- [ ] **Step 3: Map the error and assemble the bundle**
+- [ ] **Step 3: Map the error in `cli.py`**
 
-In `src/trading_house/cli.py`, add to `EXIT_CODES` after the `EvidenceIntegrityError` line:
+`tests/unit/test_cli.py::test_every_typed_error_has_a_stable_exit_code` asserts every concrete
+`TradingHouseError` subclass appears in `cli.EXIT_CODES`. A new error and its mapping must land in
+the same change or the suite is red between tasks — so the mapping belongs here, not in Task 3.
+
+Add `EquityEvidenceError` to the `trading_house.core.errors` import block in `src/trading_house/cli.py`
+(it sorts before `EvidenceIntegrityError`, so let `ruff check --fix` place it) and add to `EXIT_CODES`
+after the `EvidenceIntegrityError` line:
 
 ```python
     EquityEvidenceError: ExitCode.EQUITY_EVIDENCE,
