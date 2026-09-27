@@ -348,6 +348,29 @@ def test_trial_counters_do_not_count_a_deterministic_reproduction_twice() -> Non
     )
 
 
+def test_a_repeated_execution_raises_the_audit_count_without_a_new_lottery() -> None:
+    """Two starts of one trial under one digest are two attempts, one lottery.
+
+    The distinction is the reason ``count`` reports three numbers: an attempt id
+    repeated across two events is the same draw counted once, while a second
+    distinct attempt of the *same* trial is a genuinely new execution and must
+    reach the denominator. Asserted from ``EXECUTION_STARTED`` alone, because
+    that is the only event type the ``start`` command emits.
+    """
+
+    events = [
+        _started(attempt_id="attempt-1", trial_id="trial-1", spec_sha256="1" * 64),
+        _started(attempt_id="attempt-1", trial_id="trial-1", spec_sha256="1" * 64),
+        _started(attempt_id="attempt-2", trial_id="trial-1", spec_sha256="1" * 64),
+    ]
+
+    assert trial_counters(events) == TrialCounters(
+        audit_attempts=2,
+        selection_lotteries=1,
+        effective_specifications=1,
+    )
+
+
 def test_an_integrity_report_reason_must_match_its_validity() -> None:
     assert LedgerIntegrityReport(valid=True, checked_events=3, reason=None).checked_events == 3
 

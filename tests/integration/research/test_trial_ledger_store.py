@@ -93,7 +93,7 @@ def _candidate(index: int) -> TrialSpec:
     )
 
 
-def _protocol() -> TrialProtocol:
+def _protocol(candidates: tuple[TrialSpec, ...] | None = None) -> TrialProtocol:
     return TrialProtocol(
         protocol_id="protocol-1",
         protocol_version="1",
@@ -133,7 +133,7 @@ def _protocol() -> TrialProtocol:
         ),
         regimes=RegimeSpec(labels=("london", "new_york"), provenance_sha256="c" * 64),
         holdout=HoldoutSpec(state=HoldoutState.NOT_DEFINED),
-        candidates=(_candidate(1), _candidate(2)),
+        candidates=candidates if candidates is not None else (_candidate(1), _candidate(2)),
     )
 
 
@@ -221,6 +221,31 @@ def _preregistered_event(protocol: TrialProtocol) -> LedgerEvent:
             protocol=protocol,
             registration_state=RegistrationState.PROSPECTIVE,
         ),
+    )
+
+
+def _declared(*trial_ids: str) -> LedgerEvent:
+    """One preregistration naming every trial in ``trial_ids``, as one event.
+
+    A start is admissible only against a declared trial, so a test about chain
+    mechanics -- a lost race, a sequence gap -- has to declare the trials it
+    appends against rather than assert around the guard. Sealing the family in a
+    single event is what a real protocol does, and it keeps the chain under test
+    the shape an operator's would have.
+    """
+
+    return _preregistered_event(
+        _protocol(
+            tuple(
+                TrialSpec(
+                    trial_id=trial_id,
+                    spec_id=f"spec-{trial_id}",
+                    rationale="declared before execution",
+                    parameter_space=(("window", trial_id),),
+                )
+                for trial_id in trial_ids
+            )
+        )
     )
 
 
@@ -460,7 +485,6 @@ def test_rolled_back_sequence_gap_does_not_break_chain(
 def test_an_explicit_non_contiguous_sequence_is_a_gap_not_a_break(
     research_ledger_dsn: str,
     research_migration_dsn: str,
-    trial_protocol: TrialProtocol,
 ) -> None:
     """A row inserted at sequence 99 chains correctly and verifies as intact.
 
@@ -472,7 +496,7 @@ def test_an_explicit_non_contiguous_sequence_is_a_gap_not_a_break(
     """
 
     ledger = _ledger(research_ledger_dsn)
-    ledger.append(_preregistered_event(trial_protocol))
+    ledger.append(_declared("trial-repaired", "trial-after-repair"))
     previous_hash = bytes.fromhex(ledger.events()[-1].event_hash)
     event = _execution_started_event("trial-repaired")
     canonical_event = canonical_bytes(event)
@@ -586,10 +610,13 @@ def test_concurrent_appends_form_one_continuous_chain(research_ledger_dsn: str) 
     Each writer reads the head before it appends, so most of them lose the race
     to the advisory lock and are told 40001. Retrying the *same* deterministic
     event is what keeps the chain whole; minting a new event id per attempt is
-    what would fork it.
+    what would fork it. The protocol ahead of them is there because a start is
+    admissible only against a declared trial, so the eight writers declare the
+    family they are about to run -- one event, as a real protocol does.
     """
 
     ledger = _ledger(research_ledger_dsn)
+    ledger.append(_declared(*(f"t{index}" for index in range(WRITERS))))
 
     with ThreadPoolExecutor(max_workers=WRITERS) as pool:
         appended = list(
@@ -601,9 +628,9 @@ def test_concurrent_appends_form_one_continuous_chain(research_ledger_dsn: str) 
 
     ordered = ledger.events()
 
-    assert [record.sequence for record in ordered] == list(range(1, WRITERS + 1))
-    assert ordered == tuple(sorted(appended, key=lambda record: record.sequence))
-    assert len({record.event_id for record in ordered}) == WRITERS
+    assert [record.sequence for record in ordered] == list(range(1, WRITERS + 2))
+    assert ordered == tuple(sorted((*appended, ordered[0]), key=lambda record: record.sequence))
+    assert len({record.event_id for record in ordered}) == WRITERS + 1
     assert sum(record.previous_hash == GENESIS_HEX for record in ordered) == 1
     assert all(right.previous_hash == left.event_hash for left, right in pairwise(ordered))
     assert ledger.verify().valid
@@ -787,7 +814,9 @@ def test_public_privileges_are_revoked_and_the_append_function_is_pinned(
         assert cursor.fetchone() == ("trading_house_owner", True, ["search_path=pg_catalog"])
 
 
-def test_the_append_function_refuses_a_stale_expected_head(research_ledger_dsn: str) -> None:
+def test_the_append_function_refuses_a_stale_expected_head(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
     """40001 is the only error the store retries, so it has to mean one thing.
 
     Handing the function a head that has moved on is a lost race, and it is
@@ -799,7 +828,7 @@ def test_the_append_function_refuses_a_stale_expected_head(research_ledger_dsn: 
     would answer with a row instead of the error.
     """
 
-    _ledger(research_ledger_dsn).append(_execution_started_event("trial-1"))
+    _ledger(research_ledger_dsn).append(_preregistered_event(trial_protocol))
     event = _execution_started_event("trial-2")
 
     with open_runtime_connection(SecretStr(research_ledger_dsn)) as connection:

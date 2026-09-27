@@ -1,4 +1,4 @@
-"""The six research trial commands, against a real second PostgreSQL database.
+"""The seven research trial commands, against a real second PostgreSQL database.
 
 Every command here is a composition root: it reads settings, opens the research
 database, and calls one service. A unit test can prove the exit-code mapping and
@@ -308,6 +308,32 @@ def _register(tmp_path: Path) -> dict[str, Any]:
     return json.loads(result.stdout)
 
 
+def _start(
+    *, trial_id: str = "trial-1", attempt_id: str = "attempt-1", spec_sha256: str | None = None
+) -> Any:
+    """``start`` as an operator runs it, with no assertion on the outcome.
+
+    Returned rather than asserted so the refusal and the retry cases can read the
+    exit code themselves. ``--spec-sha256`` defaults to the registered protocol's
+    own digest, which is the value an operator copying the README will type.
+    """
+
+    return runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "start",
+            "--trial-id",
+            trial_id,
+            "--attempt-id",
+            attempt_id,
+            "--spec-sha256",
+            spec_sha256 or canonical_sha256(_protocol()),
+        ],
+    )
+
+
 def _record(
     tmp_path: Path, *, trial_id: str = "trial-1", attempt_id: str = "attempt-1"
 ) -> dict[str, Any]:
@@ -376,6 +402,86 @@ def test_registering_the_same_protocol_twice_adds_no_second_candidate(
 
     records = _ledger(research_ledger_dsn).events()
     assert [record.event_type for record in records] == [LedgerEventType.PREREGISTERED]
+    assert _verify().exit_code == cli.ExitCode.OK
+
+
+# --- start -------------------------------------------------------------------
+
+
+def test_start_moves_all_three_denominators(tmp_path: Path, research_env: Path) -> None:
+    """The regression this command exists for: ``count`` used to report zeros.
+
+    A ``register`` + ``record`` pair emits ``PREREGISTERED``, ``RESULT_RECORDED``
+    and ``EVIDENCE_SEALED``, and none of those three is one of the event types
+    ``trial_counters`` reads -- so the operator who followed the README verbatim
+    was told ``audit_attempts=0, selection_lotteries=0, effective_specifications=0``
+    as a fact about their own record. ``start`` is the only event type that moves
+    the denominators, and this is the assertion that fails the day it stops.
+    """
+
+    _register(tmp_path)
+    started = _start()
+
+    assert started.exit_code == cli.ExitCode.OK, started.stderr
+    counters = runner.invoke(cli.app, ["research", "trial", "count"])
+    assert json.loads(counters.stdout) == {
+        "status": "ok",
+        "audit_attempts": 1,
+        "selection_lotteries": 1,
+        "effective_specifications": 1,
+    }
+
+
+def test_start_refuses_a_trial_the_protocol_never_declared(
+    tmp_path: Path, research_env: Path, research_ledger_dsn: str
+) -> None:
+    """Fail-closed: the denominator is not inflatable by anybody.
+
+    Without this the deflation argument is worth nothing -- an operator could
+    start attempts against trials no protocol ever sealed and the audit count
+    would rise for work nobody declared. The store's containment check is the
+    boundary, so the event count afterwards is the half of the assertion that
+    distinguishes "refused" from "appended something invisible".
+    """
+
+    _register(tmp_path)
+    before = len(_ledger(research_ledger_dsn).events())
+
+    result = _start(trial_id="trial-never-declared", attempt_id="attempt-9")
+
+    assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND
+    assert len(_ledger(research_ledger_dsn).events()) == before
+    assert _verify().exit_code == cli.ExitCode.OK
+
+
+def test_starting_the_same_attempt_twice_appends_one_event(
+    tmp_path: Path, research_env: Path, research_ledger_dsn: str
+) -> None:
+    """A retried ``start`` cannot widen the denominator or break the chain.
+
+    The event id is derived from the trial and the attempt alone, so the second
+    call carries the *same* id and can never become a second attempt. What it does
+    become is a refusal: the event's timestamp is a clock read, so the retry's
+    canonical bytes differ from the first's, and ``append_trial_ledger_event``
+    returns an existing row only for bytes it already holds. The safety half is
+    asserted here and holds -- one event, and a chain that still verifies -- but
+    the exit code is 15 rather than 0, which is a known, documented gap in the
+    command's retry story rather than an accident of this test. See the README's
+    "What Phase 8A does not implement".
+    """
+
+    _register(tmp_path)
+
+    first = _start()
+    second = _start()
+
+    assert first.exit_code == cli.ExitCode.OK, first.stderr
+    assert second.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND, second.stderr
+    events = _ledger(research_ledger_dsn).events()
+    assert [record.event_type for record in events] == [
+        LedgerEventType.PREREGISTERED,
+        LedgerEventType.EXECUTION_STARTED,
+    ]
     assert _verify().exit_code == cli.ExitCode.OK
 
 

@@ -1562,7 +1562,7 @@ def test_the_magnitude_ceiling_leaves_ordinary_money_alone(
 
 RESEARCH_DSN = "postgresql://runtime:research-super-secret@localhost/trading_house_research"
 
-TRIAL_COMMANDS = ("register", "record", "import-legacy", "show", "count", "verify")
+TRIAL_COMMANDS = ("register", "start", "record", "import-legacy", "show", "count", "verify")
 
 
 @pytest.fixture

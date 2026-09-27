@@ -4,7 +4,7 @@ between them and the trading plane.
 Eight things are asserted here, and each is one an operator would otherwise have
 to take on trust from the README:
 
-1. ``research`` is a command group, and ``research trial`` has exactly the six
+1. ``research`` is a command group, and ``research trial`` has exactly the seven
    commands the operator table documents.
 2. ``TrialProtocol`` refuses a protocol with no candidate family -- the
    declaration that makes a trial countable has to exist before the trial does.
@@ -91,10 +91,18 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-# The six, in the order `research trial --help` prints them. Named here rather
-# than derived, so a seventh command fails this file instead of quietly widening
+# The seven, in the order `research trial --help` prints them. Named here rather
+# than derived, so an eighth command fails this file instead of quietly widening
 # the operator table the README carries.
-TRIAL_COMMANDS = ("register", "record", "import-legacy", "show", "count", "verify")
+TRIAL_COMMANDS = (
+    "register",
+    "start",
+    "record",
+    "import-legacy",
+    "show",
+    "count",
+    "verify",
+)
 
 # The three Phase 7 result digests, verbatim from the completed three-arm run
 # (see the Phase 7 evidence table). An exact constant and never a recomputation:
@@ -313,13 +321,13 @@ def test_every_trial_command_is_reachable_from_its_help(command: str) -> None:
     assert command in result.stdout
 
 
-def test_research_trial_has_exactly_the_six_documented_commands() -> None:
+def test_research_trial_has_exactly_the_seven_documented_commands() -> None:
     result = runner.invoke(cli.app, ["research", "trial", "--help"])
 
     assert result.exit_code == cli.ExitCode.OK
     # Counted from the app rather than the help text, because ``--help`` proves a
     # command is *documented* and this proves none is undocumented-but-present --
-    # a seventh command wired up and left out of the README is the failure this
+    # an eighth command wired up and left out of the README is the failure this
     # catches, and no amount of reading the help would show it.
     registered = {command.name for command in cli.trial_app.registered_commands}
     assert set(TRIAL_COMMANDS) == registered
