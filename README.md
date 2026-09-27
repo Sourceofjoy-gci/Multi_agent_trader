@@ -887,6 +887,9 @@ from one can never be replayed into the other.
   a script cannot mistake "nobody could check" for "nothing is wrong".
   `checked_events` says how many rows were good before the failure — the count a
   restore-from-older-backup leaves small, with `valid: true` and no reason at all.
+  The failure report goes to **stdout**, not stderr, so it can be piped into a
+  reporter; the exit code, not the stream, is the authoritative signal for a
+  script.
 - **The chain is anchored at its genesis.** `verify` reports
   `genesis_sequence_mismatch` if the first row is not sequence 1. The genesis
   row's previous hash is the one link the verifier supplies rather than reads off
@@ -897,8 +900,9 @@ from one can never be replayed into the other.
 - **Absences are recorded as absences, by the code that builds them.** The
   importer writes no dataset hash, `PARTIAL` cost attribution with spread and
   slippage left `null` rather than zero, and a `REALIZED_CLOSED_TRADES` series
-  over UTC calendar days in which a day with no closed trade reports no return
-  rather than a flat one. Stated that way because the *models* are not what
+  over UTC calendar days in which a day with no closed trade carries a return of
+  exactly zero rather than no point at all — a calendar-day series has no way to
+  leave a day out. Stated that way because the *models* are not what
   enforces it: `dataset_sha256`, `spread_cost` and `slippage_cost` are optional
   fields a caller could fill with a plausible zero, and `ReturnSeriesBasis` still
   carries `MARK_TO_MARKET` for the Phase 8 statistics that will need it. What this
@@ -948,14 +952,18 @@ uv run trading-house research trial register --protocol protocol.json
 uv run trading-house research trial record \
   --trial-id trial-1 --attempt-id attempt-1 --evidence bundle.json
 
-# Import one preserved Phase 7 result. Pass the FIRST run's --registered-at on
-# any retry: a later clock derives different bundle bytes and would seal a
-# second evidence file for the same result.
+# Import one preserved Phase 7 result. An ordinary retry is recognised by the
+# source result digest and writes nothing; pass a previous run's
+# --registered-at only when that run crashed between writing the bundle and
+# appending the event, so the retry derives the same digest.
 uv run trading-house research trial import-legacy \
   --artifact none.json --registered-at 2026-03-01T12:00:00
 
 # Replay one trial's chain rows. A trial nobody declared is an empty list, not
-# an error: the question is what the chain holds for that id.
+# an error: the question is what the chain holds for that id. A preregistration
+# is not one of those rows -- it is scoped to the protocol event and carries no
+# trial id -- so "was this trial ever declared" is answered by reading the
+# protocol's preregistered event and the candidate family sealed inside it.
 uv run trading-house research trial show --trial-id trial-1
 
 # The three deflation denominators, counted from the chain rather than kept.

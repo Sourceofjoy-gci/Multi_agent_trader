@@ -1408,9 +1408,11 @@ def research_trial_import_legacy(
         typer.Option(
             "--registered-at",
             help=(
-                "Declared import clock, UTC (e.g. 2026-03-01T12:00:00). Pass the "
-                "first run's value when retrying: a later clock builds different "
-                "bundle bytes, and the retry would seal a second evidence file."
+                "Declared import clock, UTC (e.g. 2026-03-01T12:00:00). An "
+                "ordinary retry is recognised by the source result digest and "
+                "writes nothing, so this is only needed when a run crashed "
+                "between writing the bundle and appending the event: pass that "
+                "run's value and the retry derives the same digest."
             ),
         ),
     ] = None,
@@ -1518,6 +1520,9 @@ def research_trial_verify() -> None:
     payload = _execute(operation)
     _emit(payload, status="ok" if payload["valid"] else "invalid")
     if not payload["valid"]:
+        # Deliberately not ``_fail``: the integrity report is the answer to
+        # "is this intact?" and is written to stdout so it can be piped into a
+        # reporter, while the exit code stays the signal a script branches on.
         raise typer.Exit(code=int(ExitCode.TRIAL_LEDGER_INTEGRITY))
 
 

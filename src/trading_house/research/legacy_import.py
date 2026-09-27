@@ -23,8 +23,10 @@ importer would quietly break it:
    nobody measured.
 4. **The return series says what it is.** ``REALIZED_CLOSED_TRADES`` over every
    UTC calendar day in the run's window, and never called a mark-to-market
-   series: a day with no closed trade reports no return, not a flat one, and the
-   distinction is the reason the basis is a field.
+   series: a day with no closed trade carries a return of exactly zero rather
+   than no point at all, because a calendar-day series cannot leave a day out.
+   Reading that flat zero as a day the account was marked on is the mistake the
+   ``ReturnSeriesBasis`` field exists to stop.
 
 Idempotency is by source result digest. The event id is a UUID5 over that
 digest, so a second import of the same artifact recognises its own event and
