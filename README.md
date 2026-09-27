@@ -994,10 +994,11 @@ uv run trading-house research trial verify
   a wall clock, for the same reason.
 - **`start`** appends the one event the denominators move on, against a trial a
   `preregistered` protocol declared or an explicit legacy import declared. Its
-  `occurred_at` is the operator's own start time, declared rather than read from
-  the clock at the moment of the command: a start has no bundle, so there is
-  nothing to recover a time from, and borrowing another document's would put a
-  time on the row that no artefact supports. It is declared provenance, not proof
+  `occurred_at` is the operator's own start time, taken from `--started-at` when it
+  is given and from the command's own clock when it is not. Either way it is
+  declared provenance: a start has no bundle, so there is nothing to recover a
+  time from, and borrowing another document's would put a time on the row that no
+  artefact supports. It is not proof
   of order — the database row's `recorded_at` is the only registration-order
   authority, and nothing in the chain can observe when a backtest actually began.
   That time is part of the event's canonical bytes, so a retried `start` reuses

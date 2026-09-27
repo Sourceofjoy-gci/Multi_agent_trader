@@ -1547,6 +1547,11 @@ def research_trial_count() -> None:
     questions and are tracked separately: a repeated execution raises the audit
     count without being a new lottery, and that distinction is the reason these
     are three numbers rather than one.
+
+    The specification count is a set of the ``spec_sha256`` values callers
+    supplied, and the chain preserves them without vouching that any of them
+    matches a candidate the protocol actually declared. Read it as a label the
+    ledger keeps, not a verdict.
     """
 
     def operation() -> dict[str, JsonValue]:

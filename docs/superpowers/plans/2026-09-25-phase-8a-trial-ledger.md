@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Read this first:** this plan was executed, then reviewed, and it was found wrong about its own
+> operator surface. It says "six commands" in the File Map (line 61) and in Task 6 (lines 1826,
+> 1852), and the shipped group has **seven**. The seventh is `research trial start`, added because
+> nothing here ever emitted an `EXECUTION_STARTED` event, which made all three deflation
+> denominators read zero. See the amendment at the end of this document.
+
 **Goal:** Build the durable, append-only trial evidence foundation that preregisters candidate families, seals immutable result bundles, verifies them, and imports the three completed Phase 7 results as explicitly legacy evidence.
 
 **Architecture:** A frozen `TrialProtocol` seals a complete candidate tuple in one PostgreSQL event. A content-addressed JSON evidence store owns result bytes; PostgreSQL owns registration order, event identity, and a server-computed hash chain. `research trial` is the only new CLI surface. The existing `Trial`, `TrialStatus`, and `deflation_trial_count` remain compatible; the ledger protocol grows append/replay methods rather than introducing a second ledger.
@@ -1929,10 +1935,13 @@ The last two grants are not optional, and their absence is the failure this fall
 shipped with. `init-roles.sh` issues both — the migrator's `CONNECT` at line 62 and the schema grant
 at line 76 — but only on a fresh cluster, because the script runs from
 `docker-entrypoint-initdb.d`. Against a volume that already exists, an operator reaches this
-fallback instead. Without the migrator's `CONNECT` the research migration fails to connect at all;
-without `CREATE ON SCHEMA public` it connects and then fails with `permission denied for schema
-public` on `CREATE TABLE alembic_version`, because a fresh database's `public` schema grants
-nothing to these roles and a database-level `CREATE` is not a schema-level one.
+fallback instead. Omitting `CREATE ON SCHEMA public` is what actually breaks it: the research
+migration connects and then fails with `permission denied for schema public` on
+`CREATE TABLE alembic_version`, because a fresh database's `public` schema grants nothing to these
+roles and a database-level `CREATE` is not a schema-level one. The migrator's `CONNECT` grant is
+listed because `init-roles.sh` issues it and its absence would break a cluster configured more
+tightly than PostgreSQL's defaults; with the `PUBLIC` grant that `CREATE DATABASE` carries by
+default it is not what failed here, and the migrator inherits the owner role either way.
 
 Then run the migrations:
 
