@@ -860,13 +860,16 @@ from one can never be replayed into the other.
   (exit 5), *before* the first evidence byte is written. A database that has
   never had the ledger tables cannot record the seal either, so writing first
   would leave a document behind for a command that then refuses to name it.
-- **An outcome against an undeclared trial is refused** (exit 15). `RESULT_RECORDED`,
-  `FAILED` and `EVIDENCE_SEALED` are admissible only against a trial some
-  `preregistered` protocol declared, or an explicit legacy import. Containment,
-  not a column: a protocol seals its whole candidate family inside one event.
-  `record` asks the same question *before* it writes the evidence, so a trial
-  nobody declared leaves an empty evidence root rather than a sealed document no
-  ledger row points at; the store's append check is still what enforces it.
+- **An event against an undeclared trial is refused** (exit 15). `EXECUTION_STARTED`,
+  `RESULT_RECORDED`, `FAILED` and `EVIDENCE_SEALED` are admissible only against a
+  trial some `preregistered` protocol declared, or an explicit legacy import.
+  Containment, not a column: a protocol seals its whole candidate family inside
+  one event. `start` is in that set on purpose — an execution nobody declared is
+  still a draw from the search space, and admitting one would let the deflation
+  denominator be widened by whoever cares to. `record` asks the same question
+  *before* it writes the evidence, so a trial nobody declared leaves an empty
+  evidence root rather than a sealed document no ledger row points at; the
+  store's append check is still what enforces it.
 - **A protocol with no candidate family is refused.** No candidates is not "one
   candidate whose values are unknown" — a trial that is not declared cannot be
   counted, and that is the denominator every later statistic divides by.
@@ -941,12 +944,19 @@ compared as if they were the same.
 
 ### Commands
 
-Six commands, all under `research trial`. Every one of them is read-only on the
+Seven commands, all under `research trial`. Every one of them is read-only on the
 filesystem except `record` and `import-legacy`, which write evidence.
 
 ```bash
 # Seal a frozen protocol and its whole candidate family -- one event, not one per candidate.
 uv run trading-house research trial register --protocol protocol.json
+
+# Record that one execution of a declared trial began. This is the event the three
+# deflation denominators are counted from, so a trial run without it counts as
+# though it never ran. --spec-sha256 is the digest of the preregistered
+# specification being run, as the trial declares it.
+uv run trading-house research trial start \
+  --trial-id trial-1 --attempt-id attempt-1 --spec-sha256 1a2b3c...
 
 # Seal one attempt's evidence and record that it was written.
 uv run trading-house research trial record \
@@ -978,6 +988,17 @@ uv run trading-house research trial verify
   digest, so re-running it on the same file is a recognised retry rather than a
   second registration. `occurred_at` is the end of the declared data window, not
   a wall clock, for the same reason.
+- **`start`** appends the one event the denominators move on, against a trial a
+  `preregistered` protocol declared or an explicit legacy import declared. Its
+  `occurred_at` is the operator's own start time, read from the clock at the
+  moment of the command: a start has no bundle, so there is nothing to recover a
+  time from, and borrowing another document's would put a time on the row that no
+  artefact supports. The consequence is that a *retried* `start` of the same
+  attempt id is refused with exit 15 rather than recognised — the id is the same
+  and the chain keeps one event, but the bytes differ, and the chain's
+  retry-by-id path returns an existing row only for bytes it already holds. The
+  denominator cannot be widened by retrying; the exit code just says so
+  awkwardly.
 - **`record`** takes an `EvidenceBundle` JSON document. The bundle is the single
   source of identity, so `--trial-id` and `--attempt-id` are *checked against it*
   rather than trusted, and the trial's declaration is checked against the ledger
@@ -989,6 +1010,18 @@ uv run trading-house research trial verify
   count without being a new lottery, and that distinction is why they are three.
 
 ### What Phase 8A does not implement
+
+**`effective_specifications` is a count of supplied digests, not a verified
+match.** It is a `len(set())` over the `spec_sha256` each started attempt carries,
+and nothing in this phase compares that digest against a preregistered
+declaration — `ExecutionStartedPayload` does not carry one, and a protocol seals
+its whole candidate family inside a single event, so there is no per-candidate
+digest in the chain to compare against. The ledger therefore *preserves* the
+digest and cannot *vouch* for it, and `start`'s `--spec-sha256` is operator-
+supplied for that reason. Read the third number as "how many distinct
+specification digests this operator claimed", not as "how many distinct
+specifications were tried". A retried `start` is refused rather than recognised
+for the same family of reasons, as its own bullet above says.
 
 **It imports evidence; it does not analyse it.** There is no walk-forward
 analysis, no Deflated Sharpe Ratio, no Probability of Backtest Overfitting, no
@@ -1019,6 +1052,7 @@ uv run trading-house --help
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
 | `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
+| `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
@@ -1109,7 +1143,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 7 | `audit append failed` | The append transaction did not complete | Check connectivity and privileges; the ledger is unchanged because appends are transactional |
 | 8 | `broker terminal unavailable` | MetaTrader 5 is not running, will not initialise, or the server-clock probe read a stale tick from a closed market | Start the terminal and log in. During the venue step of `health` this degrades to "not performed" rather than failing the gate |
 | 9 | `refusing to operate a non-demo account` | The terminal reports a real or contest account | **Stop.** Log into a demo account. This never degrades to a skipped step — it is the one venue failure that fails the gate |
-| 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an outcome against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race |
+| 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an event against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race, and a retried `start` — whose bytes differ because its timestamp is a clock read — lands here too, with the attempt already in the chain |
 | 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |

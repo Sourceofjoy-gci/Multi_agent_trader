@@ -1992,3 +1992,49 @@ If neither file changed, do not create an empty commit.
 - [x] Every new CLI command has a unit or integration failure-path test.
 - [x] The plan names exact files, symbols, commands, expected results, and commit boundaries.
 - [x] No unresolved instruction or reference to an undefined type remains.
+
+---
+
+## Amendment — 2026-09-27: a seventh command, `research trial start`
+
+Added after the plan's own review, and after a review of the plan's result found
+the defect this closes. The plan mandated six `research trial` commands and none
+of them started an execution, so nothing in `src/` ever constructed an
+`ExecutionStartedPayload` — while `trial_counters` counts the deflation
+denominators from `EXECUTION_STARTED` and `LEGACY_IMPORTED` alone. An operator
+who followed this plan's README verbatim got `audit_attempts=0,
+selection_lotteries=0, effective_specifications=0` reported as a fact about
+their own record, after a complete `register` + `record`. The plan was wrong
+about its own operator surface, not merely incomplete.
+
+So the command set is seven, and `start` is the seventh: `--trial-id`,
+`--attempt-id` and a client-asserted `--spec-sha256`, appending one
+`EXECUTION_STARTED` event whose id is `uuid5(NAMESPACE_URL,
+f"trading-house:trial-event:start:{trial_id}:{attempt_id}")`. Two consequences
+are deliberate and are recorded here rather than left for a later reader to
+rediscover:
+
+- **`EXECUTION_STARTED` joined the fail-closed set** (`_OUTCOME_EVENT_TYPES`,
+  renamed `_REQUIRES_REGISTRATION` in `ledger_store.py`). The plan guarded
+  outcomes; a start is a draw from the search space whether or not it is ever
+  recorded, so admitting one against an undeclared trial would let anyone
+  inflate the denominator the whole phase exists to keep honest.
+- **`--spec-sha256` is operator-supplied, not resolved from the
+  preregistration.** A protocol seals its whole candidate family inside one
+  event, so there is no per-candidate digest in the chain to check against, and
+  `ExecutionStartedPayload` carries none. The chain preserves the digest; it
+  cannot vouch for it. The README now says so under "What Phase 8A does not
+  implement".
+
+One known gap the review surfaced and this amendment does **not** close: because
+a start's timestamp is the operator's clock read rather than a time recovered
+from a document, a retried `start` of the same attempt id carries the same event
+id but different canonical bytes, and the chain's retry-by-id path returns an
+existing row only for bytes it already holds. The retry is therefore refused
+with exit 15 rather than recognised. The safety property holds — one event, a
+chain that still verifies, a denominator that cannot be widened by retrying — but
+the exit code is the wrong answer for a genuine retry. Closing it needs either an
+operator-supplied `--started-at` on the command (as `import-legacy` has) or a
+short-circuit in the store, and both are Phase 8A decisions rather than
+housekeeping. The plan's task text above is left exactly as written.
+
