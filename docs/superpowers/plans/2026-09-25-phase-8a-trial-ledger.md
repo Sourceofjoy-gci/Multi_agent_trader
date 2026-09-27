@@ -2026,15 +2026,17 @@ rediscover:
   cannot vouch for it. The README now says so under "What Phase 8A does not
   implement".
 
-One known gap the review surfaced and this amendment does **not** close: because
-a start's timestamp is the operator's clock read rather than a time recovered
-from a document, a retried `start` of the same attempt id carries the same event
-id but different canonical bytes, and the chain's retry-by-id path returns an
-existing row only for bytes it already holds. The retry is therefore refused
-with exit 15 rather than recognised. The safety property holds — one event, a
-chain that still verifies, a denominator that cannot be widened by retrying — but
-the exit code is the wrong answer for a genuine retry. Closing it needs either an
-operator-supplied `--started-at` on the command (as `import-legacy` has) or a
-short-circuit in the store, and both are Phase 8A decisions rather than
-housekeeping. The plan's task text above is left exactly as written.
+One known gap the review surfaced, recorded here and closed immediately after by a
+later review of the implemented command: because a start's timestamp was the
+operator's clock read rather than a time recovered from a document, a retried
+`start` of the same attempt id carried the same event id but different canonical
+bytes, and the chain's retry-by-id path returns an existing row only for bytes it
+already holds. The retry was therefore refused with exit 15 rather than recognised.
+The safety property held throughout — one event, a chain that still verifies, a
+denominator that cannot be widened by retrying — but the exit code was the wrong
+answer for a genuine retry. It is closed the way `import-legacy --registered-at`
+closes the same hole: `start` now takes an operator-supplied `--started-at`, a
+retry reusing that value derives identical bytes and is recognised, and a retry
+under a *different* value is still the conflict it is. The plan's task text above
+is left exactly as written.
 

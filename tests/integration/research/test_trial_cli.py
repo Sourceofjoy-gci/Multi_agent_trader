@@ -79,6 +79,12 @@ runner = CliRunner()
 # the wall clock is the whole point: it is what makes a retry byte-identical.
 IMPORT_CLOCK = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 _IMPORT_CLOCK_ARGUMENT = "2026-03-01T12:00:00"
+# The same reasoning for ``start``: a start event's canonical bytes include its
+# declared clock, so a retry only matches the first run's bytes if it declares the
+# same one. Two values, because a second start under a *different* clock is the
+# conflict case and has to be typeable from the same helper.
+_START_CLOCK_ARGUMENT = "2026-03-01T13:00:00"
+_OTHER_START_CLOCK_ARGUMENT = "2026-03-01T14:00:00"
 _RUN_START = datetime(2024, 1, 1, tzinfo=UTC)
 
 
@@ -309,29 +315,35 @@ def _register(tmp_path: Path) -> dict[str, Any]:
 
 
 def _start(
-    *, trial_id: str = "trial-1", attempt_id: str = "attempt-1", spec_sha256: str | None = None
+    *,
+    trial_id: str = "trial-1",
+    attempt_id: str = "attempt-1",
+    spec_sha256: str | None = None,
+    started_at: str | None = None,
 ) -> Any:
     """``start`` as an operator runs it, with no assertion on the outcome.
 
     Returned rather than asserted so the refusal and the retry cases can read the
     exit code themselves. ``--spec-sha256`` defaults to the registered protocol's
-    own digest, which is the value an operator copying the README will type.
+    own digest, which is the value an operator copying the README will type, and
+    ``--started-at`` is left off entirely unless the case is about the declared
+    clock -- the default-clock invocation is the one most operators will run.
     """
 
-    return runner.invoke(
-        cli.app,
-        [
-            "research",
-            "trial",
-            "start",
-            "--trial-id",
-            trial_id,
-            "--attempt-id",
-            attempt_id,
-            "--spec-sha256",
-            spec_sha256 or canonical_sha256(_protocol()),
-        ],
-    )
+    argv = [
+        "research",
+        "trial",
+        "start",
+        "--trial-id",
+        trial_id,
+        "--attempt-id",
+        attempt_id,
+        "--spec-sha256",
+        spec_sha256 or canonical_sha256(_protocol()),
+    ]
+    if started_at is not None:
+        argv += ["--started-at", started_at]
+    return runner.invoke(cli.app, argv)
 
 
 def _record(
@@ -457,28 +469,61 @@ def test_start_refuses_a_trial_the_protocol_never_declared(
 def test_starting_the_same_attempt_twice_appends_one_event(
     tmp_path: Path, research_env: Path, research_ledger_dsn: str
 ) -> None:
-    """A retried ``start`` cannot widen the denominator or break the chain.
+    """A retried ``start`` is recognised, appends nothing, and moves no denominator.
 
-    The event id is derived from the trial and the attempt alone, so the second
-    call carries the *same* id and can never become a second attempt. What it does
-    become is a refusal: the event's timestamp is a clock read, so the retry's
-    canonical bytes differ from the first's, and ``append_trial_ledger_event``
-    returns an existing row only for bytes it already holds. The safety half is
-    asserted here and holds -- one event, and a chain that still verifies -- but
-    the exit code is 15 rather than 0, which is a known, documented gap in the
-    command's retry story rather than an accident of this test. See the README's
-    "What Phase 8A does not implement".
+    The event id is derived from the trial and the attempt alone, so the retry
+    carries the same id; what makes the chain recognise it instead of calling it a
+    conflict is that its canonical bytes are *identical* to the bytes already
+    stored, and the declared clock is the only part of those bytes the operator
+    can repeat. So the retry below passes the same ``--started-at`` deliberately:
+    a stable timestamp is what makes this idempotent, and reading the clock again
+    here would "simplify" the command straight back to a refusal on every retry.
     """
 
     _register(tmp_path)
 
-    first = _start()
-    second = _start()
+    first = _start(started_at=_START_CLOCK_ARGUMENT)
+    second = _start(started_at=_START_CLOCK_ARGUMENT)
 
     assert first.exit_code == cli.ExitCode.OK, first.stderr
-    assert second.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND, second.stderr
+    assert second.exit_code == cli.ExitCode.OK, second.stderr
     events = _ledger(research_ledger_dsn).events()
     assert [record.event_type for record in events] == [
+        LedgerEventType.PREREGISTERED,
+        LedgerEventType.EXECUTION_STARTED,
+    ]
+    # The retry is not a second draw from the search space, so the denominators
+    # are exactly what one start would have produced.
+    counters = runner.invoke(cli.app, ["research", "trial", "count"])
+    assert json.loads(counters.stdout) == {
+        "status": "ok",
+        "audit_attempts": 1,
+        "selection_lotteries": 1,
+        "effective_specifications": 1,
+    }
+    assert _verify().exit_code == cli.ExitCode.OK
+
+
+def test_a_second_start_under_a_different_clock_is_refused_as_a_conflict(
+    tmp_path: Path, research_env: Path, research_ledger_dsn: str
+) -> None:
+    """The other half of the contract: a different body under the same id stays refused.
+
+    The retry above is recognised because its bytes match what the chain already
+    holds. Were a different ``--started-at`` tolerated too, the append function
+    could no longer tell an operator re-running one command from one rewriting the
+    record under an id it already owns, and the first writer's claim would be
+    worthless. This is the case that keeps conflict detection honest.
+    """
+
+    _register(tmp_path)
+
+    first = _start(started_at=_START_CLOCK_ARGUMENT)
+    refused = _start(started_at=_OTHER_START_CLOCK_ARGUMENT)
+
+    assert first.exit_code == cli.ExitCode.OK, first.stderr
+    assert refused.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND, refused.stderr
+    assert [record.event_type for record in _ledger(research_ledger_dsn).events()] == [
         LedgerEventType.PREREGISTERED,
         LedgerEventType.EXECUTION_STARTED,
     ]

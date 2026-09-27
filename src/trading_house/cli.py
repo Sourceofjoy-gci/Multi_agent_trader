@@ -1359,6 +1359,19 @@ def research_trial_start(
             help="Digest of the preregistered specification being run, as the trial declares it.",
         ),
     ],
+    started_at: Annotated[
+        datetime | None,
+        typer.Option(
+            "--started-at",
+            help=(
+                "Declared start time, UTC (e.g. 2026-03-01T12:00:00). A retry "
+                "passing the same value is recognised and appends nothing, while "
+                "a different value is refused as a conflict, so this is only "
+                "needed when a run crashed mid-start and it is not knowable "
+                "whether its event landed: pass that run's value."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Record that one execution of a declared trial began.
 
@@ -1372,10 +1385,28 @@ def research_trial_start(
     seals a whole protocol and does not publish a per-candidate digest, so the
     chain preserves what it is given and ``count`` counts distinct digests. That
     is stated in the README rather than left to be discovered.
+
+    ``--started-at`` is the operator's declared start time, for the same reason
+    and with the same caveat as a bundle's ``registered_at``: it is provenance,
+    not evidence of order, and the database row's ``recorded_at`` is the only
+    registration-order authority. The chain cannot observe when a backtest
+    actually began.
     """
 
     def operation() -> dict[str, JsonValue]:
-        record = _trial_ledger().append(execution_started_event(trial_id, attempt_id, spec_sha256))
+        record = _trial_ledger().append(
+            execution_started_event(
+                trial_id,
+                attempt_id,
+                spec_sha256,
+                # Read once, and the same value on every call within this process,
+                # so a retry that reaches the event again derives identical bytes.
+                # ``_as_utc`` because a timestamp typed on a command line is naive
+                # and the payload refuses a naive one -- the same convention every
+                # other UTC option in this file uses.
+                started_at=_as_utc(started_at) if started_at is not None else datetime.now(UTC),
+            )
+        )
         return {
             "trial_id": trial_id,
             "attempt_id": attempt_id,

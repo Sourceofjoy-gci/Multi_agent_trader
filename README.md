@@ -954,9 +954,13 @@ uv run trading-house research trial register --protocol protocol.json
 # Record that one execution of a declared trial began. This is the event the three
 # deflation denominators are counted from, so a trial run without it counts as
 # though it never ran. --spec-sha256 is the digest of the preregistered
-# specification being run, as the trial declares it.
+# specification being run, as the trial declares it. --started-at is that run's
+# declared start time; re-running with the same value is recognised and appends
+# nothing, so it is only needed when a run crashed mid-start and it is not
+# knowable whether its event landed.
 uv run trading-house research trial start \
-  --trial-id trial-1 --attempt-id attempt-1 --spec-sha256 1a2b3c...
+  --trial-id trial-1 --attempt-id attempt-1 --spec-sha256 1a2b3c... \
+  --started-at 2026-03-01T12:00:00
 
 # Seal one attempt's evidence and record that it was written.
 uv run trading-house research trial record \
@@ -990,15 +994,16 @@ uv run trading-house research trial verify
   a wall clock, for the same reason.
 - **`start`** appends the one event the denominators move on, against a trial a
   `preregistered` protocol declared or an explicit legacy import declared. Its
-  `occurred_at` is the operator's own start time, read from the clock at the
-  moment of the command: a start has no bundle, so there is nothing to recover a
-  time from, and borrowing another document's would put a time on the row that no
-  artefact supports. The consequence is that a *retried* `start` of the same
-  attempt id is refused with exit 15 rather than recognised — the id is the same
-  and the chain keeps one event, but the bytes differ, and the chain's
-  retry-by-id path returns an existing row only for bytes it already holds. The
-  denominator cannot be widened by retrying; the exit code just says so
-  awkwardly.
+  `occurred_at` is the operator's own start time, declared rather than read from
+  the clock at the moment of the command: a start has no bundle, so there is
+  nothing to recover a time from, and borrowing another document's would put a
+  time on the row that no artefact supports. It is declared provenance, not proof
+  of order — the database row's `recorded_at` is the only registration-order
+  authority, and nothing in the chain can observe when a backtest actually began.
+  That time is part of the event's canonical bytes, so a retried `start` reuses
+  the same `--started-at`, is recognised under the same event id, and appends
+  nothing. A retry under a *different* value is a different body under an id the
+  chain already holds, and is refused with exit 15 as it should be.
 - **`record`** takes an `EvidenceBundle` JSON document. The bundle is the single
   source of identity, so `--trial-id` and `--attempt-id` are *checked against it*
   rather than trusted, and the trial's declaration is checked against the ledger
@@ -1020,8 +1025,7 @@ digest in the chain to compare against. The ledger therefore *preserves* the
 digest and cannot *vouch* for it, and `start`'s `--spec-sha256` is operator-
 supplied for that reason. Read the third number as "how many distinct
 specification digests this operator claimed", not as "how many distinct
-specifications were tried". A retried `start` is refused rather than recognised
-for the same family of reasons, as its own bullet above says.
+specifications were tried".
 
 **It imports evidence; it does not analyse it.** There is no walk-forward
 analysis, no Deflated Sharpe Ratio, no Probability of Backtest Overfitting, no
@@ -1143,7 +1147,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 7 | `audit append failed` | The append transaction did not complete | Check connectivity and privileges; the ledger is unchanged because appends are transactional |
 | 8 | `broker terminal unavailable` | MetaTrader 5 is not running, will not initialise, or the server-clock probe read a stale tick from a closed market | Start the terminal and log in. During the venue step of `health` this degrades to "not performed" rather than failing the gate |
 | 9 | `refusing to operate a non-demo account` | The terminal reports a real or contest account | **Stop.** Log into a demo account. This never degrades to a skipped step — it is the one venue failure that fails the gate |
-| 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an event against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race, and a retried `start` — whose bytes differ because its timestamp is a clock read — lands here too, with the attempt already in the chain |
+| 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an event against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race, and a `start` re-run under a *different* `--started-at` lands here too, with the attempt already in the chain — re-run it with the first run's value |
 | 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |

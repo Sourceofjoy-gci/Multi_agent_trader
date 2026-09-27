@@ -28,7 +28,7 @@ that claim false. A refusal is cheap and a silent collapse is not.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -95,7 +95,9 @@ def research_ledger_dsn(settings: RuntimeSettings) -> SecretStr:
     return research
 
 
-def execution_started_event(trial_id: str, attempt_id: str, spec_sha256: str) -> LedgerEvent:
+def execution_started_event(
+    trial_id: str, attempt_id: str, spec_sha256: str, started_at: datetime
+) -> LedgerEvent:
     """The event an operator's own start earns, before any bundle exists.
 
     The id is derived from the trial and the attempt alone -- the two things that
@@ -103,18 +105,24 @@ def execution_started_event(trial_id: str, attempt_id: str, spec_sha256: str) ->
     of it. A different specification under the same attempt id is a different
     event in every other way and is refused as the conflict it is.
 
-    ``occurred_at`` is a clock read here rather than a time recovered from a
-    document, and that is not an inconsistency with the two builders below: a
+    ``occurred_at`` is a time the operator declared rather than one recovered from
+    a document, and that is not an inconsistency with the two builders below: a
     start has no bundle, so there is nothing to recover it from. Claiming
     otherwise -- borrowing a protocol's data-window end, or a result's
     ``occurred_at`` -- would put a time on the row that no artefact supports, and
     this event's entire claim is that the execution began when the operator said
-    it began. The cost is stated rather than hidden: the bytes therefore differ
-    between two attempts at starting the same attempt, so the chain's retry-by-id
-    path cannot recognise the second one as the first and refuses it.
+    it began. It is declared provenance rather than proof of order, for the same
+    reason a bundle's ``registered_at`` is: the database event's own
+    ``recorded_at`` is the only registration-order authority here, and nothing in
+    the chain can observe when a backtest actually began.
+
+    Taking that value as an argument rather than reading the clock here is what
+    makes the command retryable. A retry reuses the declared value and so derives
+    identical bytes, which the chain recognises as the same event; a retry under a
+    different value is a different body under an id the chain already holds, and
+    is refused as the conflict it is.
     """
 
-    started_at = datetime.now(UTC)
     return LedgerEvent(
         event_id=uuid5(
             NAMESPACE_URL,
