@@ -107,7 +107,6 @@ def test_canonical_bytes_are_sorted_compact_utf8_and_reject_nan() -> None:
 
     assert encoded.startswith(b'{"agent_run_id":"run-1"')
     assert b", " not in encoded
-    assert canonical_sha256(protocol) == canonical_sha256(protocol)
 
 
 def test_a_research_digest_is_domain_separated() -> None:

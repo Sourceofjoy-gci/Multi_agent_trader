@@ -187,12 +187,19 @@ def _protocol_payload() -> dict[str, Any]:
 
 PROTOCOL_KEYS = tuple(_protocol_payload())
 
+# A known answer for one fixed bundle. ``canonical.py`` promises the encoding is
+# stable across processes and Python versions, so a digest taken today still
+# verifies when the evidence is re-read in a year -- and a digest compared
+# against itself cannot show that, because a ``canonical_sha256`` stubbed to 64
+# zeros passes it. Only a value recorded here fails when a future ``json`` or
+# ``Decimal`` change moves the bytes, which is what the promise needs. Regenerate
+# with ``canonical_sha256(_bundle())`` and commit the new value on its own,
+# naming the version that moved the encoding.
+_CANONICAL_BUNDLE_SHA256 = "b07618429d5992d0fb038b6ad53b8401fa1aa9ad467efd06c20421a3557d8558"
 
-@given(DAY_OFFSETS)
-def test_canonical_digest_is_stable(day_offset: int) -> None:
-    assert canonical_sha256(_bundle(day_offset=day_offset)) == canonical_sha256(
-        _bundle(day_offset=day_offset)
-    )
+
+def test_one_fixed_bundle_has_a_known_canonical_digest() -> None:
+    assert canonical_sha256(_bundle()) == _CANONICAL_BUNDLE_SHA256
 
 
 @given(DAY_OFFSETS)
