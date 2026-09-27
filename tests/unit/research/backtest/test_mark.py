@@ -174,11 +174,12 @@ def test_a_non_positive_prior_close_is_refused_rather_than_defaulted() -> None:
 
 
 def test_a_one_day_range_ending_on_a_zero_close_is_refused_not_reported_as_minus_one() -> None:
-    # The two-day case is already refused inside the loop, on the second day's
-    # denominator. A one-day range is the only shape that reaches the post-loop
-    # check, and the shape ``legacy_import.derive_realized_daily_returns``
-    # refuses too; without the check this returned a clean -100% for a wiped-out
-    # account.
+    # Both shapes end refused, but by different checks and for different
+    # reasons. A range that still has a day left refuses in-loop, on the next
+    # day's denominator. A range whose LAST day closes at zero has no next day
+    # to be caught by, so it reaches the post-loop check -- which is also the
+    # shape ``legacy_import.derive_realized_daily_returns`` refuses. Without
+    # that check this returned a clean -100% for a wiped-out account.
     series = _series(
         EquityObservation(
             marked_at=datetime(2024, 1, 1, 21, 0, tzinfo=UTC),
