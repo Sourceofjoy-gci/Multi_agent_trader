@@ -1921,8 +1921,18 @@ If the query returns no row, create the database and grants explicitly:
 
 ```powershell
 docker compose exec -T postgres psql -U postgres -d trading_house -c "CREATE DATABASE trading_house_research"
-docker compose exec -T postgres psql -U postgres -d trading_house -c "GRANT CONNECT, CREATE ON DATABASE trading_house_research TO trading_house_owner; GRANT CONNECT ON DATABASE trading_house_research TO trading_house_runtime; ALTER DATABASE trading_house_research SET TIME ZONE 'UTC'"
+docker compose exec -T postgres psql -U postgres -d trading_house -c "GRANT CONNECT, CREATE ON DATABASE trading_house_research TO trading_house_owner; GRANT CONNECT ON DATABASE trading_house_research TO trading_house_runtime; GRANT CONNECT ON DATABASE trading_house_research TO trading_house_migrator; ALTER DATABASE trading_house_research SET TIME ZONE 'UTC'"
+docker compose exec -T postgres psql -U postgres -d trading_house_research -c "GRANT CREATE ON SCHEMA public TO trading_house_owner"
 ```
+
+The last two grants are not optional, and their absence is the failure this fallback originally
+shipped with. `init-roles.sh` issues both — the migrator's `CONNECT` at line 62 and the schema grant
+at line 76 — but only on a fresh cluster, because the script runs from
+`docker-entrypoint-initdb.d`. Against a volume that already exists, an operator reaches this
+fallback instead. Without the migrator's `CONNECT` the research migration fails to connect at all;
+without `CREATE ON SCHEMA public` it connects and then fails with `permission denied for schema
+public` on `CREATE TABLE alembic_version`, because a fresh database's `public` schema grants
+nothing to these roles and a database-level `CREATE` is not a schema-level one.
 
 Then run the migrations:
 
