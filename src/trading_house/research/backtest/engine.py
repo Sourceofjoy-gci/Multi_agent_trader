@@ -384,7 +384,14 @@ class Backtester:
             # rejected the idea. ``_gross_pnl`` is the same conversion the
             # eventual exit uses, with the bar's mid close standing in for an
             # exit price: a mark is a valuation, and pricing it through the
-            # fill model would invent an exit that did not happen.
+            # fill model would invent an exit that did not happen. That leaves
+            # out what ``_trade`` also leaves to its own lines -- the commission
+            # the exit books, and the swap -- so a mark taken immediately before
+            # an exit is not that exit's ``net_pnl``, and equity steps down by
+            # the charge at every close. A reader comparing a mark against a
+            # trade's ``net_pnl`` is looking at a valuation path and an
+            # accounting: related, not the same claim. Design section 9 carries
+            # it as a documented limitation, and 8B2 owns the attribution.
             if position is None:
                 unrealized = Decimal(0)
             else:

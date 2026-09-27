@@ -22,9 +22,10 @@ from tests.unit.research.backtest.conftest import (
     _run,
     ramp_price,
 )
-from trading_house.core.errors import TimestampError
+from trading_house.core.errors import EquityEvidenceError, TimestampError
 from trading_house.core.schemas import Side
 from trading_house.marketdata.models import BarQuality, Timeframe, duration
+from trading_house.research.backtest import engine
 from trading_house.research.backtest.engine import (
     BacktestRefused,
     trail_candidate,
@@ -105,8 +106,13 @@ def test_a_processed_bar_with_no_proposal_still_gets_a_mark() -> None:
 
     ``_ramp(60)`` gives 60 bars and the strategy asks for a proposal on every
     twentieth, so most bars are processed and untraded. The count is the whole
-    claim: a mark per *trade* would understate the path, and a mark per raw bar
-    would include bars the defective-bar check skipped.
+    claim: a mark per *trade* would understate the path. Tying the count to the
+    processed bars rather than the raw ones is ``BacktestOutcome``'s invariant --
+    one observation per ``bars_seen`` -- so a mark for a skipped bar could not
+    land at all. ``_ramp(60)`` holds no defective bar, so this test cannot draw
+    that distinction itself;
+    ``test_a_defective_bar_within_tolerance_is_counted_and_skipped`` does, at
+    39 observations against 40 bars.
     """
 
     outcome = _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
@@ -114,6 +120,38 @@ def test_a_processed_bar_with_no_proposal_still_gets_a_mark() -> None:
     assert len(outcome.equity.observations) == 60
     assert outcome.result.bars_seen == 60
     assert len(outcome.result.trades) < 60
+
+
+def test_a_run_past_the_observation_ceiling_refuses_rather_than_subsampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one branch in the emission that fails closed, and the guard with the
+    most room to rot: a ceiling nothing reaches is a ceiling nothing tests.
+
+    Lowered rather than reached. The constant is 2,000,000 and the comparison is
+    read from this module's global, so the honest way to cover it is to move the
+    ceiling, not to build two million bars.
+
+    Refused, not truncated. Sixty bars against a ceiling of three: an engine
+    that stopped at the ceiling would have returned a three-observation series,
+    and one that refuses returns no series at all. A subsample is evidence of
+    something other than the run, which is the one thing this framework exists
+    to prevent.
+    """
+
+    monkeypatch.setattr(engine, "MAX_EQUITY_OBSERVATIONS", 3)
+
+    with pytest.raises(EquityEvidenceError) as error:
+        _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
+
+    # Design section 7 promises the count and the limit, so both ride the
+    # private cause. The count is 4, not 3: three observations are already
+    # stored and it is the fourth mark that breaks the ceiling.
+    assert error.value.__cause__ is not None
+    assert str(error.value.__cause__) == "equity observations exceed the ceiling: 4 > 3"
+    # And the public message stays as bare as every other code in this repo's
+    # errors, so an edit that pastes the count into it fails here.
+    assert str(error.value) == "mark-to-market equity evidence is not trustworthy"
 
 
 def test_an_assembled_run_materializes_the_source_once_and_keeps_the_known_answer() -> None:
@@ -308,9 +346,14 @@ def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None
     assert result.trades == ()
     assert result.net_pnl == Decimal(0)
     assert result.bars_seen == 40
-    # Phase 8B1: the discarded position is why the final observation is not
-    # flat, and a not-flat series is why BacktestOutcome's reconciliation is
-    # conditional. Without this the conditional could be vacuously satisfied.
+    # Phase 8B1: the discarded position is why the series ends not flat -- one
+    # mark per processed bar, the last of them still holding. What this run
+    # cannot show is that the ``is_flat`` guard is load-bearing: with no trades
+    # and no realized PnL, a run that reconciled unconditionally would agree
+    # with its own result all the same.
+    # ``test_the_final_realized_total_is_reconciled_against_the_result_only_when_flat``
+    # in ``test_mark.py`` is the test that carries that, because its closing
+    # realized total disagrees with the result's net.
     assert outcome.equity.is_flat is False
     assert outcome.equity.observations[-1].open_positions == 1
     assert len(outcome.equity.observations) == outcome.result.bars_seen

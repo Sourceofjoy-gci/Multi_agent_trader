@@ -1244,11 +1244,15 @@ def backtest_run(
             settings.constitution_signature_path,
             settings.constitution_public_key_path,
         )
-        result = build_backtester(
-            bars=_bar_store(),
-            contract=instrument_contract,
-            constitution=loaded_constitution,
-        ).run(request).result
+        result = (
+            build_backtester(
+                bars=_bar_store(),
+                contract=instrument_contract,
+                constitution=loaded_constitution,
+            )
+            .run(request)
+            .result
+        )
         # The result is re-parsed rather than embedded as a string so the whole
         # payload is one key-sorted JSON document, like every other command's.
         # The digest is still taken over the model's own declaration-ordered

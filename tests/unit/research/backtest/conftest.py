@@ -474,12 +474,12 @@ def _run(
 ) -> BacktestResult:
     """The result, for the many tests that only care about trades and their totals.
 
-    Every one of the 50 call sites below wants the result and not the series, so
-    this keeps them untouched. The series is reached through ``_outcome``, and
-    the two cannot drift because one calls the other. The keywords stay explicit
-    here rather than collapsing to ``**kwargs: Any``, because a mistyped keyword
-    at those call sites is a type error the moment it is written and a runtime
-    surprise long after.
+    Every one of the 41 call sites, all of them in ``test_engine.py``, wants the
+    result and not the series, so this keeps them untouched. The series is
+    reached through ``_outcome``, and the two cannot drift because one calls the
+    other. The keywords stay explicit here rather than collapsing to
+    ``**kwargs: Any``, because a mistyped keyword at those call sites is a type
+    error the moment it is written and a runtime surprise long after.
     """
 
     return _outcome(
