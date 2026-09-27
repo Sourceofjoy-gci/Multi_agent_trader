@@ -1,0 +1,419 @@
+# Phase 8B1 — Mark-to-Market Equity and Canonical Daily Returns Design
+
+**Status:** approved design, pending plan
+**Date:** 2026-09-27
+**Predecessor:** Phase 8A, Canonical Evidence and Trial Ledger
+**Umbrella:** `docs/superpowers/specs/2026-09-25-phase-8-validation-design.md` (Phase 8)
+**Implements:** umbrella §6.1 and §6.2
+
+Section references are to the **umbrella design** unless prefixed with "this spec".
+
+## 1. What this slice is for
+
+8A built the ledger and the evidence store but produced no
+`MARK_TO_MARKET` return series: `ReturnSeriesBasis.MARK_TO_MARKET` is declared at
+`research/trial_ledger.py:82-85` with no producer, and `BacktestResult` carries no
+equity curve by design. Every bundle sealed so far is therefore
+`REALIZED_CLOSED_TRADES`, which §5.5 rules out for promotion-grade validation.
+
+8B1 makes the engine emit a mark-to-market equity observation at every processed
+bar close, makes that series a sealed, self-verifying evidence artifact, and
+derives the canonical daily UTC return series from it. It is the first slice of
+umbrella §4.1 item 2 and exists solely to produce the evidence §6.1–6.2 describe.
+It implements no statistics: no walk-forward, no CPCV, no PSR/DSR, no PBO, no
+bootstrap, no drawdown gate. Those are 8C.
+
+### 1.1 What this slice explicitly does not do
+
+- No per-trade cost attribution (umbrella §6.3). Spread and slippage stay folded
+  into the fill price and discarded, exactly as they are today.
+- No cost scenarios or stress reruns (umbrella §6.4). `CostModel.stress_multiplier`
+  is untouched.
+- No compounding rerun (umbrella §6.5). Sizing stays constant-notional.
+- No capacity diagnostics (umbrella §4.1). No volume-to-lots model is invented and
+  no unavailable state is added.
+- No new ledger event type, no new CLI command group, and no new dependency.
+  NumPy remains absent (umbrella D-4: "8A and 8B do not need it").
+
+## 2. Decisions this slice makes
+
+| # | Decision | Why |
+|---|---|---|
+| B1-1 | The equity series is a sidecar on a new `BacktestOutcome`, not a field on `BacktestResult` | `BacktestResult.digest()` covers the whole model, so any field added there moves every digest — including four pinned constants that name artifacts which exist on no machine but the one that ran them. A sidecar keeps them exactly as they are. |
+| B1-2 | The engine keeps discarding a position left open when bars run out; the `firm_equity + net_pnl` reconciliation applies only when the final observation is flat | `engine.py:430-434` refuses to manufacture a trade from a range's edge, and that refusal is right. Forcing flatness would move `net_pnl`, every result digest, and every known-answer number. |
+| B1-3 | A non-flat run is recorded, exits 0, and is reported not promotion-grade | It is honest evidence that fails a later gate. Treating it as an error would push operators toward the force-close B1-2 rejects. |
+| B1-4 | Marks are valued at the mid bar close, with no exit-side spread or slippage | A mark is a valuation, not a claim about what closing would fetch. Inventing a transaction cost on every bar would corrupt the series and double-count against §6.3's later attribution. |
+| B1-5 | Every processed bar is sealed as canonical JSON in the existing `EvidenceStore` | One canonical form, one digest rule, one read path. The alternative — a second compact blob format — adds normalization rules and a read path to save space on a local store that was never the bottleneck. |
+| B1-6 | The series is cross-checked against the trades rather than trusted | `result.py:91-99` omits an equity curve because storing derivable state risks disagreement with the trades it came from. The sidecar answers that objection directly: three assertions bind the series to the result. |
+| B1-7 | `backtest run` gains the capability; no new command | 8A already provides `start` and `record`. The operator flow stays register → start → run → record. |
+
+## 3. Why a sidecar, and what it costs
+
+`research/backtest/result.py:89-100` documents the omission of an equity curve
+and instructs: *"Do not add the field back."* 8B1 does not add the field back; it
+addresses the reason.
+
+The stated reason is that under D-4 equity is constant, so the curve is exactly
+the running sum of `net_pnl` over `trades`, and storing it "would duplicate state
+that can disagree with the trades it was derived from". Both halves of that are
+specific to constant-notional execution. §6.1 breaks the first: once an open
+position is marked, the curve is no longer derivable from closed trades, because
+an unrealized mark is in no trade's `net_pnl`. The second half survives and is
+answered in §6 below rather than dismissed.
+
+The digest cost of putting the series inside `BacktestResult` is concrete and
+measured. `digest()` is `sha256(model_dump_json())` over the whole model
+(`result.py:148-157`), so a new field moves every result digest. Four constants
+name artifacts that exist on no machine but the one that produced them, and so
+can never be re-derived:
+
+- the three Phase 7 result digests at `tests/acceptance/test_phase8a.py:111-115`,
+  cross-checked against `SESSION_MOMENTUM_SPEC.versioning`;
+- the same three at `tests/acceptance/test_phase7.py:64-71`;
+- the production copy of the same digests in
+  `src/trading_house/strategies/impl/session_momentum.py:50-57`;
+- `_CANONICAL_BUNDLE_SHA256` at `tests/property/test_trial_evidence.py:198`, a
+  bundle digest, which therefore embeds a result.
+
+A sidecar also keeps the three v1 bundles already sealed in the operator's
+evidence store readable. `EvidenceBundle` binds itself to `result.digest()`
+(`evidence.py:160-164`), types `result` as `BacktestResult` outright, and
+`CanonicalModel` sets `extra="forbid"` (`core/values.py:13`), so a v1 result
+shape that stopped validating would turn `research trial verify` into a failure
+on a chain it had itself sealed and verified.
+
+The cost of the sidecar is one wrapper type and one attribute access per
+existing `run()` caller. That is the trade this slice takes.
+
+## 4. Module layout
+
+One new module, `src/trading_house/research/backtest/mark.py`, holding
+`EquityObservation`, `EquitySeries`, `BacktestOutcome`, `derive_daily_returns`,
+and `MAX_EQUITY_OBSERVATIONS`.
+
+It sits inside `research/backtest/` so it is held to `BACKTEST_ALLOWED`
+(`tests/acceptance/test_architecture.py:72-80`) as well as `RESEARCH_ALLOWED`.
+That set admits `trading_house.research.backtest` but **not**
+`trading_house.research`, so `mark.py` may not import from `research/evidence.py`.
+
+`DailyReturnPoint` is therefore defined in `mark.py` and re-exported from
+`research/evidence.py`, which already imports `BacktestResult` from
+`research.backtest.result` and so may import from `research.backtest.mark`. The
+serialized shape is unchanged — `{"day": ..., "value": ...}` — so canonical bytes,
+every bundle digest, and `_CANONICAL_BUNDLE_SHA256` are unaffected by the move.
+`mark.py` needs no allowlist widening: the only contract type it touches,
+`InstrumentContract`, is in `trading_house.core.instruments`, and
+`trading_house.core` is already allowed.
+
+Rejected alternatives: folding the series into `result.py` puts engine-emission
+machinery in a module that is currently pure data plus validators, and invites
+exactly the drift its docstring warns against; putting it in `research/evidence.py`
+is the wrong layer, since the series is a product of the engine and the evidence
+store only stores bytes.
+
+## 5. Emission: what "processed bar" means
+
+`engine.py:348-360` is the bar loop. A bar is **processed** when it passed the
+defective-bar check at `engine.py:349-350` and was counted at `engine.py:351`.
+That is the same set `result.bars_seen` counts, which yields a checkable
+invariant: **the number of equity observations equals `result.bars_seen`.**
+
+A processed bar gets a mark even when the engine did nothing else with it —
+a cold snapshot, a skipped session, a bar the strategy returned no proposal for,
+a bar whose slot was occupied, or a bar the risk engine rejected. A bar the
+engine never looked at, because `quality` was not `OK`, gets no mark, because
+there is no close to mark it at.
+
+The mark is emitted **after** the open and close handling at `engine.py:353-360`
+and before the snapshot at `engine.py:362`. That ordering is what makes the
+observation mean "the state at the close of this bar": the bar's own fill and any
+intrabar stop or target have already been applied, so `open_positions` is the
+count *after* them and `cumulative_realized_pnl` already includes a trade that
+closed on this bar. `bar.availability_time` is the bar's close
+(`marketdata/models.py:63-66`) and is read directly off the bar.
+
+## 6. Data model
+
+### 6.1 `EquityObservation`
+
+```python
+class EquityObservation(CanonicalModel):
+    marked_at: datetime
+    equity: Decimal
+    cumulative_realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    open_positions: NonNegativeInt
+```
+
+`marked_at` is normalized to UTC by the same private `_utc()` helper wrapping
+`ensure_utc` that `research/evidence.py:67-72` and
+`research/trial_ledger.py` already use, converting `TimestampError` to
+`ValueError`. The copy is deliberate and already commented in those modules.
+
+`unrealized_pnl` is valued at the mid close (B1-4), using the same conversion
+`_gross_pnl` uses at `engine.py:659-682`:
+
+```text
+unrealized_pnl = side * lots * (bar.close - entry_price) * point_value
+```
+
+`entry_price` is the entry fill's own price, which already contains the
+half-spread and slippage offset (`fills.py:54-55`). `open_positions` is
+structurally 0 or 1, because the engine holds a single `_Position | None`
+(`engine.py:343`); the field is a count rather than a flag so the field means
+what it says if that ever changes.
+
+### 6.2 `EquitySeries`
+
+```python
+class EquitySeries(CanonicalModel):
+    firm_equity: Decimal
+    observations: tuple[EquityObservation, ...]
+```
+
+Validated on its own, without reference to any result:
+
+- `observations` is non-empty;
+- `marked_at` is strictly increasing across the series — missing, duplicate, or
+  non-increasing UTC timestamps fail, per §6.1;
+- at **every** point,
+  `equity == firm_equity + cumulative_realized_pnl + unrealized_pnl`, which is
+  §6.1's identity and is the load-bearing assertion in the whole slice.
+
+`is_flat` is a derived read-only property, not a field:
+
+```python
+@property
+def is_flat(self) -> bool:
+    return self.observations[-1].open_positions == 0
+```
+
+A stored boolean would duplicate `open_positions` and could disagree with it.
+
+### 6.3 `BacktestOutcome`
+
+```python
+class BacktestOutcome(CanonicalModel):
+    result: BacktestResult
+    equity: EquitySeries
+```
+
+This is where the series is bound to the trades it came from, which is the
+objection `result.py:91-99` raises. Three assertions, each a real disagreement
+that must fail closed:
+
+1. `len(equity.observations) == result.bars_seen` — the series covers exactly the
+   bars the result says it processed;
+2. `equity.firm_equity == result.firm_equity` — the series was not marked against
+   a different capital base than the result reports;
+3. when `equity.is_flat`, the final observation's `cumulative_realized_pnl`
+   equals `result.net_pnl`.
+
+Assertion 3 is where B1-2 lands. It is stated as a precondition, not an
+assumption: when the engine discarded a position left open when bars ran out,
+the series' final cumulative realized P&L legitimately excludes that mark and
+`result.net_pnl` excludes it too, and the assertion simply does not apply.
+Nothing is forced flat to make it pass. When the final observation *is* flat, the
+assertion is what turns §6.1's "the final flat observation must reconcile to
+`firm_equity + net_pnl`" into a checked fact, because with `unrealized_pnl == 0`
+the per-point identity already reduces it to `equity == firm_equity + net_pnl`.
+
+### 6.4 `derive_daily_returns`
+
+`DailyReturnPoint` moves here from `research/evidence.py:80-86`, unchanged in
+shape, so that `mark.py` can return it without importing from `research/`:
+
+```python
+class DailyReturnPoint(CanonicalModel):
+    day: date
+    value: Decimal
+```
+
+```python
+def derive_daily_returns(
+    series: EquitySeries, *, first_day: date, last_day: date
+) -> tuple[DailyReturnPoint, ...]:
+```
+
+Bundle assembly calls it with `first_day = result.start.date()` and
+`last_day = result.end.date()`, so the daily series spans exactly the run's own
+requested window and no wider. A caller wanting a different range passes
+different dates; the function is not hard-wired to the result.
+
+Implements §6.2 exactly, over every UTC calendar date from `first_day` through
+`last_day` inclusive:
+
+- end-of-day equity is the final available mark within that UTC day;
+- a day with no available mark carries the prior end-of-day equity forward and
+  so returns a literal `Decimal(0)` — a calendar-day series has no way to omit a
+  day, and `return_series_basis` is what stops a reader mistaking it for
+  mark-to-market or for a measured zero;
+- the first day's denominator is the fixed initial `firm_equity`;
+- later denominators are the preceding UTC day's end equity and must be strictly
+  positive — a non-positive denominator raises `EquityEvidenceError` rather than
+  receiving a convenient default (§7.1 of the umbrella, applied to the
+  denominator rather than a statistic);
+- an open position's unrealized P&L stays in the return, because it is inside
+  `equity`.
+
+The result is rectangular by construction: no artificial rows between CPCV test
+segments, and weekends present rather than missing, which is what makes §7.4's
+`sqrt(365)` annualization correct.
+
+The flat-day `Decimal(0)` matches what 8A's `derive_realized_daily_returns`
+already emits at `research/legacy_import.py`, so the two bases produce the same
+shape and differ only in what the marks contain.
+
+## 7. Fail-closed behaviour
+
+One new typed error, `EquityEvidenceError`, on the next free exit code,
+`ExitCode.EQUITY_EVIDENCE = 18` (`core/errors.py`, mapped in `cli.EXIT_CODES`).
+It covers both ways equity evidence cannot be produced honestly: a series
+violating its own identity or its cross-checks, and a run whose observation count
+exceeds the ceiling. `public_message` carries no free text, matching the existing
+convention, and no DSN, driver text, or raw exception ever reaches the operator.
+
+`MAX_EQUITY_OBSERVATIONS = 2_000_000` is a module constant in `mark.py`, not a
+setting: a value that exists only to catch a mistake should not be something an
+operator can tune away. The measured four-year M15 Phase 7 run produced 99,988
+bars, so the ceiling sits roughly twenty times above a realistic run and exists
+to stop an accidental multi-year M1 run from filling the disk.
+
+```python
+# ponytail: an O(1) guard on a count the loop already knows. It is here to fail
+# with a number instead of filling the disk; raise it only if a real run needs
+# more, and prefer a coarser timeframe to a larger budget.
+```
+
+Exceeding the ceiling raises `EquityEvidenceError` naming the count and the
+limit, with the remedy in the operator documentation: narrow the window, or use
+a coarser timeframe. The series is never silently subsampled — a subsample would
+be evidence of something other than the run, which is the one thing this
+framework exists to prevent.
+
+**Not an error:** a non-flat final observation. `backtest run` exits 0, the
+bundle records, and the payload reports `"mark_to_market_flat": false`.
+
+## 8. CLI surface
+
+`backtest run` gains five options (`cli.py:1160-1265`):
+
+| Option | Meaning |
+|---|---|
+| `--mark-to-market` | Emit an `EvidenceBundle` carrying the per-bar series and mark-to-market daily returns, instead of the bare result artifact. |
+| `--trial-id` | The declared candidate this run belongs to. |
+| `--attempt-id` | The started attempt this run belongs to. |
+| `--spec-sha256` | The preregistered specification's digest. |
+| `--occurred-at` | The run's own timestamp, carried into `EvidenceProvenance.occurred_at`. |
+
+The four identity options are required together with `--mark-to-market` and
+refused without it, so a bundle cannot be produced without the identity it
+claims. Together with 8A's `research trial start` this closes the hole the 8A
+review found in `effective_specifications`: the identity is still operator-supplied,
+but it is now checked against a started, preregistered attempt rather than merely
+preserved. The README's existing statement that the ledger cannot vouch that
+`spec_sha256` matches a declared candidate stays true and stays written down.
+
+`--occurred-at` follows the same declared-provenance rule as `start`'s
+`--started-at`: operator-declared, with the database event's `recorded_at`
+remaining the only registration-order authority.
+
+Without `--mark-to-market`, output is byte-identical to today. The emitted
+document keeps the exact shape `research/legacy_import.py:180-197` reads —
+`{"status": "ok", "result": ..., "digest": ..., "margin_modelled": false}` — so
+the Phase 7 artifact contract and the legacy importer are untouched.
+
+`return_series_basis` is set to `MARK_TO_MARKET`, which is what finally gives
+that declared enum member a producer. The ledger needs no new event type:
+`EvidenceSealedPayload` already carries `evidence_sha256`, and the basis lives
+inside the bundle, so `research trial record` and `verify` are unchanged.
+
+The operator flow is 8A's, unchanged in shape:
+
+```powershell
+trading-house research trial register --protocol protocol.json
+trading-house research trial start --trial-id trial-1 --attempt-id att-1 `
+    --spec-sha256 <digest> --started-at 2026-09-27T12:00:00
+trading-house backtest run --mark-to-market --trial-id trial-1 --attempt-id att-1 `
+    --spec-sha256 <digest> --occurred-at 2026-09-27T12:30:00 ... > bundle.json
+trading-house research trial record --trial-id trial-1 --attempt-id att-1 --evidence bundle.json
+trading-house research trial verify
+```
+
+## 9. Honesty constraints carried into the documentation
+
+- The per-bar series is a **mid-price valuation**, not a liquidation value. A
+  position marked at `bar.close` is worth more than closing it would fetch,
+  because `fills.py:54-55` charges half-spread and slippage into the entry fill
+  and `fills.py:92-103` charges neither into stop or target exits. Every
+  drawdown figure 8C derives from this series is therefore mark-to-market, never
+  realizable, and the README says so where the series is described.
+- A mark immediately before an exit will not equal that exit's realized P&L. The
+  exit is priced from its trigger with exit-side costs the mark does not carry
+  (`fills.py:89-104`). The series is a valuation path; the trades are the
+  accounting. They are related, and they are not the same claim.
+- The Phase 7 imports stay `REALIZED_CLOSED_TRADES`, `CONTAMINATED`, and
+  non-promotable forever. Their source bar database was deleted
+  (umbrella §2.2), so a mark-to-market series can never be reconstructed for
+  them. 8B1 adds a capability; it does not retroactively improve any existing
+  evidence.
+- The v1 evidence schema is not extended into. A mark-to-market bundle is
+  distinguishable from a legacy one by its `return_series_basis` and by the
+  presence of the series, and the legacy path is untouched.
+
+## 10. Testing
+
+**Unit** — per-point identity; strictly increasing timestamps; empty-series
+refusal; `is_flat` true and false; the conditional flat reconciliation and its
+deliberate absence when not flat; each §6.2 daily rule including the flat-day
+`Decimal(0)`, the first-day denominator, the strictly-positive rule, and the
+non-positive-denominator `EquityEvidenceError`; a mid-mark whose unrealized P&L
+matches the `_gross_pnl` conversion.
+
+**Property** — Hypothesis, over generated Decimal sequences and bar timestamps:
+the mark identity holds for every point of any well-formed series; a daily series
+is always exactly `(last_day - first_day).days + 1` long; daily values are
+finite; a series with strictly increasing timestamps is accepted and one with a
+repeated timestamp is refused.
+
+**Known answer** — the existing proof at `tests/unit/research/backtest/test_engine.py:81`
+(`== Decimal("3.37")`) is extended to assert the series' own values, not only
+`net_pnl`, so a change to the emission point or the mark formula fails a number
+rather than a shape.
+
+**Integration** — a real run with `--mark-to-market` produces a bundle whose
+`return_series_basis` is `MARK_TO_MARKET`; `research trial record` seals it;
+`research trial verify` reports a valid chain and re-reads the 30 MB-scale
+document; a run ending with an open position records successfully, exits 0, and
+reports `"mark_to_market_flat": false`; a tampered observation is rejected by the
+identity validator rather than surfacing as a plausible series.
+
+**Acceptance** — `tests/acceptance/test_phase8b1.py` carries the regression guard
+for B1-1 specifically: the four pinned digest constants are still exactly their
+literals, and the three sealed v1 legacy bundles still verify. If a future change
+mutates `BacktestResult`, that test fails and names itself.
+
+## 11. Definition of done
+
+8B1 is complete when:
+
+- the engine emits one mark per processed bar, and the count equals
+  `result.bars_seen`;
+- the per-point identity holds at every observation;
+- a flat run reconciles its final cumulative realized P&L to `result.net_pnl`;
+- a non-flat run records, exits 0, and is reported not promotion-grade;
+- a mark-to-market bundle seals through 8A and `verify` re-reads it;
+- the daily series is rectangular over the requested range with the §6.2 rules;
+- all four pinned digest constants and the three v1 legacy bundles are unchanged;
+- `backtest run` without the flag emits a byte-identical artifact;
+- no new dependency, no new ledger event type, no change to `BacktestResult`.
+
+## 12. Slices that follow
+
+- **8B2** — umbrella §6.3 versioned per-trade cost attribution and §6.4 cost
+  scenarios at 1.0x, 1.5x, and 2.0x, including the swap-credit rule the current
+  `CostModel` cannot express because it is piecewise in `sign(swap)`.
+- **8B3** — umbrella §6.5 compounding rerun through the real risk engine, and
+  the capacity diagnostics with an explicit unavailable state.
+
+Each is a separate spec → plan → implementation cycle, per the umbrella's §1.
