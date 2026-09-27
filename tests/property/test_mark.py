@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from trading_house.core.errors import EquityEvidenceError
 from trading_house.research.backtest.mark import (
@@ -29,17 +30,23 @@ def _series_from(pairs: list[tuple[int, Decimal, Decimal]]) -> EquitySeries:
                 equity=_FIRM + realized + unrealized,
                 cumulative_realized_pnl=realized,
                 unrealized_pnl=unrealized,
-                open_positions=0,
+                # An open position is what makes an unrealized term possible, and
+                # the series refuses the two disagreeing. Generated from the
+                # unrealized rather than fixed so both sides get built.
+                open_positions=0 if unrealized == 0 else 1,
             )
             for index, realized, unrealized in pairs
         ),
     )
 
 
-@given(st.lists(st.tuples(st.integers(0, 400), _MONEY, _MONEY), min_size=1, max_size=25))
+@given(
+    st.lists(st.tuples(st.integers(0, 400), _MONEY, _MONEY), min_size=1, max_size=25),
+    st.integers(0, 24),
+)
 @settings(max_examples=50)
-def test_the_identity_holds_for_every_point_of_any_well_formed_series(
-    pairs: list[tuple[int, Decimal, Decimal]],
+def test_the_identity_holds_for_every_point_and_the_validator_can_say_no(
+    pairs: list[tuple[int, Decimal, Decimal]], target: int
 ) -> None:
     series = _series_from(
         [(index, realized, unrealized) for index, (_, realized, unrealized) in enumerate(pairs)]
@@ -47,6 +54,20 @@ def test_the_identity_holds_for_every_point_of_any_well_formed_series(
 
     for point in series.observations:
         assert point.equity == _FIRM + point.cumulative_realized_pnl + point.unrealized_pnl
+
+    # The assertion above would hold with the identity rule deleted, since the
+    # builder computes equity from the other two. This half is the test of the
+    # rule: perturb one point's equity by a cent the identity cannot absorb and
+    # the same series must be refused. A validator nobody can see fail is not
+    # evidence of anything.
+    index = target % len(series.observations)
+    perturbed = list(series.observations)
+    perturbed[index] = perturbed[index].model_copy(
+        update={"equity": perturbed[index].equity + Decimal("0.01")}
+    )
+
+    with pytest.raises(ValidationError, match="firm equity"):
+        EquitySeries(firm_equity=_FIRM, observations=tuple(perturbed))
 
 
 @given(

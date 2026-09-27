@@ -98,6 +98,15 @@ class EquitySeries(CanonicalModel):
             reconciled = self.firm_equity + point.cumulative_realized_pnl + point.unrealized_pnl
             if point.equity != reconciled:
                 raise ValueError("equity must equal firm equity plus realized plus unrealized")
+            # Nothing open means nothing unrealized, and that is what makes
+            # ``BacktestOutcome``'s conditional reconciliation sound: its flat
+            # branch reduces to ``equity == firm_equity + net_pnl`` only because
+            # the unrealized term is zero, which nothing else checks. Enforced
+            # per-point beside the identity it depends on, because a flag that
+            # could disagree with the count is the duplicated state
+            # ``result.py`` refuses to carry, not a cheaper place to ask.
+            if point.open_positions == 0 and point.unrealized_pnl != 0:
+                raise ValueError("an observation with nothing open cannot carry unrealized PnL")
         return self
 
     @property
@@ -149,9 +158,17 @@ def derive_daily_returns(
     carries the prior end-of-day equity forward and therefore returns a literal
     zero -- a calendar-day series has no way to omit a day, and the bundle's
     ``return_series_basis`` is what stops a reader mistaking that zero for a
-    measured one. The first day's denominator is initial firm equity; later ones
-    are the preceding day's end equity and must be strictly positive.
+    measured one. A range holding no mark at all is therefore an all-zero
+    rectangle, which is the honest answer for a period with no trading; leave it
+    that way rather than turning it into a refusal, because a flat series and an
+    untraded one are the same measurement. A range that runs backwards is the
+    opposite: there is no honest answer to give, so it is refused. The first
+    day's denominator is initial firm equity; later ones are the preceding day's
+    end equity and must be strictly positive.
     """
+
+    if first_day > last_day:
+        raise EquityEvidenceError()
 
     closes: dict[date, Decimal] = {}
     for point in series.observations:
@@ -169,4 +186,12 @@ def derive_daily_returns(
         )
         previous_close = end_of_day
         day += timedelta(days=1)
+    if previous_close <= 0:
+        # The final day took the account to zero or below and the walk has run
+        # out of days to notice it on. Same refusal as the in-loop check, and for
+        # the same reason: the next day's divisor would be this equity. Kept in
+        # step with ``legacy_import.derive_realized_daily_returns`` on purpose --
+        # two reductions over the same kind of series must not disagree about
+        # whether a zero equity is a result.
+        raise EquityEvidenceError()
     return tuple(points)

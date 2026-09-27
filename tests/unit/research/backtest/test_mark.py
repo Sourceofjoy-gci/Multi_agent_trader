@@ -53,6 +53,20 @@ def test_every_point_must_satisfy_the_mark_identity() -> None:
         )
 
 
+def test_a_point_with_nothing_open_cannot_carry_unrealized_pnl() -> None:
+    # The premise ``BacktestOutcome``'s flat branch reasons from and cannot see:
+    # the mark identity reduces to ``equity == firm_equity + net_pnl`` only
+    # because the unrealized term is zero, so a stale unrealized left on the last
+    # bar would book a final-day return no trade produced.
+    with pytest.raises(ValidationError, match="nothing open"):
+        _series(_point(realized=Decimal("10"), unrealized=Decimal("5")))
+
+    # The same two numbers with the position that owns the unrealized is fine.
+    held = _series(_point(realized=Decimal("10"), unrealized=Decimal("5"), open_=1))
+    assert held.observations[-1].unrealized_pnl == Decimal("5")
+    assert held.is_flat is False
+
+
 def test_observations_must_move_forward_and_never_repeat() -> None:
     with pytest.raises(ValidationError, match="strictly increasing"):
         _series(_point(minutes=5), _point(minutes=5))
@@ -159,6 +173,50 @@ def test_a_non_positive_prior_close_is_refused_rather_than_defaulted() -> None:
         derive_daily_returns(series, first_day=date(2024, 1, 1), last_day=date(2024, 1, 2))
 
 
+def test_a_one_day_range_ending_on_a_zero_close_is_refused_not_reported_as_minus_one() -> None:
+    # The two-day case is already refused inside the loop, on the second day's
+    # denominator. A one-day range is the only shape that reaches the post-loop
+    # check, and the shape ``legacy_import.derive_realized_daily_returns``
+    # refuses too; without the check this returned a clean -100% for a wiped-out
+    # account.
+    series = _series(
+        EquityObservation(
+            marked_at=datetime(2024, 1, 1, 21, 0, tzinfo=UTC),
+            equity=Decimal(0),
+            cumulative_realized_pnl=-_FIRM,
+            unrealized_pnl=Decimal(0),
+            open_positions=0,
+        )
+    )
+
+    with pytest.raises(EquityEvidenceError):
+        derive_daily_returns(series, first_day=date(2024, 1, 1), last_day=date(2024, 1, 1))
+
+
+def test_a_range_with_no_marks_at_all_is_an_all_zero_rectangle_rather_than_a_refusal() -> None:
+    # Deliberate, and the docstring says so: an untraded period and a flat period
+    # are the same measurement, so the honest answer is the zero rectangle. This
+    # is the line that keeps a later reader from "fixing" it into a refusal.
+    series = _series(
+        EquityObservation(
+            marked_at=datetime(2024, 1, 1, 21, 0, tzinfo=UTC),
+            equity=_FIRM + Decimal("100"),
+            cumulative_realized_pnl=Decimal("100"),
+            unrealized_pnl=Decimal(0),
+            open_positions=0,
+        )
+    )
+
+    points = derive_daily_returns(series, first_day=date(2024, 6, 1), last_day=date(2024, 6, 3))
+
+    assert [point.value for point in points] == [Decimal(0), Decimal(0), Decimal(0)]
+
+
+def test_a_range_that_runs_backwards_is_refused_rather_than_returned_as_nothing() -> None:
+    with pytest.raises(EquityEvidenceError):
+        derive_daily_returns(_series(), first_day=date(2024, 1, 2), last_day=date(2024, 1, 1))
+
+
 def _cost_model() -> CostModel:
     return CostModel(
         commission_per_lot_per_side=Decimal("3.50"),
@@ -208,13 +266,19 @@ def _result(*, bars_seen: int, net_pnl: Decimal) -> BacktestResult:
     )
 
 
-def _flat_observation(*, realized: Decimal, minutes: int = 0) -> EquityObservation:
+def _outcome_observation(
+    *,
+    realized: Decimal,
+    unrealized: Decimal = Decimal(0),
+    minutes: int = 0,
+    open_: int = 0,
+) -> EquityObservation:
     return EquityObservation(
         marked_at=datetime(2024, 1, 1, 21, 0, tzinfo=UTC) + timedelta(minutes=minutes),
-        equity=_FIRM + realized,
+        equity=_FIRM + realized + unrealized,
         cumulative_realized_pnl=realized,
-        unrealized_pnl=Decimal(0),
-        open_positions=0,
+        unrealized_pnl=unrealized,
+        open_positions=open_,
     )
 
 
@@ -225,7 +289,7 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
 
     result = _result(bars_seen=1, net_pnl=Decimal("90"))
     outcome = BacktestOutcome(
-        result=result, equity=_series(_flat_observation(realized=Decimal("90")))
+        result=result, equity=_series(_outcome_observation(realized=Decimal("90")))
     )
     assert outcome.equity.is_flat is True
 
@@ -253,8 +317,8 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
         BacktestOutcome(
             result=result,
             equity=_series(
-                _flat_observation(realized=Decimal("90")),
-                _flat_observation(realized=Decimal("90"), minutes=15),
+                _outcome_observation(realized=Decimal("90")),
+                _outcome_observation(realized=Decimal("90"), minutes=15),
             ),
         )
 
@@ -263,5 +327,39 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
         # total: 50 against a result whose own trade sums to 90.
         BacktestOutcome(
             result=result,
-            equity=_series(_flat_observation(realized=Decimal("50"))),
+            equity=_series(_outcome_observation(realized=Decimal("50"))),
+        )
+
+
+def test_the_final_realized_total_is_reconciled_against_the_result_only_when_flat() -> None:
+    """Both halves of ``BacktestOutcome``'s single condition, because the
+    condition is the only thing that lets a run ending in a discarded open
+    position exist honestly at all.
+
+    The non-flat half is the load-bearing one and was previously unproven: it is
+    what notices if the ``is_flat`` guard is deleted, and without it nothing in
+    the suite would say the guard is load-bearing.
+    """
+
+    result = _result(bars_seen=1, net_pnl=Decimal("90"))
+
+    # Ends holding one position worth 40 unrealized, so its closing realized
+    # total of 50 falls short of the result's 90 on purpose: the difference is
+    # the open position's, and the run is discarded rather than reconciled, so
+    # there is nothing left to check it against.
+    outcome = BacktestOutcome(
+        result=result,
+        equity=_series(
+            _outcome_observation(realized=Decimal("50"), unrealized=Decimal("40"), open_=1)
+        ),
+    )
+    assert outcome.equity.is_flat is False
+
+    # The same closing realized total against the same result, with the
+    # position closed: now the two numbers must be one number, and a flat run
+    # cannot carry the unrealized 40 that reconciled the other series.
+    with pytest.raises(ValidationError, match="net PnL"):
+        BacktestOutcome(
+            result=result,
+            equity=_series(_outcome_observation(realized=Decimal("50"))),
         )
