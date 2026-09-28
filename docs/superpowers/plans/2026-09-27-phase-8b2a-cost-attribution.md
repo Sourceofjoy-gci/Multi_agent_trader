@@ -746,13 +746,19 @@ wording as the outcome so a disagreement reads the same wherever it is caught:
     def the_summary_is_the_attribution_it_aggregates(self) -> Self:
         if self.cost_attribution is None:
             return self
-        if len(self.cost_attribution.trades) != len(self.result.trades):
-            raise ValueError("the attribution must cover every trade exactly once")
-        for split, trade in zip(self.cost_attribution.trades, self.result.trades, strict=True):
-            if split.proposal_id != trade.proposal_id:
-                raise ValueError("the attribution must be in result order")
-            if split.post_fill_gross != trade.gross_pnl:
-                raise ValueError("a split's post-fill gross must equal its trade's gross PnL")
+        # The three per-trade checks are NOT restated here. Task 2 left a
+        # predicate, ``attribution_disagreement(attribution, result)``, in
+        # ``research/backtest/costs_attribution.py`` which returns the refusal
+        # reason or ``None``, and ``BacktestOutcome`` calls it. This bundle must
+        # call the same one: the two surfaces exist to catch the same defect in
+        # the same place, and duplicated string literals drift the moment one is
+        # edited. ``evidence.py`` may import from ``research.backtest`` --
+        # it already does for ``BacktestResult`` and for the series -- so the
+        # import is available; the constraint runs the other way, and a module
+        # inside ``research/backtest/`` may not import from ``research/``.
+        disagreement = attribution_disagreement(self.cost_attribution, self.result)
+        if disagreement is not None:
+            raise ValueError(disagreement)
         if sum((s.spread_cost for s in self.cost_attribution.trades), Decimal(0)) != self.costs.spread_cost:
             raise ValueError("the summary's spread cost must equal the sum of the splits'")
         if (
