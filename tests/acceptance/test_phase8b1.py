@@ -8,7 +8,14 @@ pinned digests name artifacts that exist on no machine but the one that produced
 them, so a field added to ``BacktestResult`` moves all four, and each is a
 *record of a completed experiment* rather than a value anybody can recompute
 today. A phase that mutates a result whose digests are published elsewhere has
-to be told, and these assertions are the telling.
+to be told.
+
+Only one of the four actually reads a ``BacktestResult`` in the making: the
+known-answer **bundle** digest, whose bundle embeds a live result, so it moves
+under any field added to the model. The other three pin results this repository
+can no longer rebuild, so they stand as records and would be restated by hand if
+a field were ever added. They are kept because the record is the point, not
+because each one detects a change on its own.
 
 What is asserted, in the order a reader should meet it:
 
@@ -158,8 +165,9 @@ developer's own ``.env``, which is what would make this gate depend on a host.""
 
 _IMPORT_CLOCK = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 _MID_MORNING_BAR = 33
-"""The last bar of the first London morning on a 65-bar M15 session. The strategy
-enters inside that morning and its declared holding period runs to 16:00, so a
+"""A bar partway through the first London morning on a 65-bar M15 session. The
+strategy enters inside that morning and its declared holding period runs to
+16:00, so a
 window ending here ends with the position still open: the case the engine
 discards rather than closing at the range's edge, and the case a later gate
 refuses."""
@@ -555,8 +563,10 @@ def test_the_command_now_produces_the_mark_to_market_basis(
     8A shipped ``ReturnSeriesBasis.MARK_TO_MARKET`` with nothing that set it, so
     the value was a claim about a future phase rather than a record of anything.
     Asserted against the payload the command actually prints, and against the
-    enum rather than the wire string, so a rename of the serialised value cannot
-    pass as the same basis.
+    enum rather than the wire string, so a rename of the *member* cannot pass as
+    the same basis. A rename of the serialised value alone would pass: the enum
+    member is what is compared, so swapping the string on the wire while keeping
+    the member would go unnoticed here.
 
     Two digests over one result, deliberately unequal: the payload's ``digest`` is
     the bundle's content address and ``source_result_sha256`` is the result's own
@@ -605,11 +615,12 @@ def test_without_the_flag_the_payload_is_the_phase7_artifact_and_names_no_bundle
 def test_the_command_declares_the_flag_and_all_six_identity_options() -> None:
     """The surface 8B1 added, read off the Click command rather than the help text.
 
-    ``--help`` proves an option is *documented*; this proves it is *declared*, and
-    it is the only check here that would notice the flag being renamed. It is not
-    a claim that these seven are the command's only additions -- nothing here
-    compares against an older parameter list, and it would pass with an eighth
-    identity option added beside them.
+    ``--help`` proves an option is *documented*; this proves it is *declared*. It
+    is not the only check here that would notice a rename -- the three CLI
+    invocations below fail on one too. It is not a claim that these seven are
+    the command's only additions: nothing here compares against an older
+    parameter list, and it would pass with an eighth identity option added beside
+    them.
 
     The refusals are the integration suite's: an exit-2 assertion with no database
     behind it cannot tell a refused operator mistake from a missing database.
