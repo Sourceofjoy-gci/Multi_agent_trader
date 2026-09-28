@@ -111,6 +111,17 @@ def declared_grid(protocol: TrialProtocol) -> tuple[Decimal, ...]:
     as a union anyway because "there is always a baseline at 1" is *this*
     function's claim, and ``CostSpec``'s validator says nothing about whether a
     baseline exists.
+
+    The baseline level is the literal ``1`` and not
+    ``costs.baseline.stress_multiplier``, and that is a deliberate mismatch worth
+    stating rather than a slip. A protocol may declare a baseline whose own
+    ``stress_multiplier`` is not ``1`` -- nothing in ``CostModel`` or
+    ``CostSpec`` forbids it -- but a *stress* grid is defined relative to
+    unstressed costs, so a report that moved its baseline level would be
+    reporting a grid nobody declared. ``_refuse_baseline_fidelity`` compares
+    the level-1 scenario to the declared baseline with its multiplier set to
+    ``1``, so a protocol declaring an odd baseline is compared on its money
+    terms and refused on the one field that cannot be right.
     """
 
     return tuple(sorted({Decimal(1), *protocol.costs.stress_multipliers}))
@@ -180,6 +191,8 @@ def scenario_report(
     or the other.
     """
 
+    _refuse_reportable(trial_id, sealed)
+
     grid = declared_grid(protocol)
     by_multiplier: dict[Decimal, list[tuple[str, EvidenceBundle]]] = {}
     for evidence_sha256, bundle in sealed:
@@ -226,6 +239,46 @@ def scenario_report(
         scenarios=scenarios,
         degradations=degradations,
     )
+
+
+def _refuse_reportable(trial_id: str, sealed: Sequence[tuple[str, EvidenceBundle]]) -> None:
+    """The two caller's inputs are things a report may name.
+
+    Every other refusal in this module is a check on the *evidence*; this one is
+    on the two values that arrive from outside it -- the trial the operator asked
+    about and the digests the chain paired with the documents. Both land in
+    ``NonEmptyStr`` fields, and a ``strict`` model answers an empty string with a
+    ``ValidationError`` rather than with ``ScenarioEvidenceError``. That is the
+    wrong class for a boundary: a ``ValidationError`` echoes the offending
+    value, and the whole reason this module raises a typed error with an opaque
+    ``public_message`` is that a failed report does not narrate its inputs back
+    to whoever asked for one.
+
+    In practice ``Task 3``'s caller supplies chain-held digests and a
+    ``trial_id`` the chain just matched, so neither can be empty. This is the
+    boundary being closed rather than a failure anyone has observed, and it is
+    cheap now and not cheap later -- once a caller can reach this path, a
+    ``ValidationError`` escaping it reads as an internal fault to the catch-all
+    and answers the operator with a correlation id.
+    """
+
+    if not trial_id.strip():
+        raise ScenarioEvidenceError() from ValueError("a report must name the trial it is about")
+    for evidence_sha256, bundle in sealed:
+        if not evidence_sha256.strip():
+            raise ScenarioEvidenceError() from ValueError(
+                f"a sealed scenario of trial {trial_id} carries no digest to name it by"
+            )
+        if bundle.trial_id != trial_id:
+            # A pairing the chain could not produce -- ``events_for`` only returns
+            # rows carrying this trial's id -- so it means a caller assembled the
+            # set by hand, and every number below would be attributed to a
+            # candidate one of them does not belong to. Refused here, before
+            # ``_refuse_identity``, so the message names the substitution rather
+            # than the disagreement it causes.
+            raise ScenarioEvidenceError() from ValueError(
+                f"trial {trial_id} was reported with a scenario sealed under {bundle.trial_id}"
+            )
 
 
 def _refuse_completeness(
@@ -281,20 +334,33 @@ def _refuse_attribution(bundles: Sequence[EvidenceBundle]) -> None:
 
 
 def _refuse_baseline_fidelity(protocol: TrialProtocol, bundles: Sequence[EvidenceBundle]) -> None:
-    """The ``1.0`` scenario's declared costs are the protocol's baseline, exactly.
+    """The baseline scenario's declared costs are the protocol's, exactly.
 
     Field for field rather than term for term, because a baseline whose
-    ``triple_swap_weekday`` or ``stress_multiplier`` drifted is a different
-    baseline and a report that compared only the money terms would call it the
-    declared one. ``CostModel``'s own equality is the whole of the check, so a
-    term added to the model later is compared for free.
+    ``triple_swap_weekday`` or ``slippage_points_per_side`` drifted is a
+    different baseline and a report that compared only the money terms would
+    call it the declared one. ``CostModel``'s own equality is the whole of the
+    check, so a term added to the model later is compared for free.
+
+    Compared against the baseline *at level 1* rather than against
+    ``costs.baseline`` as declared, and the two are not the same thing.
+    ``CostSpec.stress_grid_is_exact`` pins ``stress_multipliers`` to exactly
+    ``{1.5, 2}`` and says nothing about ``baseline.stress_multiplier``, which
+    ``CostModel`` requires only to be positive. A protocol that declared a
+    baseline of ``1.5`` is a model-accepted registration, and comparing its
+    level-1 scenario to that declaration would refuse a candidate whose grid
+    *is* the grid that was preregistered -- with a message blaming the sealed
+    scenarios, and with no remedy, because a registration cannot be amended
+    after the fact. Substituting the level makes the check say what it means:
+    every scenario, the baseline one included, is the declared baseline at its
+    own multiplier.
     """
 
-    declared = protocol.costs.baseline
+    declared = protocol.costs.baseline.model_copy(update={"stress_multiplier": Decimal(1)})
     sealed = bundles[0].result.cost_model
     if sealed != declared:
         raise ScenarioEvidenceError() from ValueError(
-            f"the 1.0 scenario declares {sealed}; the protocol's baseline is {declared}"
+            f"the 1.0 scenario declares {sealed}; the protocol's baseline at level 1 is {declared}"
         )
 
 

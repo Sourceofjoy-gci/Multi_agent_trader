@@ -49,6 +49,7 @@ from trading_house.marketdata.models import Timeframe
 from trading_house.ops.backtest import build_backtester, mark_to_market_bundle
 from trading_house.ops.scenarios import (
     ScenarioDegradation,
+    ScenarioTotals,
     declared_grid,
     registered_protocol,
     scenario_report,
@@ -125,7 +126,28 @@ carrying it is one the model accepts, which is the only kind worth handing the
 report: a refusal that came from Pydantic would be proving the wrong layer."""
 
 
-def _protocol(candidate_ids: tuple[str, ...] = ("trial-1",)) -> TrialProtocol:
+def _all_keys(value: object) -> set[str]:
+    """Every mapping key anywhere in a dumped report, at any depth.
+
+    A top-level sweep over ``ScenarioReport`` finds five keys and would miss a
+    ``total_cost`` nested inside ``ScenarioTotals``, which is where one would
+    actually be added.
+    """
+
+    if isinstance(value, dict):
+        return {str(key) for key in value} | set().union(
+            *(_all_keys(item) for item in value.values())
+        )
+    if isinstance(value, list):
+        return set().union(*(_all_keys(item) for item in value))
+    return set()
+
+
+def _protocol(
+    candidate_ids: tuple[str, ...] = ("trial-1",),
+    *,
+    baseline_multiplier: str = "1",
+) -> TrialProtocol:
     """A preregistration whose ``costs`` and ``data`` are this file's own.
 
     The data window is the run's window, because check 5 compares the two and a
@@ -137,6 +159,14 @@ def _protocol(candidate_ids: tuple[str, ...] = ("trial-1",)) -> TrialProtocol:
     ``slippage_points_per_side`` is non-zero rather than the conftest default,
     because ``stressed_overrides`` changes it and a scenario that changed from
     zero to zero would change nothing.
+
+    ``baseline_multiplier`` exists for one test. ``CostSpec.stress_grid_is_exact``
+    pins ``stress_multipliers`` to exactly ``{1.5, 2}`` and says nothing about
+    the baseline's own multiplier, which ``CostModel`` requires only to be
+    positive -- so a protocol declaring a baseline of ``1.5`` is a registration
+    the models accept. The report must still compare the level-1 scenario to
+    that baseline's *money terms* and refuse on the multiplier alone, rather
+    than refusing the whole candidate because the two never match.
     """
 
     return TrialProtocol(
@@ -167,7 +197,7 @@ def _protocol(candidate_ids: tuple[str, ...] = ("trial-1",)) -> TrialProtocol:
                 swap_long_points_per_day=Decimal("-0.80"),
                 swap_short_points_per_day=Decimal("0.30"),
                 triple_swap_weekday=2,
-                stress_multiplier=Decimal("1"),
+                stress_multiplier=Decimal(baseline_multiplier),
             ),
             stress_multipliers=GRID[1:],
         ),
@@ -468,6 +498,66 @@ def test_a_window_the_protocol_did_not_declare_is_refused() -> None:
         scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
 
 
+def test_a_protocol_whose_baseline_is_itself_stressed_is_still_reportable() -> None:
+    """The one input that used to be permanently unreportable.
+
+    ``CostSpec`` pins the stressed levels to exactly ``{1.5, 2}`` and says
+    nothing about the baseline's own multiplier, so ``baseline.stress_multiplier
+    = 1.5`` with ``stress_multipliers = (1.5, 2)`` is a registration the models
+    accept. Comparing the level-1 scenario to that declaration field for field
+    would refuse a candidate whose grid *is* the grid that was preregistered,
+    with a message blaming the sealed scenarios and no remedy -- a registration
+    cannot be amended after the fact.
+
+    The report reads the money terms and refuses on the multiplier alone, which
+    is the one field that cannot be right: a stress grid is defined relative to
+    unstressed costs.
+    """
+
+    protocol = _protocol(baseline_multiplier="1.5")
+    report = scenario_report(
+        trial_id=_trial_id(protocol), protocol=protocol, sealed=_sealed(protocol)
+    )
+
+    assert report.declared_multipliers == (Decimal("1"), Decimal("1.5"), Decimal("2"))
+    assert [s.multiplier for s in report.scenarios] == [Decimal("1"), Decimal("1.5"), Decimal("2")]
+
+
+def test_a_baseline_scenario_whose_money_terms_drift_is_still_refused() -> None:
+    """The fix above must not have loosened the baseline check into a no-op.
+
+    Under a stressed baseline the multiplier field can no longer carry the
+    refusal, so the money terms are what is left to catch a drifted baseline --
+    and they have to still catch it.
+    """
+
+    protocol = _protocol(baseline_multiplier="1.5")
+    sealed = _sealed(protocol, baseline_overrides={"commission_per_lot_per_side": Decimal("3.50")})
+
+    with pytest.raises(ScenarioEvidenceError):
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+
+
+def test_a_report_about_no_trial_is_refused_rather_than_crashing_on_construction() -> None:
+    """The caller's own inputs fail as this module's refusal, not as Pydantic's.
+
+    ``trial_id`` and the evidence digests land in ``NonEmptyStr`` fields, and a
+    ``strict`` model answers an empty string with a ``ValidationError`` -- which
+    echoes the offending value and is not the class the CLI's catch-all maps to
+    exit 19. A report that cannot name its subject is refused at the boundary.
+    """
+
+    protocol = _protocol()
+    sealed = _sealed(protocol)
+
+    with pytest.raises(ScenarioEvidenceError):
+        scenario_report(trial_id="   ", protocol=protocol, sealed=sealed)
+    with pytest.raises(ScenarioEvidenceError):
+        scenario_report(
+            trial_id=_trial_id(protocol), protocol=protocol, sealed=[("", sealed[0][1])]
+        )
+
+
 def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
     protocol = _protocol()
     report = scenario_report(
@@ -477,7 +567,24 @@ def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
     assert report.declared_multipliers == (Decimal("1"), Decimal("1.5"), Decimal("2"))
     assert [s.multiplier for s in report.scenarios] == [Decimal("1"), Decimal("1.5"), Decimal("2")]
     assert not hasattr(report, "total_cost")
-    assert not any("total" in key for key in report.model_dump(mode="json"))
+    # Recursively, not over the top-level keys: a ``total_cost`` added to
+    # ``ScenarioTotals`` is nested two levels down and a top-level sweep would
+    # miss it. The model field sets are pinned below as well, which is the
+    # statement that cannot be satisfied by adding a field.
+    assert not any("total" in key for key in _all_keys(report.model_dump(mode="json")))
+    assert set(ScenarioTotals.model_fields) == {
+        "multiplier",
+        "attempt_id",
+        "evidence_sha256",
+        "source_result_sha256",
+        "trades",
+        "market_pnl",
+        "spread_cost",
+        "slippage_cost",
+        "commission",
+        "swap",
+        "net_pnl",
+    }
 
 
 def test_swap_is_reported_signed_and_the_degradation_is_a_difference_in_net_pnl() -> None:
@@ -502,3 +609,36 @@ def test_swap_is_reported_signed_and_the_degradation_is_a_difference_in_net_pnl(
         "commission_delta",
         "swap_delta",
     }
+
+
+def test_the_reported_terms_reconstruct_the_result_they_came_from() -> None:
+    """The sign convention the no-total-cost design rests on, asserted.
+
+    ``ScenarioTotals``'s docstring states ``net = market - spread - slippage -
+    commission + swap``, and ``swap`` is the odd one out: a charge is negative
+    and enters with a ``+``, so it *reduces* ``net`` while looking like an
+    addition. That is exactly the hazard a summed "total cost" would hide, and
+    the docstring asserting an unasserted relation is how it goes stale.
+
+    The relation is checked against the sealed bundles themselves rather than
+    against a literal, so it holds for whatever the engine produced on this
+    fixture: a reader must be able to re-add the report's numbers and land on
+    the ``net_pnl`` the chain holds.
+    """
+
+    protocol = _protocol()
+    report = scenario_report(
+        trial_id=_trial_id(protocol), protocol=protocol, sealed=_sealed(protocol)
+    )
+    sealed = {bundle.result.cost_model.stress_multiplier: bundle for _, bundle in _sealed(protocol)}
+
+    for scenario in report.scenarios:
+        rebuilt = (
+            scenario.market_pnl
+            - scenario.spread_cost
+            - scenario.slippage_cost
+            - scenario.commission
+            + scenario.swap
+        )
+        assert rebuilt == scenario.net_pnl
+        assert scenario.net_pnl == sealed[scenario.multiplier].result.net_pnl
