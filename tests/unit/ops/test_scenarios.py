@@ -119,6 +119,14 @@ OCCURRED_AT = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 REGISTERED_AT = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
 
 FOREIGN_TRIAL_ID = "trial-somebody-else"
+OTHER_PROPOSAL_ID = "proposal-1a7f3c"
+"""A different trade's identity, for a run that otherwise traded the same
+numbers. ``SimulatedTrade.proposal_id`` and ``TradeCostAttribution.proposal_id``
+are both bare ``NonEmptyStr`` and nothing in any validator binds either to the
+engine's own proposal stream, so renaming one is a model-accepted document. It is
+the one edit that moves a candidate's trade *sequence* while leaving every
+sealed total exactly where it was, which is what the identity check's sequence
+clause has to catch."""
 TAMPERED_WINDOW_END = datetime(2025, 6, 1, tzinfo=UTC)
 """An end the protocol cannot have declared -- it precedes the run's own start.
 ``BacktestResult`` holds no start-before-end rule of its own, so a document
@@ -383,6 +391,75 @@ def _ending_at(end: datetime) -> Callable[[dict[str, Any]], None]:
     return change
 
 
+def _moving(field: str, value: object) -> Callable[[dict[str, Any]], None]:
+    """One top-level field of a scenario changed to something else.
+
+    The point of taking a field name rather than one more purpose-built tamper
+    is coverage of the identity check's other five fields. ``trial_id`` is the
+    only one a dedicated case moves, and a typo in ``_identity``'s key names --
+    or a field that stopped being read at all -- would leave the suite green
+    while the check silently compared nothing. This moves any of the six by name,
+    so each is provably load-bearing.
+    """
+
+    def change(payload: dict[str, Any]) -> None:
+        if field.startswith("result."):
+            name = field.removeprefix("result.")
+            payload["result"] = {**payload["result"], name: value}
+            if name == "bars_seen" and "mark_to_market" in payload:
+                # ``bars_seen`` is the count the equity series must match, and a
+                # flat run's final realized total must equal the result's net --
+                # so all three move together. The document that results claims to
+                # have read one bar, carries one observation, and shows the same
+                # net PnL the full run did. Nothing cross-checks a trade against
+                # a bar count, so it is model-accepted, and it is exactly the
+                # "these two runs did not read the same data" shape that the
+                # identity check must refuse and the window check cannot see.
+                observations = payload["mark_to_market"]["observations"][:value]
+                net = payload["result"]["net_pnl"]
+                payload["mark_to_market"] = {
+                    **payload["mark_to_market"],
+                    "observations": [
+                        *observations[:-1],
+                        {
+                            **observations[-1],
+                            "cumulative_realized_pnl": net,
+                            "unrealized_pnl": "0",
+                            "equity": str(
+                                Decimal(payload["mark_to_market"]["firm_equity"]) + Decimal(net)
+                            ),
+                        },
+                    ],
+                }
+            return
+        if field == "trades":
+            # The sequence, changed: the one trade's ``proposal_id`` becomes a
+            # different string. Renaming rather than deleting, because every
+            # cross-check in the document binds the totals to the trades and
+            # none of them binds the *identity* of a trade to anything else --
+            # so this moves the one thing the identity check exists to pin while
+            # leaving a document the model accepts whole. A run that had traded
+            # a different proposal is a real, valid, different experiment, which
+            # is exactly the shape this refusal has to catch.
+            payload["result"] = {
+                **payload["result"],
+                "trades": [
+                    {**payload["result"]["trades"][0], "proposal_id": OTHER_PROPOSAL_ID},
+                    *payload["result"]["trades"][1:],
+                ],
+            }
+            payload["cost_attribution"] = {
+                "trades": [
+                    {**payload["cost_attribution"]["trades"][0], "proposal_id": OTHER_PROPOSAL_ID},
+                    *payload["cost_attribution"]["trades"][1:],
+                ],
+            }
+            return
+        payload[field] = value
+
+    return change
+
+
 def _sealed(
     protocol: TrialProtocol,
     *,
@@ -392,6 +469,9 @@ def _sealed(
     stressed_overrides: dict[str, Decimal] | None = None,
     foreign_trial_at: Decimal | None = None,
     window_end: datetime | None = None,
+    moved_at: Decimal | None = None,
+    moved_field: str | None = None,
+    moved_value: object = None,
 ) -> tuple[tuple[str, EvidenceBundle], ...]:
     """One candidate's sealed grid, as the chain would hold it.
 
@@ -420,6 +500,8 @@ def _sealed(
             bundle = _rebuild(bundle, _another_trial())
         if window_end is not None and multiplier == Decimal("1"):
             bundle = _rebuild(bundle, _ending_at(window_end))
+        if moved_field is not None and multiplier == moved_at:
+            bundle = _rebuild(bundle, _moving(moved_field, moved_value))
         sealed[multiplier] = (canonical_sha256(bundle), bundle)
     return tuple(sealed[multiplier] for multiplier in multipliers)
 
@@ -490,6 +572,57 @@ def test_a_scenario_from_another_trial_is_refused() -> None:
         scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("spec_sha256", "f" * 64),
+        ("result.strategy_id", "some-other-strategy"),
+        ("result.strategy_version", "99"),
+        ("result.bars_seen", 1),
+    ],
+)
+def test_every_identity_field_the_grid_pins_is_load_bearing(field: str, value: object) -> None:
+    """The fields ``trial_id`` is not, one at a time.
+
+    ``_refuse_identity`` compares a six-field record per bundle, and only
+    ``trial_id`` has a dedicated case. A field that stopped being read -- a
+    renamed key, a deleted entry, a constant -- would leave every other test
+    green while the check quietly compared less than it claims. Each is moved by
+    name and must refuse.
+
+    Dotted names address into ``result``, which is where four of the six live;
+    a dotted path that does not exist raises ``KeyError`` from the tamper
+    builder rather than passing, so a typo here cannot make a case vacuous.
+    """
+
+    protocol = _protocol()
+    sealed = _sealed(protocol, moved_at=Decimal("1.5"), moved_field=field, moved_value=value)
+
+    with pytest.raises(ScenarioEvidenceError):
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+
+
+def test_a_grid_whose_trade_sequence_moved_is_refused() -> None:
+    """The sequence, not the prices -- the property 8B2a's spread stress implies.
+
+    Scaling the spread moves every price and must not move which trades happened.
+    A grid whose 1.5x scenario traded something the 1.0x did not is a different
+    experiment, and a report that accepted it would be comparing two strategies
+    rather than two cost levels.
+
+    Moving a whole trade out of the sequence is not a one-field edit, so the
+    tamper empties the stressed scenario's ``result.trades`` and its
+    ``cost_attribution`` together -- a model-accepted document that traded
+    nothing, and one the identity check must catch on the sequence.
+    """
+
+    protocol = _protocol()
+    sealed = _sealed(protocol, moved_at=Decimal("1.5"), moved_field="trades")
+
+    with pytest.raises(ScenarioEvidenceError):
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+
+
 def test_a_window_the_protocol_did_not_declare_is_refused() -> None:
     protocol = _protocol()
     sealed = _sealed(protocol, window_end=TAMPERED_WINDOW_END)
@@ -545,17 +678,26 @@ def test_a_report_about_no_trial_is_refused_rather_than_crashing_on_construction
     ``strict`` model answers an empty string with a ``ValidationError`` -- which
     echoes the offending value and is not the class the CLI's catch-all maps to
     exit 19. A report that cannot name its subject is refused at the boundary.
+
+    Asserting on the private cause, not merely on the raise, because both of
+    these inputs would be caught by a *later* check if the boundary let them
+    through: a blank ``trial_id`` disagrees with every bundle's own, and a blank
+    digest on one of three trips the completeness check first. Naming the cause
+    is what proves the refusal came from the boundary rather than from a check
+    that happened to fire on the way past it.
     """
 
     protocol = _protocol()
     sealed = _sealed(protocol)
 
-    with pytest.raises(ScenarioEvidenceError):
+    with pytest.raises(ScenarioEvidenceError) as blank_trial:
         scenario_report(trial_id="   ", protocol=protocol, sealed=sealed)
-    with pytest.raises(ScenarioEvidenceError):
-        scenario_report(
-            trial_id=_trial_id(protocol), protocol=protocol, sealed=[("", sealed[0][1])]
-        )
+    assert "must name the trial" in str(blank_trial.value.__cause__)
+
+    unnamed = [(sealed[0][0], sealed[0][1]), ("", sealed[1][1]), (sealed[2][0], sealed[2][1])]
+    with pytest.raises(ScenarioEvidenceError) as unnamed_digest:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=unnamed)
+    assert "no digest to name it by" in str(unnamed_digest.value.__cause__)
 
 
 def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
