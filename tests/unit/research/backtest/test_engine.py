@@ -391,8 +391,10 @@ def test_a_run_that_charges_slippage_attributes_both_legs_of_it() -> None:
     """``slippage_cost`` is the two legs summed, on the one axis where the legs
     are not symmetric and cannot be.
 
-    Every other engine test runs with ``slippage_points_per_side=0``, so the
-    exit leg is a term nothing can see and a sum of one leg is indistinguishable
+    Every other engine test runs with ``slippage_points_per_side=0`` — the
+    conftest default, and the only value ``_ramp``'s hand-computed prices are
+    built around — so there the exit leg is a term nothing can see and a sum of
+    one leg is indistinguishable
     from a sum of two. Here it is 4 points a side: 4 points x 3.37 lots at $1 a
     point is 13.48 a leg, 26.96 a trade, and the trade's own reported gross
     moves from the known-answer run's +3.37 to -23.59 by exactly that 26.96.

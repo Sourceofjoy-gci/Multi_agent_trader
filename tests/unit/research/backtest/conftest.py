@@ -53,9 +53,11 @@ POINT = Decimal("0.00001")
 RAMP_SPREAD_POINTS = 10
 HALF_SPREAD = Decimal("0.00005")
 """10 points at ``point_size`` 0.00001. Every fill in ``_ramp``'s series is a
-bar open plus or minus exactly this, because ``_run``'s cost model states
-``slippage_points_per_side`` as zero -- so the hand-computed answer stays the
-bar open and the spread, with no third term."""
+bar open plus or minus exactly this, because ``_run`` and ``_outcome``'s
+*default* cost model states ``slippage_points_per_side`` as zero -- so the
+hand-computed answer stays the bar open and the spread, with no third term. The
+tests that need a slippage term say so in their own names and docstrings, and
+this constant is about the default, not about the suite."""
 
 ATR_PERIOD = 2
 """``FeatureEngine`` hands ATR ``period * WARMUP_MULTIPLE + 1`` bars, so period
