@@ -104,7 +104,7 @@ def test_a_credit_never_grows_under_stress() -> None:
 
 
 @pytest.mark.parametrize("rate", [Decimal("-1"), Decimal("1")], ids=["charge", "credit"])
-def test_at_multiplier_one_every_term_exactly_matches_the_baseline(rate: Decimal) -> None:
+def test_the_stressed_rate_matches_hand_derived_constants(rate: Decimal) -> None:
     """Section 6.4: "At m = 1, every component exactly matches baseline."
 
     Both signs, because a rule that only reproduced the baseline for charges
