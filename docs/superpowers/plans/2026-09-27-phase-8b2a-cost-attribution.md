@@ -204,36 +204,9 @@ In `src/trading_house/research/backtest/fills.py`, change `entry_fill`'s half-sp
 `_closing_fill` in `engine.py:681-689` calls `entry_fill` and inherits this with no change.
 
 Do **not** touch `resolve_exit`'s spread behaviour. It applies no spread at all, at
-any multiplier, and that is the model's real behaviour.
-
-Then in `engine.py`, widen the existing `BacktestOutcome` model with the
-reconciliation Task 2 needs, so Task 2's model change is in one place:
-
-```python
-    @model_validator(mode="after")
-    def the_attribution_is_the_result_it_decomposes(self) -> Self:
-        """The split is checked against the trades rather than trusted.
-
-        A tuple can be internally consistent and still describe another run: a
-        reordered one, a padded one, or one whose ``post_fill_gross`` no longer
-        matches the ``gross_pnl`` the result reports. All three are refused, in
-        the same words ``EvidenceBundle`` will use, so a disagreement reads the
-        same whether it was caught at construction or at read time.
-        """
-
-        if len(self.attribution.trades) != len(self.result.trades):
-            raise ValueError("the attribution must cover every trade exactly once")
-        for split, trade in zip(self.attribution.trades, self.result.trades, strict=True):
-            if split.proposal_id != trade.proposal_id:
-                raise ValueError("the attribution must be in result order")
-            if split.post_fill_gross != trade.gross_pnl:
-                raise ValueError("a split's post-fill gross must equal its trade's gross PnL")
-        return self
-```
-
-Add `attribution: CostAttribution` to the model itself. `resolve_exit` also
-needs its three `Fill` constructions updated in this task, since `Fill` gained
-required fields.
+any multiplier, and that is the model's real behaviour. Task 2 widens `Fill` with
+the per-leg components and updates `resolve_exit`'s three constructions then; that
+is not this task's work.
 
 - [ ] **Step 4: Implement the swap-credit rule**
 
