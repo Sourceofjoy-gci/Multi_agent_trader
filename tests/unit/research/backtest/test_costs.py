@@ -372,9 +372,24 @@ def test_a_credit_never_grows_under_stress() -> None:
     """The defect this replaces. A positive rate is money the broker pays, and
     the old unconditional ``rate * m`` handed a positive-carry strategy MORE
     profit at 2x than at 1x -- so it cleared the section 12 gate more easily
-    stressed, which is the opposite of a stress."""
+    stressed, which is the opposite of a stress.
 
-    model = _model(swap_short_points_per_day=Decimal("1"), stress_multiplier=Decimal("2"))
+    Both swap fields carry the same positive number here, which is the opposite
+    fixture from ``test_a_sell_is_charged_the_short_swap_rate`` and for the
+    opposite reason. That test needs *distinct* rates to tell which field a
+    side selected; this one needs them *equal*, so the selected rate's sign is
+    the only thing left that can key ``_stressed_rate``. With one distinct rate
+    and one side per test, a rule branching on ``side is Side.BUY`` instead of
+    on ``rate < 0`` satisfies every assertion in this file -- and it would hand
+    a long position carrying positive carry a charge of ``rate * m = 2``, which
+    is the original defect transplanted onto the other field.
+    """
+
+    model = _model(
+        swap_long_points_per_day=Decimal("1"),
+        swap_short_points_per_day=Decimal("1"),
+        stress_multiplier=Decimal("2"),
+    )
     contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
     held = {
         "lots": Decimal(1),
@@ -384,34 +399,68 @@ def test_a_credit_never_grows_under_stress() -> None:
     }
 
     assert swap_cost(model=model, side=Side.SELL, **held) == Decimal(0)  # type: ignore[arg-type]
+    assert swap_cost(model=model, side=Side.BUY, **held) == Decimal(0)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("rate", [Decimal("-1"), Decimal("1")], ids=["charge", "credit"])
-def test_at_multiplier_one_every_term_exactly_matches_the_baseline(rate: Decimal) -> None:
-    """Section 6.4: "At m = 1, every component exactly matches baseline."
+@pytest.mark.parametrize(
+    ("rate", "multiplier", "expected"),
+    [
+        (Decimal("-1"), Decimal(1), Decimal("-1")),
+        (Decimal("1"), Decimal(1), Decimal("1")),
+        (Decimal("1"), Decimal("1.5"), Decimal("0.5")),
+    ],
+    ids=["charge_at_one", "credit_at_one", "credit_at_one_and_a_half"],
+)
+def test_the_stressed_rate_matches_hand_derived_constants(
+    rate: Decimal, multiplier: Decimal, expected: Decimal
+) -> None:
+    """Section 6.4's rule against constants derived by hand, not against a
+    second ``CostModel``.
 
-    Both signs, because a rule that only reproduced the baseline for charges
-    would be a redefinition of the baseline dressed as a stress.
+    A model built without ``stress_multiplier`` gets the field default
+    ``Decimal(1)``, so "stressed at 1 equals plain" compares one model with
+    itself: it still passes with ``_stressed_rate`` replaced by a constant, by
+    the old unconditional ``rate * m``, or by a single branch. These three rows
+    cannot be satisfied that way.
+
+    ``m = 1`` in both signs is the load-bearing one: both branches return the
+    rate unchanged, and that is what makes this a stress rather than a
+    redefinition of the baseline. ``m = 1.5`` on a credit is the first row
+    inside the section 12 gate, where the reduced credit must still be a
+    credit and exactly half the nominal.
+
+    Hand-derived, in the convention of
+    ``test_the_stress_multiplier_is_applied_before_the_only_division``. The
+    fixture is one lot and one rollover crossing (Monday into Tuesday, which is
+    not the Wednesday triple-swap day), and with ``point_size =
+    price_increment = 0.00001`` and ``value_per_price_increment = 1`` the
+    money-per-point factor ``point_size * value_per_price_increment /
+    price_increment`` is exactly 1 -- so the cost is the stressed rate itself.
+    A charge at 1: ``-1 * 1 = -1``. A credit at 1: ``1 * (2 - 1) = 1``. The
+    same credit at 1.5: ``1 * (2 - 1.5) = 0.5``.
     """
 
-    stressed = _model(
-        swap_long_points_per_day=rate, swap_short_points_per_day=rate, stress_multiplier=Decimal(1)
+    model = _model(
+        swap_long_points_per_day=rate,
+        swap_short_points_per_day=rate,
+        stress_multiplier=multiplier,
     )
-    plain = _model(swap_long_points_per_day=rate, swap_short_points_per_day=rate)
     contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
     held = {
         "lots": Decimal(1),
         "contract": contract,
-        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),
-        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # Monday
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),  # Tuesday, one crossing
     }
 
-    assert swap_cost(model=stressed, side=Side.BUY, **held) == swap_cost(  # type: ignore[arg-type]
-        model=plain, side=Side.BUY, **held
-    )
-    assert swap_cost(model=stressed, side=Side.SELL, **held) == swap_cost(  # type: ignore[arg-type]
-        model=plain, side=Side.SELL, **held
-    )
+    # Both sides, because both fields hold the same rate: the rule must not care
+    # which one a side selected, only what sign it found.
+    for side in (Side.BUY, Side.SELL):
+        cost = swap_cost(model=model, side=side, **held)  # type: ignore[arg-type]
+        assert cost == expected
+        # Equality alone would pass on a value differing only in trailing zeros
+        # or an exponent; the digest hashes the string form, so pin that too.
+        assert str(cost) == str(expected)
 
 
 def test_a_credit_beyond_double_stress_becomes_a_charge() -> None:

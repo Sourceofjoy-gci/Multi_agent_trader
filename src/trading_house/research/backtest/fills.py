@@ -53,10 +53,15 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
 
     # The multiplier belongs here rather than in ``CostModel``, because spread is
     # observed from the bar and never declared: there is no spread field to
-    # scale, and ``tests/acceptance/test_phase6.py`` forbids adding one. At
-    # ``m = 1`` the multiply is ``Decimal(x) * 1`` and changes nothing, so every
-    # result digest stays exactly where it is. Multiplication first and the
-    # halving last, so the only division is by two and it terminates.
+    # scale, and ``tests/acceptance/test_phase6.py`` forbids adding one. For
+    # every multiplier this repository can construct the multiply is a no-op:
+    # each of them is a ``1`` with exponent 0, so ``Decimal(x) * 1`` is exact in
+    # value and in exponent and every result digest stays exactly where it is.
+    # That is a claim about the multipliers, not about the field: ``gt=0``
+    # admits ``Decimal("1.0")``, which keeps the value and shifts the exponent
+    # to a string ``digest()`` would see. Nothing in this repository writes
+    # one. Multiplication first and the halving last, so the only division is by
+    # two and it terminates.
     half_spread = Decimal(bar.spread) * model.stress_multiplier * contract.point_size / _HALF
     raw_price = bar.open + half_spread if side is Side.BUY else bar.open - half_spread
     offset = slippage_price_offset(model=model, side=side, contract=contract, opening=True)

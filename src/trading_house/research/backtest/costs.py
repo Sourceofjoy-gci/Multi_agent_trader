@@ -115,17 +115,18 @@ def swap_cost(
     ``slippage_price_offset`` does: one point is worth
     ``point_size / price_increment`` price increments, so
     ``point_size * value_per_price_increment / price_increment`` in money.
-    Every exact factor (rate, day count, lots, ``point_size``,
-    ``value_per_price_increment`` and ``stress_multiplier``) is multiplied
-    together first; the division by ``price_increment`` runs last, on that
-    already-exact numerator, so it is the only rounding boundary in the
-    expression. ``stress_multiplier`` belongs on that list and is written
-    there: multiplying by it *after* the division rounds a second time, and
-    with ``point_size=0.00001``, ``price_increment=0.00003`` and a stress of
-    3 the two orders differ by one ulp
-    (``-0.9999999999999999999999999999`` against ``-1``). ``digest()`` hashes
-    a ``Decimal``'s string form, so that ulp would reach the digest Phase 8's
-    trial ledger stores.
+    Every exact factor (the stressed rate, day count, lots, ``point_size`` and
+    ``value_per_price_increment``) is multiplied together first; the division
+    by ``price_increment`` runs last, on that already-exact numerator, so it is
+    the only rounding boundary in the expression. ``stress_multiplier`` reaches
+    that numerator through ``_stressed_rate``, which runs first, and must:
+    ``_stressed_rate`` is a product, and on the credit branch a subtraction, but
+    no division, so it stays exact. Applying the multiplier *after* the division
+    instead would round a second time, and with ``point_size=0.00001``,
+    ``price_increment=0.00003`` and a stress of 3 the two orders differ by one
+    ulp (``-0.9999999999999999999999999999`` against ``-1``). ``digest()``
+    hashes a ``Decimal``'s string form, so that ulp would reach the digest
+    Phase 8's trial ledger stores.
 
     That division is not guaranteed to terminate: when ``price_increment``'s
     reduced-fraction denominator has prime factors other than 2 and 5 (i.e.

@@ -347,10 +347,18 @@ def test_an_entry_crosses_a_multiplier_scaled_half_spread() -> None:
     assert stressed.price - bar.open == Decimal("0.000075")
 
 
-def test_a_stop_exit_crosses_no_spread_at_any_multiplier() -> None:
+def test_a_stop_exit_crosses_no_spread() -> None:
     """The asymmetry is the model, not an oversight to smooth over. A stop or
     target exit triggers off a raw bar price and pays only slippage, and §6.3
-    attributes what is charged rather than what would be conventional."""
+    attributes what is charged rather than what would be conventional.
+
+    ``entry_fill`` is where ``stress_multiplier`` reaches a spread; this
+    function never reads the field, at any multiplier, because it never crosses
+    a spread in the first place. The model here is stressed at 2x so the claim
+    is made where it would be wrong if the exit did scale: on this same bar an
+    entry would have paid ``10 * 2 * 0.00001 / 2 = 0.0001`` of half-spread, and
+    this exit pays none of it.
+    """
 
     bar = _bar(open=Decimal("1.10000"), high=Decimal("1.10010"), low=Decimal("1.09900"), spread=10)
     contract = _contract(point_size=Decimal("0.00001"))
