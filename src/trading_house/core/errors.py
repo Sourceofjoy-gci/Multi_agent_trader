@@ -22,6 +22,7 @@ class ExitCode(IntEnum):
     TRIAL_LEDGER_INTEGRITY = 16
     EVIDENCE_INTEGRITY = 17
     EQUITY_EVIDENCE = 18
+    SCENARIO_EVIDENCE = 19
 
 
 class TradingHouseError(Exception):
@@ -111,6 +112,27 @@ class EquityEvidenceError(TradingHouseError):
     """
 
     public_message = "mark-to-market equity evidence is not trustworthy"
+
+
+class ScenarioEvidenceError(TradingHouseError):
+    """Raised when a candidate's sealed scenarios are not the ones it declared.
+
+    Six distinct ways that happens — a level missing or duplicated, a summary
+    that is not ``COMPLETE`` or carries no split, a baseline that is not the
+    declared one, a stressed level that changed something other than the
+    multiplier, a scenario belonging to another candidate, and a window the
+    protocol did not declare — and one remedy for all of them: this candidate's
+    cost grid is not the grid that was preregistered, so nothing downstream may
+    read it as one. Distinct from ``EvidenceIntegrityError``, which says a
+    document is missing, altered, or not the canonical bytes its digest names;
+    here every document verifies and the *set* is wrong.
+
+    The specifics ride on the private cause so an operator can be told which of
+    the six they hit, while the public message stays as uninformative as every
+    other code here.
+    """
+
+    public_message = "sealed scenarios do not match the declared cost grid"
 
 
 class BrokerUnavailableError(TradingHouseError):
