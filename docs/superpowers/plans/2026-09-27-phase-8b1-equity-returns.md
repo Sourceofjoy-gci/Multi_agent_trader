@@ -854,7 +854,19 @@ def mark_to_market_bundle(
         source_result_sha256=result.digest(),
         result=result,
         daily_returns=derive_daily_returns(
-            outcome.equity, first_day=result.start.date(), last_day=result.end.date()
+            outcome.equity,
+            first_day=result.start.date(),
+            # Not ``result.end.date()``. The engine reads one bar past
+            # ``request.end`` -- inclusive bar open times against a half-open
+            # store range -- so the last mark can be stamped on the next UTC
+            # day. Stopping at ``end.date()`` drops that bar's equity change
+            # while ``net_pnl`` still counts its PnL, leaving a daily series
+            # that does not reconcile with the result printed beside it.
+            # ``legacy_import.py`` extends its walk for exactly this reason.
+            last_day=max(
+                result.end.date(),
+                max(point.marked_at.date() for point in outcome.equity.observations),
+            ),
         ),
         return_series_basis=ReturnSeriesBasis.MARK_TO_MARKET,
         costs=CostSummary(

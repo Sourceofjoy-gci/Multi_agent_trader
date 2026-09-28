@@ -236,9 +236,27 @@ def derive_daily_returns(
 ```
 
 Bundle assembly calls it with `first_day = result.start.date()` and
-`last_day = result.end.date()`, so the daily series spans exactly the run's own
-requested window and no wider. A caller wanting a different range passes
-different dates; the function is not hard-wired to the result.
+`last_day = max(result.end.date(), every observation's date)`.
+
+The extension on the end is not optional. `BacktestResult.end` is
+`request.end`, and `Backtester._replay_bars` asks the store for one bar more
+than that, because `start`/`end` are inclusive bar open times while the store's
+range is half-open. The last observation is therefore stamped at
+`request.end + duration(timeframe)`, which for an M15 run ending at 23:45 falls
+on the *next* UTC day. Stopping at `end.date()` drops that bar's equity change
+from the series while `net_pnl` still counts its P&L — a daily series that does
+not reconcile with the result printed beside it, and one nothing above it would
+notice, because the series is an opaque tuple inside the bundle.
+`research/legacy_import.py:110-122` documents the same defect and the same fix
+in the realized basis; the two derivations must agree on where a run ends.
+
+The front needs no such extension: the first observation is stamped at or after
+`request.start`, so a run whose first bar closes on the following UTC day gets a
+leading all-zero day, which is the honest reading of a window that opened on that
+date. Extending backwards would attribute P&L to a day the run never touched.
+
+A caller wanting a different range passes different dates; the function is not
+hard-wired to the result.
 
 Implements §6.2 exactly, over every UTC calendar date from `first_day` through
 `last_day` inclusive:
