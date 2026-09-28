@@ -341,6 +341,12 @@ class ToyStrategy:
     id: str = "toy"
     version: str = "1"
     book: str = "fx_swing"
+    side: Side = Side.BUY
+    """Which side of the book this toy takes. A default rather than a second
+    toy strategy because §3.3's sell-side claim -- that the two legs' slippage
+    inverts and still charges both -- is only reachable by selling, and one
+    field buys it where a subclass would have to restate the whole proposal."""
+
     seen: list[FeatureSnapshot] = field(default_factory=list)
 
     def evaluate(self, snapshot: FeatureSnapshot) -> TradeProposal | None:
@@ -368,14 +374,20 @@ class ToyStrategy:
             strategy_version=self.version,
             book=self.book,
             instrument_id=snapshot.instrument_id,
-            side=Side.BUY,
+            side=self.side,
             horizon_seconds=self.horizon_seconds,
             entry_condition="ramp",
             entry_price_ref=entry,
-            # 100 points below the reference, so the structural term is the
-            # widest of section 8.2's four and the stop distance is exactly
-            # 0.00100 -- which is what makes the lot size hand-computable.
-            invalidation_price=entry - Decimal("0.00100"),
+            # 100 points the wrong side of the reference, so the structural term
+            # is the widest of section 8.2's four and the stop distance is
+            # exactly 0.00100 -- which is what makes the lot size
+            # hand-computable, and the same on both sides of the book. A short's
+            # invalidation goes ABOVE its entry: ``TradeProposal`` refuses the
+            # other arrangement, which is the proposal-level mirror of a stop
+            # that a falling market would have to reach through.
+            invalidation_price=(
+                entry - Decimal("0.00100") if self.side is Side.BUY else entry + Decimal("0.00100")
+            ),
             target_r_multiple=self.target_r_multiple,
             max_holding_seconds=self.proposal_holding_seconds or self.max_holding_seconds,
             expected_return_bps=5.0,
@@ -413,6 +425,7 @@ def _outcome(
     end: datetime | None = None,
     defective_bar_tolerance: Decimal | None = None,
     contract: InstrumentContract | None = None,
+    cost_model: CostModel | None = None,
     constitution_sha256: str | None = None,
     atr_period: int = ATR_PERIOD,
     spread_window: int = SPREAD_WINDOW,
@@ -450,7 +463,7 @@ def _outcome(
             start=start if start is not None else bars[0].event_time,
             end=end if end is not None else bars[-1].event_time,
             firm_equity=firm_equity,
-            cost_model=_cost_model(),
+            cost_model=cost_model if cost_model is not None else _cost_model(),
             atr_period=atr_period,
             spread_window=spread_window,
             **tolerance_kwargs,

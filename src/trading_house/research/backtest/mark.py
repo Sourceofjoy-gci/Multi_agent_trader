@@ -33,7 +33,10 @@ from pydantic import NonNegativeInt, field_validator, model_validator
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import EquityEvidenceError, TimestampError
 from trading_house.core.values import CanonicalModel
-from trading_house.research.backtest.costs_attribution import CostAttribution
+from trading_house.research.backtest.costs_attribution import (
+    CostAttribution,
+    attribution_disagreement,
+)
 from trading_house.research.backtest.result import BacktestResult
 
 MAX_EQUITY_OBSERVATIONS = 2_000_000
@@ -158,20 +161,20 @@ class BacktestOutcome(CanonicalModel):
     def the_attribution_is_the_result_it_decomposes(self) -> Self:
         """The split is checked against the trades rather than trusted.
 
-        A tuple can be internally consistent and still describe another run: a
-        reordered one, a padded one, or one whose ``post_fill_gross`` no longer
-        matches the ``gross_pnl`` the result reports. All three are refused, in
-        the same words ``EvidenceBundle`` will use in Task 3, so a disagreement
-        reads the same whether it was caught at construction or at read time.
+        The rule and its wording live in
+        ``costs_attribution.attribution_disagreement``, and this calls it rather
+        than restating it. The import constraint runs downward only:
+        ``BACKTEST_ALLOWED`` admits ``trading_house.research.backtest`` and not
+        ``trading_house.research``, so a module in *this* subtree may not import
+        from the one above it, while ``research/evidence.py`` already imports
+        from here. Task 3's ``EvidenceBundle`` therefore calls the same
+        predicate, and a disagreement reads the same whether it was caught at
+        construction or at read time.
         """
 
-        if len(self.attribution.trades) != len(self.result.trades):
-            raise ValueError("the attribution must cover every trade exactly once")
-        for split, trade in zip(self.attribution.trades, self.result.trades, strict=True):
-            if split.proposal_id != trade.proposal_id:
-                raise ValueError("the attribution must be in result order")
-            if split.post_fill_gross != trade.gross_pnl:
-                raise ValueError("a split's post-fill gross must equal its trade's gross PnL")
+        reason = attribution_disagreement(self.attribution, self.result)
+        if reason is not None:
+            raise ValueError(reason)
         return self
 
 

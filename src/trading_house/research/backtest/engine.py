@@ -765,6 +765,18 @@ class Backtester:
         already-exact numerator -- the shape ``swap_cost`` uses and the reason
         two runs over identical inputs cannot differ only in trailing zeros and
         so cannot differ in digest.
+
+        The identity the attribution rests on is exact only when that division
+        terminates, i.e. when ``point_size / price_increment`` is a power of ten.
+        ``price_increment`` is an unconstrained ``PositiveDecimal``, so it need
+        not be: at ``0.00003`` the separately rounded components do not sum to
+        the singly rounded total and a split can differ from ``gross_pnl`` by an
+        ulp, at which point ``BacktestOutcome`` **refuses the run**. That
+        refusal is intended and is not to be loosened -- a decomposition that
+        cannot reconstruct its own total to the last digit is not a
+        decomposition, and failing closed is the right direction to be wrong in.
+        MT5's tick size is a power of ten, so no contract in practice reaches
+        it.
         """
 
         return (
@@ -786,10 +798,13 @@ class Backtester:
         ``commission`` and ``swap`` -- the two ``SimulatedTrade`` carries as
         named lines beside it. ``net_pnl`` is right either way.
 
-        The other two are not left inside it, though: the full split now lives
-        in ``costs_attribution.TradeCostAttribution``, which prices the raw
-        move separately and subtracts what each leg charged, so this number is
-        decomposed rather than merely labelled. See ``SimulatedTrade``.
+        Neither of them is taken back out of it. Spread and slippage are still
+        inside this number; what changed is that they are no longer left
+        *only* inside it, because the full split now lives in
+        ``costs_attribution.TradeCostAttribution`` beside the trade -- which
+        prices the raw move separately and subtracts what each leg charged, so
+        the two are stated as terms rather than folded into one number. That is
+        what a decomposition is; a label would have been a second copy of this.
         """
 
         move = exit_price - entry_price if side is Side.BUY else entry_price - exit_price

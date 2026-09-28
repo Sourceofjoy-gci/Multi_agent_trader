@@ -16,6 +16,7 @@ from tests.unit.research.backtest.conftest import (
     ToyStrategy,
     _bar,
     _contract,
+    _cost_model,
     _loaded_constitution,
     _outcome,
     _ramp,
@@ -26,6 +27,7 @@ from trading_house.core.errors import EquityEvidenceError, TimestampError
 from trading_house.core.schemas import Side
 from trading_house.marketdata.models import BarQuality, Timeframe, duration
 from trading_house.research.backtest import engine
+from trading_house.research.backtest.costs import slippage_price_offset
 from trading_house.research.backtest.engine import (
     BacktestRefused,
     trail_candidate,
@@ -103,19 +105,16 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     # fill-model regression fails a hand-computed value, not a shape. The raw
     # move is 11 points and the two crossed half-spreads are 5 and 5, so
     # market = 11 x 3.37 = 37.07, spread = 10 x 3.37 = 33.70, slippage = 0, and
-    # 37.07 - 33.70 = 3.37.
+    # 37.07 - 33.70 = 3.37. Only the absolutes are asserted: the identity and
+    # the per-trade pairing are already guaranteed by ``BacktestOutcome``'s
+    # construction, and the identity holds for any pair of numbers a symmetric
+    # bug produced. A falsified split is refused in
+    # ``test_costs_attribution.py``, which is where that check belongs.
     attribution = outcome.attribution
-    assert len(attribution.trades) == len(outcome.result.trades)
-    for entry, trade in zip(attribution.trades, outcome.result.trades, strict=True):
-        assert entry.proposal_id == trade.proposal_id
-        assert entry.post_fill_gross == trade.gross_pnl
-        assert entry.market_pnl - entry.spread_cost - entry.slippage_cost == trade.gross_pnl
     # Both trades in this fixture are TIME exits, so each crosses a second
     # half-spread from its own exit bar.
     assert all(entry.spread_cost > 0 for entry in attribution.trades)
     assert all(entry.slippage_cost == 0 for entry in attribution.trades)
-    # And the components themselves by hand, because the identity above holds for
-    # any pair of numbers a symmetric bug produced. Only an absolute can fail.
     assert attribution.trades[0].market_pnl == Decimal("37.07")
     assert attribution.trades[0].spread_cost == Decimal("33.70")
     assert attribution.trades[0].slippage_cost == Decimal(0)
@@ -347,6 +346,105 @@ def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop(
     # TIME exits of the known-answer run above pay twice this, and the asymmetry
     # is the model rather than a residual to be smoothed away.
     assert outcome.attribution.trades[0].spread_cost == Decimal("16.85")
+
+
+SLIPPAGE_POINTS = Decimal(4)
+SLIPPAGE_OFFSET = SLIPPAGE_POINTS * POINT
+"""Four points a side, worth four ticks of price at this contract's
+``point_size``. Chosen over the default zero because zero is the reason this
+needed its own tests: with ``slippage_cost`` identically ``0`` in every other
+engine test, dropping the exit leg from ``engine.py``'s sum is a mutant the
+whole suite survives."""
+
+
+def _slippage_legs_in_money(side: Side, lots: Decimal) -> tuple[Decimal, Decimal]:
+    """What one trade's entry leg and exit leg each paid in slippage, in money.
+
+    Both legs are priced by ``entry_fill`` -- the closing one too, on the
+    opposite side, through ``Backtester._closing_fill`` -- so the two offsets
+    are equal and opposite and each of them is a charge. The conversion is
+    ``_price_to_money`` read off the contract rather than off a tester
+    instance; at ``point_size == price_increment`` it terminates either way.
+    """
+
+    contract = _contract()
+    model = _cost_model(slippage_points_per_side=SLIPPAGE_POINTS)
+    closing = Side.SELL if side is Side.BUY else Side.BUY
+    return (
+        _money(
+            abs(slippage_price_offset(model=model, side=side, contract=contract, opening=True)),
+            lots,
+        ),
+        _money(
+            abs(slippage_price_offset(model=model, side=closing, contract=contract, opening=True)),
+            lots,
+        ),
+    )
+
+
+def _money(price_delta: Decimal, lots: Decimal) -> Decimal:
+    contract = _contract()
+    return price_delta * lots * contract.value_per_price_increment / contract.price_increment
+
+
+def test_a_run_that_charges_slippage_attributes_both_legs_of_it() -> None:
+    """``slippage_cost`` is the two legs summed, on the one axis where the legs
+    are not symmetric and cannot be.
+
+    Every other engine test runs with ``slippage_points_per_side=0``, so the
+    exit leg is a term nothing can see and a sum of one leg is indistinguishable
+    from a sum of two. Here it is 4 points a side: 4 points x 3.37 lots at $1 a
+    point is 13.48 a leg, 26.96 a trade, and the trade's own reported gross
+    moves from the known-answer run's +3.37 to -23.59 by exactly that 26.96.
+    The legs are asserted separately as well as summed, so a half-decomposition
+    is a named failure rather than a wrong total nobody can place.
+    """
+
+    outcome = _outcome(
+        bars=_ramp(60),
+        strategy=ToyStrategy(every_n=20),
+        cost_model=_cost_model(slippage_points_per_side=SLIPPAGE_POINTS),
+    )
+
+    # A long buys against its own slippage: up on entry, and the closing sell
+    # fills lower. Both crossings are visible in the fill prices themselves.
+    assert outcome.result.trades[0].entry_price == ramp_price(21) + HALF_SPREAD + SLIPPAGE_OFFSET
+    assert outcome.result.trades[0].exit_price == ramp_price(32) - HALF_SPREAD - SLIPPAGE_OFFSET
+    for split, trade in zip(outcome.attribution.trades, outcome.result.trades, strict=True):
+        entry_leg, exit_leg = _slippage_legs_in_money(trade.side, trade.lots)
+        assert (entry_leg, exit_leg) == (Decimal("13.48"), Decimal("13.48"))
+        assert split.slippage_cost == entry_leg + exit_leg
+    assert outcome.attribution.trades[0].slippage_cost == Decimal("26.96")
+    assert outcome.result.trades[0].gross_pnl == Decimal("-23.59")
+
+
+def test_a_short_is_charged_the_same_two_legs_with_the_signs_inverted() -> None:
+    """§3.3's sell-side claim, which no other test in this file reaches.
+
+    ``ToyStrategy`` only ever bought, so nothing said end to end what the design
+    says of the other side: a short slips DOWN on entry and its closing buy
+    slips UP, and the two signs invert while both are still charged. The ramp
+    rises, so the short's ``market_pnl`` is negative and its gross is worse
+    than the raw move by the same three terms a long's is --
+    -37.07 - 33.70 - 26.96 = -97.73.
+    """
+
+    outcome = _outcome(
+        bars=_ramp(60),
+        strategy=ToyStrategy(every_n=20, side=Side.SELL),
+        cost_model=_cost_model(slippage_points_per_side=SLIPPAGE_POINTS),
+    )
+
+    assert [trade.side for trade in outcome.result.trades] == [Side.SELL, Side.SELL]
+    assert outcome.result.trades[0].entry_price == ramp_price(21) - HALF_SPREAD - SLIPPAGE_OFFSET
+    assert outcome.result.trades[0].exit_price == ramp_price(32) + HALF_SPREAD + SLIPPAGE_OFFSET
+    for split, trade in zip(outcome.attribution.trades, outcome.result.trades, strict=True):
+        entry_leg, exit_leg = _slippage_legs_in_money(trade.side, trade.lots)
+        assert (entry_leg, exit_leg) == (Decimal("13.48"), Decimal("13.48"))
+        assert split.slippage_cost == entry_leg + exit_leg
+    assert outcome.attribution.trades[0].market_pnl == Decimal("-37.07")
+    assert outcome.attribution.trades[0].slippage_cost == Decimal("26.96")
+    assert outcome.result.trades[0].gross_pnl == Decimal("-97.73")
 
 
 def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None:
