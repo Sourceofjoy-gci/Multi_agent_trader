@@ -549,8 +549,38 @@ compared. `BacktestOutcome` is built with both tuples:
         )
 ```
 
-Add the three new tests for these refusals to `test_costs_attribution.py` or
-`test_engine.py`, whichever already holds the outcome tests.
+Add the field and its reconciliation to the existing `BacktestOutcome` model in
+`engine.py`, so the split is checked against the trades rather than trusted:
+
+```python
+    attribution: CostAttribution
+
+    @model_validator(mode="after")
+    def the_attribution_is_the_result_it_decomposes(self) -> Self:
+        """The split is checked against the trades rather than trusted.
+
+        A tuple can be internally consistent and still describe another run: a
+        reordered one, a padded one, or one whose ``post_fill_gross`` no longer
+        matches the ``gross_pnl`` the result reports. All three are refused, in
+        the same words ``EvidenceBundle`` will use in Task 3, so a disagreement
+        reads the same whether it was caught at construction or at read time.
+        """
+
+        if len(self.attribution.trades) != len(self.result.trades):
+            raise ValueError("the attribution must cover every trade exactly once")
+        for split, trade in zip(self.attribution.trades, self.result.trades, strict=True):
+            if split.proposal_id != trade.proposal_id:
+                raise ValueError("the attribution must be in result order")
+            if split.post_fill_gross != trade.gross_pnl:
+                raise ValueError("a split's post-fill gross must equal its trade's gross PnL")
+        return self
+```
+
+Add one test per refusal to `test_costs_attribution.py`: a tuple of the wrong
+length, a reordered pair, and one whose `post_fill_gross` was changed. The third
+is the one that matters — it is the check that would catch a fill-model
+regression, so it must fail when the decomposition is falsified rather than when
+the model is merely absent.
 
 - [ ] **Step 6: Run the tests and the gates**
 
