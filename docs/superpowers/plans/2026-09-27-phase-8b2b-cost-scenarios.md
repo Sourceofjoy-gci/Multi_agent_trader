@@ -409,7 +409,13 @@ def scenario_report(
        ``market_pnl`` are read from them and a ``PARTIAL`` summary has two of
        them as ``None``.
     3. **Baseline fidelity** — the ``1.0`` scenario's ``cost_model`` equals the
-       protocol's ``CostSpec.baseline`` exactly.
+       protocol's ``CostSpec.baseline`` at level 1: every declared term, with the
+       multiplier normalised. ``CostSpec`` pins ``stress_multipliers`` but says
+       nothing about the baseline's own multiplier, so a protocol may declare a
+       baseline of ``1.5``; comparing verbatim would make that registration
+       permanently unreportable, and a registration cannot be amended after the
+       fact. Normalising both sides is a diagnostic gap, not a correctness one —
+       see the code's own docstring.
     4. **Scenario fidelity** — each stressed scenario differs from the baseline
        in ``stress_multiplier`` and nothing else.
     5. **Window fidelity** — every scenario's ``result.start``/``end`` equals the
@@ -481,7 +487,7 @@ will route around. The six are:
 | --- | --- | --- |
 | completeness | `{m for m in by_multiplier}` against `grid` | a declared level is missing, or one appears twice |
 | attribution | `b.costs.status`, `b.cost_attribution` | a summary is not `COMPLETE`, or the split is absent |
-| baseline fidelity | `bundles[0].result.cost_model` == `protocol.costs.baseline` | any term differs |
+| baseline fidelity | `bundles[0].result.cost_model` == `protocol.costs.baseline` at level 1 | any term differs |
 | scenario fidelity | each `cost_model` against `baseline` with `stress_multiplier` replaced | any other field differs |
 | window fidelity | `b.result.start`/`end` against `protocol.data.start`/`end` | either differs |
 | identity | `trial_id`, `spec_sha256`, `strategy_id`, `strategy_version`, `bars_seen`, ordered `proposal_id`s | any differs across the set, or a bundle names another trial |

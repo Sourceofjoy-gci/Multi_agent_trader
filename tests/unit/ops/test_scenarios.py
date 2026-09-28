@@ -49,6 +49,7 @@ from trading_house.marketdata.models import Timeframe
 from trading_house.ops.backtest import build_backtester, mark_to_market_bundle
 from trading_house.ops.scenarios import (
     ScenarioDegradation,
+    ScenarioReport,
     ScenarioTotals,
     declared_grid,
     registered_protocol,
@@ -78,6 +79,12 @@ from trading_house.research.trial_ledger import (
 )
 
 GRID = (Decimal("1"), Decimal("1.5"), Decimal("2"))
+UNDECLARED = Decimal("2.5")
+"""A fourth cost level, which no protocol may declare: ``CostSpec`` pins
+``stress_multipliers`` to exactly ``{1.5, 2}``. A bundle sealed at it is a run
+the preregistration did not authorise, and nothing in the engine can produce one
+on its own -- the completeness check's ``undeclared`` clause exists for a caller
+that assembled a set by hand."""
 """The three levels a ``CostSpec`` validator makes mandatory, written out so a
 test that reads them is reading the shape rather than re-deriving it from the
 protocol it is about to check."""
@@ -149,6 +156,17 @@ def _all_keys(value: object) -> set[str]:
     if isinstance(value, list):
         return set().union(*(_all_keys(item) for item in value))
     return set()
+
+
+_NO_VERDICT = ("total", "verdict", "surviv", "threshold", "promote", "approve", "reject")
+"""Vocabulary that would make this a gate rather than a report.
+
+``judge`` and ``verdict`` are deliberately absent as standalone words even though
+``verdict`` is here: the module's own docstring says what the report does *not*
+do, and a gate that fired on the sentence promising not to judge would be a gate
+to disable rather than to satisfy. The words above cannot appear in prose
+promising restraint; they can only appear in a field or key that judges.
+"""
 
 
 def _protocol(
@@ -472,6 +490,7 @@ def _sealed(
     moved_at: Decimal | None = None,
     moved_field: str | None = None,
     moved_value: object = None,
+    extra_multiplier: Decimal | None = None,
 ) -> tuple[tuple[str, EvidenceBundle], ...]:
     """One candidate's sealed grid, as the chain would hold it.
 
@@ -488,7 +507,8 @@ def _sealed(
     bars = BARS
     trial_id = _trial_id(protocol)
     sealed: dict[Decimal, tuple[str, EvidenceBundle]] = {}
-    for multiplier in GRID:
+    levels = (*GRID, extra_multiplier) if extra_multiplier is not None else GRID
+    for multiplier in levels:
         bundle = _bundle_at(protocol, bars, multiplier, trial_id=trial_id)
         if summary_status is not None:
             bundle = _rebuild(bundle, _carrying(summary_status))
@@ -536,6 +556,44 @@ def test_an_incomplete_grid_is_refused() -> None:
 
     with pytest.raises(ScenarioEvidenceError):
         scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+
+
+def test_a_level_sealed_twice_is_refused() -> None:
+    """Two attempts at one level is two audit attempts, not one grid.
+
+    The ledger counts a distinct ``attempt_id`` as an attempt, so a candidate
+    run twice at 1.0x has genuinely been examined twice, and which of the two
+    bundles the report should read is not a question this function can answer --
+    reading the first would silently drop the other run's evidence, and reading
+    both would report one candidate's grid as four scenarios.
+    """
+
+    protocol = _protocol()
+    baseline, stressed, doubled = _sealed(protocol)
+    sealed = (baseline, stressed, (doubled[0], doubled[1]), stressed)
+
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+    assert "sealed more than once" in str(refusal.value.__cause__)
+
+
+def test_a_level_nobody_declared_is_refused() -> None:
+    """A fourth cost level is not part of the grid this protocol declared.
+
+    Nothing produces one today -- ``CostSpec`` pins ``stress_multipliers`` to
+    exactly ``{1.5, 2}`` -- but the report reads whatever a candidate sealed, and
+    a bundle at an undeclared multiplier is a run the preregistration did not
+    authorise. Refusing rather than ignoring it is what makes "the report covers
+    the declared grid and nothing else" a checked statement.
+    """
+
+    protocol = _protocol()
+    undeclared = _sealed(protocol, extra_multiplier=UNDECLARED, multipliers=(UNDECLARED,))
+    sealed = (*_sealed(protocol), *undeclared)
+
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+    assert "never declared" in str(refusal.value.__cause__)
 
 
 def test_a_summary_that_is_not_complete_is_refused() -> None:
@@ -610,10 +668,16 @@ def test_a_grid_whose_trade_sequence_moved_is_refused() -> None:
     experiment, and a report that accepted it would be comparing two strategies
     rather than two cost levels.
 
-    Moving a whole trade out of the sequence is not a one-field edit, so the
-    tamper empties the stressed scenario's ``result.trades`` and its
-    ``cost_attribution`` together -- a model-accepted document that traded
-    nothing, and one the identity check must catch on the sequence.
+    The tamper renames the one trade's ``proposal_id``, in ``result.trades`` and
+    in ``cost_attribution`` together, because nothing in any validator binds a
+    trade's identity to the engine's proposal stream. Every sealed total stays
+    exactly where it was, so the document is model-accepted and internally
+    consistent: a run that had traded a different proposal at the same prices
+    and the same costs. Deleting the trade instead was tried first and refused
+    at construction -- the result's net, the summary's four terms, the split and
+    the equity series' final realized total are all bound to the trades, and
+    moving one without the others is a ``ValidationError`` that would prove the
+    wrong layer.
     """
 
     protocol = _protocol()
@@ -642,9 +706,10 @@ def test_a_protocol_whose_baseline_is_itself_stressed_is_still_reportable() -> N
     with a message blaming the sealed scenarios and no remedy -- a registration
     cannot be amended after the fact.
 
-    The report reads the money terms and refuses on the multiplier alone, which
-    is the one field that cannot be right: a stress grid is defined relative to
-    unstressed costs.
+    The report normalises both sides to level 1 and reads the money terms, so
+    the odd multiplier is neither refused nor mentioned. That is the trade
+    ``declared_grid``'s docstring argues, and this test is where it is visible:
+    what is checked is that the report still comes out, not that anyone is told.
     """
 
     protocol = _protocol(baseline_multiplier="1.5")
@@ -699,6 +764,16 @@ def test_a_report_about_no_trial_is_refused_rather_than_crashing_on_construction
         scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=unnamed)
     assert "no digest to name it by" in str(unnamed_digest.value.__cause__)
 
+    # The third clause, pinned by its cause rather than by the raise: a foreign
+    # bundle would also be caught by the identity check a moment later, so only
+    # the message distinguishes refusing it at the boundary from catching it in
+    # passing. The substitution is reported as the substitution, not as the
+    # internal disagreement it causes.
+    foreign = _sealed(protocol, foreign_trial_at=Decimal("1"))
+    with pytest.raises(ScenarioEvidenceError) as foreign_bundle:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=foreign)
+    assert "sealed under" in str(foreign_bundle.value.__cause__)
+
 
 def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
     protocol = _protocol()
@@ -711,9 +786,20 @@ def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
     assert not hasattr(report, "total_cost")
     # Recursively, not over the top-level keys: a ``total_cost`` added to
     # ``ScenarioTotals`` is nested two levels down and a top-level sweep would
-    # miss it. The model field sets are pinned below as well, which is the
-    # statement that cannot be satisfied by adding a field.
-    assert not any("total" in key for key in _all_keys(report.model_dump(mode="json")))
+    # miss it. The vocabulary is the design's -- no total, and no verdict,
+    # threshold, survival or promotion claim -- rather than the word "total"
+    # alone. The model field sets are pinned as well, which is the statement
+    # that cannot be satisfied by adding a field under any name.
+    assert not any(
+        word in key for key in _all_keys(report.model_dump(mode="json")) for word in _NO_VERDICT
+    )
+    assert set(ScenarioReport.model_fields) == {
+        "trial_id",
+        "spec_sha256",
+        "declared_multipliers",
+        "scenarios",
+        "degradations",
+    }
     assert set(ScenarioTotals.model_fields) == {
         "multiplier",
         "attempt_id",
