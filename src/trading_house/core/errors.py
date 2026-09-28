@@ -95,13 +95,19 @@ class EvidenceIntegrityError(TradingHouseError):
 
 
 class EquityEvidenceError(TradingHouseError):
-    """Raised when mark-to-market equity evidence cannot be produced honestly.
+    """Raised when mark-to-market equity evidence cannot be produced or reduced.
 
-    One error for both ways that happens: a series that cannot satisfy its own
-    identity, and a run whose observation count exceeds the storage ceiling. The
-    caller has one remedy for each -- do not record this run as evidence -- and
-    the count that broke the ceiling travels on the private cause rather than in
-    the message, which stays as uninformative as every other code here.
+    Three ways, all of them refusals of a *whole run* rather than of a malformed
+    document: a run whose observation count exceeds the storage ceiling, a
+    requested daily range whose first day is after its last, and a day whose
+    prior close is not strictly positive to divide by.
+
+    Deliberately NOT raised for a series that violates its own identity or its
+    cross-checks against the result. Those are pydantic ``ValidationError``s, by
+    design, and a caller that reached for this class to mean "equity evidence I
+    cannot trust" would miss every one of them -- the two are different failure
+    modes with different remedies, and conflating them here would send a
+    document bug to the same exit code as a disk limit.
     """
 
     public_message = "mark-to-market equity evidence is not trustworthy"

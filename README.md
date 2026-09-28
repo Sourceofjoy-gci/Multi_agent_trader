@@ -1181,8 +1181,10 @@ the first time at a later gate.
   For scale, the four-year M15 Phase 7 run produced 99,988 observations.
 - **Verifying a sealed series costs real time and disk, and both scale with the bar
   count.** At that same four-year M15 scale the sealed bundle is about **12.7 MiB** and
-  `research trial verify` takes roughly **0.84 s per document** — these are measured
-  figures, not a projection, and both are linear in processed bars (window length × bar
+  `research trial verify` takes roughly **0.84 s per document**. These are measured figures,
+  not a projection, but they were taken over a *synthetic* series of that length — Phase 7's
+  bar store was deleted, so its own run cannot be replayed. The bar count is what the cost
+  tracks, and that is the same. Both are linear in processed bars (window length × bar
   frequency), so a coarser timeframe moves both. The unit cost is per *document*, and
   8B2 (three cost scenarios per run) and 8B3 (a compounding rerun) will multiply the
   document count. Budget the time **before** you run `verify` over a long ledger, not
@@ -1309,7 +1311,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an event against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race, and a `start` re-run under a *different* `--started-at` lands here too, with the attempt already in the chain — re-run it with the first run's value |
 | 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
-| 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series cannot be produced or reduced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, a requested daily range whose first day is after its last, or a day whose prior close is not strictly positive | **Do not record this run as evidence.** Narrow the window, use a coarser timeframe, or check the requested range, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader. A series that violates its own mark identity is *not* this code — that is a pydantic `ValidationError`, exit 1 |
+| 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series cannot be produced or reduced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, a requested daily range whose first day is after its last, or a day whose prior close is not strictly positive | **Do not record this run as evidence.** Narrow the window, use a coarser timeframe, or check the requested range, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader. A series that violates its own mark identity is *not* this code — that is a pydantic `ValidationError`, which the CLI reports as `configuration invalid`, exit 2 |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates

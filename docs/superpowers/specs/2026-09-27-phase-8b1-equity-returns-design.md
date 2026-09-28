@@ -317,11 +317,15 @@ later, checking two thirds of what the type that produced it checks.
 
 Sealing every bar is the decision B1-5 makes on purpose — one canonical form, one digest
 rule, one read path — and it is a trade, so the price is stated rather than implied. What
-follows is what an operator pays to *verify* that evidence later, measured by sealing and
-re-reading the four-year M15 run that produced 99,988 processed bars through the
-production `EvidenceStore`. These are **measurements taken on this repository**, not
-estimates and not a projection, so a later reader can tell what was observed from what was
-assumed.
+follows is what an operator pays to *verify* that evidence later.
+
+These are **measurements, not projections** — but be precise about what was measured. Phase 7's
+bar store was deleted (§2.2), so its 99,988-bar run cannot be replayed and these figures were
+*not* taken from it. They were taken by driving the production engine and the production
+`EvidenceStore` over a synthetic series of that same length, and they are therefore a
+**calibration of the unit cost at that scale**, not a reproduction of that run's artifact. The
+bar count is the same, and the cost is a function of the bar count, so the calibration is what
+carries; the run it is named after is the scale reference, not the source of the numbers.
 
 | quantity | measured |
 |---|---|
@@ -381,10 +385,19 @@ retained cannot be re-derived, re-audited, or checked against a later `BacktestO
 
 One new typed error, `EquityEvidenceError`, on the next free exit code,
 `ExitCode.EQUITY_EVIDENCE = 18` (`core/errors.py`, mapped in `cli.EXIT_CODES`).
-It covers both ways equity evidence cannot be produced honestly: a series
-violating its own identity or its cross-checks, and a run whose observation count
-exceeds the ceiling. `public_message` carries no free text, matching the existing
-convention, and no DSN, driver text, or raw exception ever reaches the operator.
+It covers the three refusals of a whole **run**: a run whose observation count
+exceeds the ceiling, a requested daily range whose first day is after its last,
+and a day whose prior close is not strictly positive to divide by.
+`public_message` carries no free text, matching the existing convention, and no
+DSN, driver text, or raw exception ever reaches the operator.
+
+It deliberately does **not** cover a series violating its own identity or its
+cross-checks against the result. Those are pydantic `ValidationError`s, because
+they are defects in a document rather than in a request, and the CLI reports them
+as `ConfigurationError` (exit 2). Keeping the two apart matters: a caller reaching
+for `EquityEvidenceError` to mean "equity evidence I cannot trust" would otherwise
+miss every document-level refusal, and exit 18 would read as a disk limit when
+the real fault is a malformed bundle.
 
 `MAX_EQUITY_OBSERVATIONS = 2_000_000` is a module constant in `mark.py`, not a
 setting: a value that exists only to catch a mistake should not be something an

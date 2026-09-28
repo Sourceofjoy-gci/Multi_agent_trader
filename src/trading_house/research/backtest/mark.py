@@ -6,10 +6,13 @@ rectangular daily reduction ``derive_daily_returns`` performs on them.
 
 A mark is a **valuation**, not a liquidation value. An open position is marked
 at the bar's mid close, so the series reports it worth more than closing it
-would actually fetch, because the fill model charges half-spread and slippage
-into the entry fill and charges neither into stop or target exits. Every
-drawdown figure a later phase derives from this series is mark-to-market and
-never realizable, and the basis field on the bundle is what says so.
+would actually fetch, because the fill model charges the half-spread crossing
+into the entry fill and a stop or target exit crosses no spread at all. (Slippage
+is a separate matter and *is* applied on the exit side: ``resolve_exit`` computes
+one ``slippage_price_offset`` for the closing leg and uses it for both the stop
+and the target branch. What those exits skip is the spread, not the slippage.)
+Every drawdown figure a later phase derives from this series is mark-to-market
+and never realizable, and the basis field on the bundle is what says so.
 
 ``DailyReturnPoint`` is defined here rather than in ``research/evidence.py``
 because ``BACKTEST_ALLOWED`` admits ``trading_house.research.backtest`` and not
