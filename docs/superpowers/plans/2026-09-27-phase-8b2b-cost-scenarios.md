@@ -4,7 +4,7 @@
 
 **Goal:** Run the cost grid a protocol preregisters, seal all three scenarios, and derive a report that refuses any candidate whose sealed scenarios are not the declared ones.
 
-**Architecture:** No new sealed artifact — the three bundles are the evidence, already sealed and verified. A new pure module derives the grid from the protocol **as it sits in the chain**, not from a file, and holds the five fail-closed checks plus the report model. A second module adds the two commands: an orchestrator that starts, simulates and seals all three levels, and a standalone read. `backtest run` and the orchestrator call one simulation function; `research trial record` and the orchestrator call one seal function.
+**Architecture:** No new sealed artifact — the three bundles are the evidence, already sealed and verified. A new pure module derives the grid from the protocol **as it sits in the chain**, not from a file, and holds the six fail-closed checks plus the report model. A second module adds the two commands: an orchestrator that starts, simulates and seals all three levels, and a standalone read. `backtest run` and the orchestrator call one simulation function; `research trial record` and the orchestrator call one seal function.
 
 **Tech Stack:** Python 3.12, Pydantic v2 strict/frozen models, Typer, `Decimal`, pytest, Ruff, strict mypy. No new dependency, no migration, no new ledger event type.
 
@@ -217,17 +217,18 @@ In `src/trading_house/core/errors.py`, add `SCENARIO_EVIDENCE = 19` to the `Exit
 class ScenarioEvidenceError(TradingHouseError):
     """Raised when a candidate's sealed scenarios are not the ones it declared.
 
-    Five distinct ways that happens — a level missing, a baseline that is not the
+    Six distinct ways that happens — a level missing or duplicated, a summary
+    that is not ``COMPLETE`` or carries no split, a baseline that is not the
     declared one, a stressed level that changed something other than the
-    multiplier, a scenario belonging to another candidate, a window the protocol
-    did not declare — and one remedy for all of them: this candidate's cost grid
-    is not the grid that was preregistered, so nothing downstream may read it as
-    one. Distinct from ``EvidenceIntegrityError``, which says a document is
-    missing, altered, or not the canonical bytes its digest names; here every
-    document verifies and the *set* is wrong.
+    multiplier, a scenario belonging to another candidate, and a window the
+    protocol did not declare — and one remedy for all of them: this candidate's
+    cost grid is not the grid that was preregistered, so nothing downstream may
+    read it as one. Distinct from ``EvidenceIntegrityError``, which says a
+    document is missing, altered, or not the canonical bytes its digest names;
+    here every document verifies and the *set* is wrong.
 
     The specifics ride on the private cause so an operator can be told which of
-    the five they hit, while the public message stays as uninformative as every
+    the six they hit, while the public message stays as uninformative as every
     other code here.
     """
 
@@ -236,6 +237,20 @@ class ScenarioEvidenceError(TradingHouseError):
 
 The private cause is a `ValueError` carrying the full explanation. Raise it as
 `raise ScenarioEvidenceError() from ValueError(detail)`.
+
+Then, **in the same step**, add the exit-code mapping in `cli.py`'s `EXIT_CODES`, after the
+`EquityEvidenceError` line:
+
+```python
+    ScenarioEvidenceError: ExitCode.SCENARIO_EVIDENCE,
+```
+
+It belongs here rather than with the commands. `tests/unit/test_cli.py` has
+`test_every_typed_error_has_a_stable_exit_code`, which asserts
+`_concrete_error_types() <= set(cli.EXIT_CODES)` — so the moment this step creates the error type,
+that test fails until the mapping exists. Leaving it for Task 3 would hand every reviewer in
+between a red `tests/unit/` and a "known failure" nobody wrote down. A new typed error and its code
+are one change, and the test that says so is what keeps them together.
 
 - [ ] **Step 4: Create `ops/scenarios.py`**
 
@@ -466,14 +481,14 @@ will route around. The six are:
 | --- | --- | --- |
 | completeness | `{m for m in by_multiplier}` against `grid` | a declared level is missing, or one appears twice |
 | attribution | `b.costs.status`, `b.cost_attribution` | a summary is not `COMPLETE`, or the split is absent |
-| baseline fidelity | `ordered[0].result.cost_model` == `protocol.costs.baseline` | any term differs |
+| baseline fidelity | `bundles[0].result.cost_model` == `protocol.costs.baseline` | any term differs |
 | scenario fidelity | each `cost_model` against `baseline` with `stress_multiplier` replaced | any other field differs |
 | window fidelity | `b.result.start`/`end` against `protocol.data.start`/`end` | either differs |
 | identity | `trial_id`, `spec_sha256`, `strategy_id`, `strategy_version`, `bars_seen`, ordered `proposal_id`s | any differs across the set, or a bundle names another trial |
 
-`_refuse_scenario_fidelity` is written as a copy-then-replace rather than as four field
-comparisons, because "the only difference is the multiplier" is the property and a hand-written
-list of the five other fields would be a second statement of `CostModel`'s shape:
+`_refuse_scenario_fidelity` is written as a copy-then-replace rather than as a list of the other
+fields, because "the only difference is the multiplier" is the property and a hand-written field list
+would be a second statement of `CostModel`'s shape:
 
 ```python
 def _refuse_scenario_fidelity(protocol: TrialProtocol, bundles: Sequence[EvidenceBundle]) -> None:
@@ -526,28 +541,36 @@ def _totals(multiplier: Decimal, bundle: EvidenceBundle, evidence_sha256: str) -
 
     costs = bundle.costs
     attribution = bundle.cost_attribution
-    assert costs.spread_cost is not None and costs.slippage_cost is not None
-    assert attribution is not None
+    # ``cast`` and not ``assert``. ``src/`` contains no ``assert`` statement
+    # anywhere and this module should not be the first: an assert is stripped
+    # under ``-O``, which would turn a narrowing aid into an ``AttributeError``
+    # on ``None`` in an optimised run, and it raises something that is not this
+    # repo's typed-error contract. The guarantee is real --
+    # ``CostSummary.the_status_licenses_exactly_the_components_it_carries``
+    # refuses a ``COMPLETE`` summary that omits either term -- so ``cast`` is the
+    # honest way to tell mypy about a check that has already run, and it costs
+    # nothing at runtime. ``cli.py`` uses ``cast`` throughout for the same job.
     return ScenarioTotals(
         multiplier=multiplier,
         attempt_id=bundle.attempt_id,
         evidence_sha256=evidence_sha256,
         source_result_sha256=bundle.source_result_sha256,
         trades=len(bundle.result.trades),
-        market_pnl=sum((t.market_pnl for t in attribution.trades), Decimal(0)),
-        spread_cost=costs.spread_cost,
-        slippage_cost=costs.slippage_cost,
+        market_pnl=sum(
+            (t.market_pnl for t in cast(CostAttribution, attribution).trades), Decimal(0)
+        ),
+        spread_cost=cast(Decimal, costs.spread_cost),
+        slippage_cost=cast(Decimal, costs.slippage_cost),
         commission=costs.commission,
         swap=costs.swap,
         net_pnl=bundle.result.net_pnl,
     )
 ```
 
-The two `assert`s are unreachable by construction, and that is their whole job: they narrow
-`Decimal | None` and `CostAttribution | None` for mypy where the refusal above has already
-established the invariant. They are not the check -- `_refuse_attribution` is, and it raises a typed
-error an operator can act on rather than an `AssertionError` they cannot. If either assert ever
-fires, `_refuse_attribution` has a hole and that is a bug in the check, not in the bundle.
+`cast` calls are narrowing only — `CostSummary`'s own validator already refuses a `COMPLETE`
+summary missing either term, and `_refuse_attribution` has already required `COMPLETE` and a
+present split. If `_refuse_attribution` ever has a hole, the `cast` is where the bad document
+surfaces, and that is a bug in the check rather than in the bundle.
 
 - [ ] **Step 5: Run the tests and the gates**
 
@@ -560,8 +583,9 @@ uv run ruff check .
 uv run mypy
 ```
 
-Expected: all pass. `tests/unit/test_cli.py` will fail on the new unmapped error type until
-Task 3 adds the `EXIT_CODES` entry — that is expected at this point and is Task 3's line.
+Expected: all pass. Every task in this plan leaves the tree green — if `tests/unit/` is red here,
+something is wrong, and the most likely cause is a refusal that raises something other than
+`ScenarioEvidenceError`.
 
 - [ ] **Step 6: Commit the checks**
 
@@ -715,12 +739,17 @@ git commit -m "refactor: give the backtest and the trial commands one simulation
 - Consumes: `simulate`, `seal_bundle` (Task 2), `scenario_report`, `registered_protocol`, `declared_grid` (Task 1), the existing `_trial_ledger()`, `_evidence_store()`, `mark_to_market_bundle`.
 - Produces: `research trial scenarios`, `research trial scenario-report`, and the `EXIT_CODES` entry.
 
-- [ ] **Step 1: Write the failing CLI and integration tests**
+- [ ] **Step 1: Write the failing integration tests**
 
-In `tests/unit/test_cli.py`, add the exit-code case next to
+`test_every_typed_error_has_a_stable_exit_code` already passes, because Task 1 added the
+`ScenarioEvidenceError` mapping in the same commit as the error type. So the failing test here is
+the *command*, not the code. The pinned literal below is still worth writing — it is the
+convention this file follows for a code an operator's script branches on, and 19 is a new number
+nothing else pins.
+
+In `tests/unit/test_cli.py`, add that case next to
 `test_equity_evidence_error_maps_to_its_own_exit_code`, following its shape — the mapping assertion,
-then the literal pinned, because that file's convention is that a code an operator's script branches
-on is pinned as a number and not merely as a member:
+then the literal pinned:
 
 ```python
 def test_scenario_evidence_error_maps_to_its_own_exit_code() -> None:
@@ -736,10 +765,6 @@ def test_scenario_evidence_error_maps_to_its_own_exit_code() -> None:
     assert cli.EXIT_CODES[ScenarioEvidenceError] is cli.ExitCode.SCENARIO_EVIDENCE
     assert int(cli.ExitCode.SCENARIO_EVIDENCE) == 19
 ```
-
-`test_every_typed_error_has_a_stable_exit_code` asserts `_concrete_error_types() <= set(cli.EXIT_CODES)`
-and will fail from Task 1 onward, until this mapping lands. That is expected, and it is the check
-that catches a new error type nobody gave an exit code.
 
 Create `tests/integration/research/test_scenarios.py`. Reuse the module-level `seeded` fixture and
 the `_args`/`_run` shape from `test_backtest_evidence.py` by importing them
@@ -778,19 +803,14 @@ Cover:
 
 - [ ] **Step 2: Run and verify failure**
 
-Run: `uv run pytest tests/unit/test_cli.py tests/integration/research/test_scenarios.py -q --no-cov`
+Run: `uv run pytest tests/integration/research/test_scenarios.py -q --no-cov`
 
-Expected: failures — the commands and the exit code do not exist.
+Expected: failures — `research trial scenarios` and `scenario-report` do not exist. The
+`tests/unit/test_cli.py` exit-code case **passes** at this point, because Task 1 already added the
+mapping alongside the error type. That is the intended state: a green unit suite and a red
+integration suite means exactly one thing is missing, and it is the commands.
 
-- [ ] **Step 3: Add the exit-code mapping**
-
-In `cli.py`'s `EXIT_CODES`, after the `EquityEvidenceError` line:
-
-```python
-    ScenarioEvidenceError: ExitCode.SCENARIO_EVIDENCE,
-```
-
-- [ ] **Step 4: Add the orchestrator**
+- [ ] **Step 3: Add the orchestrator**
 
 ```python
 @trial_app.command("scenarios")
@@ -997,7 +1017,13 @@ Note what the orchestrator does **not** take: no `--mark-to-market`, no `--trial
 orchestrator that accepted them would be accepting three ways to get the same three runs, and the
 one that widens the grid is the one an operator would reach for by mistake.
 
-- [ ] **Step 5: Add the standalone read**
+Also extract the three helpers this step introduced — `_candidate`, `_instrument_contract`, and
+`_backtest_request` — into `cli.py` and rewrite `backtest_run`'s `operation()` to call them, so the
+hand-run path and the orchestrator build the request through one path. The three options
+`backtest_run` keeps that the orchestrator does not (`--mark-to-market` and the six identity
+options) stay in `backtest_run` itself; only the shared construction moves.
+
+- [ ] **Step 4: Add the standalone read**
 
 ```python
 @trial_app.command("scenario-report")
@@ -1077,7 +1103,7 @@ output and a hand-built candidate's are checked by identical code. That matters 
 the orchestrator returns the report it just produced, and if that report came from a different code
 path than the standalone read's, the equality assertion would be comparing two implementations.
 
-- [ ] **Step 6: Run the CLI and integration tests**
+- [ ] **Step 5: Run the CLI and integration tests**
 
 Run:
 ```powershell
@@ -1090,7 +1116,7 @@ uv run mypy
 
 Expected: green, including the S-4 digest-equality case.
 
-- [ ] **Step 7: Commit the commands**
+- [ ] **Step 6: Commit the commands**
 
 ```powershell
 git add src/trading_house/cli.py tests/unit/test_cli.py tests/integration/research/test_scenarios.py
