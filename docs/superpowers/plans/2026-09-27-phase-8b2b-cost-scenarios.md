@@ -56,7 +56,7 @@
 **Interfaces:**
 - Consumes: `TrialProtocol`, `CostSpec`, `CostModel`, `EvidenceBundle`, `ReturnSeriesBasis`, `CostAttributionStatus`, `EquityEvidenceError` for its message register.
 - Produces:
-  - `registered_protocol(events: Sequence[LedgerRecord], trial_id: str) -> TrialProtocol`
+  - `registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialProtocol`
   - `declared_grid(protocol: TrialProtocol) -> tuple[Decimal, ...]`
   - `scenario_report(*, trial_id: str, protocol: TrialProtocol, sealed: Sequence[tuple[str, EvidenceBundle]]) -> ScenarioReport`
   - `ScenarioTotals`, `ScenarioDegradation`, `ScenarioReport`
