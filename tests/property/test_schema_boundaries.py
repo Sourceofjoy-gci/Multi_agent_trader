@@ -356,6 +356,11 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "session_open_price": Decimal("1.10000"),
         "bars_since_session_open": 0,
     },
+    # ``Stamped`` does not reach this one: ``marked_at`` is a bar's close, not the
+    # event/availability/processing triple every other stamped model carries, and a
+    # mark has no source to declare. Declared explicitly so the naive-datetime
+    # sweep below exercises its own UTC validator -- without this entry the sweep
+    # is vacuous for the one timestamp 8B1 introduces.
     EquityObservation: {
         "marked_at": AWARE,
         "equity": Decimal("100000"),

@@ -1041,6 +1041,132 @@ part everything later divides by. Everything that divides by them lands in a
 later phase, and until it does, no strategy in this repository can pass a
 promotion gate because there is no promotion gate.
 
+## Phase 8B1 — the mark-to-market equity series
+
+Phase 8B1 gives `backtest run` a way to emit an **evidence bundle** instead of a
+bare result, and that bundle carries a mark-to-market equity series: one
+observation per processed bar, each a valuation of the book at that bar's close.
+It adds the series and nothing that reads it. No statistics, no cost scenarios,
+no compounding, no gate — those are 8B2 (per-trade cost attribution and the 1.0x
+/ 1.5x / 2.0x cost scenarios), 8B3 (compounding reruns through the real risk
+engine, and capacity), and 8C (the statistics and the promotion gates). Nothing
+in this phase makes any candidate promotable, and a bundle that verifies is a
+bundle that was recorded, not one that passed.
+
+The series lives on a **sidecar** — `BacktestOutcome` holds the result and the
+series together and asserts they agree — and not on `BacktestResult`. That is
+deliberate and it is why the Phase 7 result digests in the table above still
+verify: a field on the result would have moved all three, plus the known-answer
+v1 bundle digest `tests/property/test_trial_evidence.py` pins. Those four
+constants name artifacts that exist on no machine but the one that produced
+them, so they cannot be recomputed, only refused — which is what
+`tests/acceptance/test_phase8b1.py` does with them.
+
+### Commands
+
+`--mark-to-market` swaps the payload for the `EvidenceBundle` that
+`research trial record` seals. The flag travels with six options that name the
+attempt the bundle belongs to, and the set is all-or-nothing **in both
+directions**: all six with the flag, none of them without it. A partial set is
+refused as `configuration invalid` (exit 2) rather than silently dropped, so an
+operator who typed `--trial-id` and forgot the flag is told.
+
+```bash
+# One run, emitting the bundle. The six options below are required with the flag
+# and refused without it; everything else is the Phase 7 invocation unchanged.
+uv run trading-house backtest run --mark-to-market \
+  --strategy session_momentum_eurusd --exit-policy none \
+  --start 2026-09-21T00:00:00 --end 2026-09-21T16:00:00 \
+  --firm-equity 100000 --contract contract.json \
+  --atr-period 2 --spread-window 10 \
+  --commission-per-lot-per-side 3.50 --slippage-points-per-side 0.4 \
+  --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30 \
+  --triple-swap-weekday 2 --defective-bar-tolerance 0 \
+  --trial-id trial-1 --attempt-id attempt-1 \
+  --spec-sha256 1a2b3c4d5e6f7081... --agent-run-id run-2026-03-01 \
+  --occurred-at 2026-03-01T12:30:00 --registered-at 2026-03-01T13:00:00
+```
+
+| Option | Example invocation | What it names |
+|---|---|---|
+| `--trial-id` | `--trial-id trial-1` | The declared candidate this run belongs to. `record` checks it against the bundle, and refuses a trial no preregistered protocol declared. |
+| `--attempt-id` | `--attempt-id attempt-1` | The started attempt. Checked against the bundle the same way. |
+| `--spec-sha256` | `--spec-sha256 1a2b3c4d5e6f7081...` | The preregistered specification digest, as the trial declares it. **Recorded, not vouched for** — nothing in 8B1 compares it to the sealed `PREREGISTERED` event; see *What Phase 8A does not implement* above, which says the same about the counters. |
+| `--agent-run-id` | `--agent-run-id run-2026-03-01` | The agent run that produced the candidate. `backtest run` holds no ledger connection, so it cannot read the authoritative value and does not pretend to. |
+| `--occurred-at` | `--occurred-at 2026-03-01T12:30:00` | When the run happened, as declared provenance. |
+| `--registered-at` | `--registered-at 2026-03-01T13:00:00` | When the attempt was registered. Not the same instant as `occurred_at`: a run happens before it is recorded, and defaulting one to the other would assert they were simultaneous. |
+
+Both timestamps are declared provenance, not evidence of order — the ledger's
+own `recorded_at` remains the only registration-order authority, for the reason
+`research trial start` gives.
+
+Without the flag the payload is the Phase 7 artifact byte for byte —
+`{"status": "ok", "result": …, "digest": …, "margin_modelled": false}` — so
+`research trial import-legacy` and the three saved Phase 7 artifacts are
+untouched. The flag changes the document's address, never the result inside it:
+the same window reports one result digest either way.
+
+A run whose bars ran out with a position still open is **reported, not refused**.
+The payload carries `"mark_to_market_flat": false` and the command exits 0. The
+engine discards a position the range ran out on rather than closing it at the
+edge, and its marks are still real marks; a command that failed on that run
+would hide the defect instead of naming it, and an operator would meet it for
+the first time at a later gate.
+
+### What the series is, and what it is not
+
+- **A mark is a mid-price valuation, not a liquidation value.** An open position
+  is marked at the bar's `close`, and closing it would fetch something else: the
+  fill model crosses half the spread plus slippage on the way in and on a
+  time-stop exit, and prices a stop or target exit from its trigger with
+  slippage and no spread crossing at all. So a position marked at a bar close is
+  worth more than closing it would fetch, and **every drawdown figure derived
+  from this series is mark-to-market and never realizable**. The bundle's
+  `return_series_basis` is `mark_to_market`, and that field is what says so.
+- **A mark immediately before an exit is not that exit's realized P&L.** The
+  exit is priced by the fill model — from its trigger for a stop or a target,
+  from the next bar's open for a time stop — never from the close the mark used,
+  and it books the commission and the swap that the mark does not carry, so
+  equity steps down by those charges at every close. The series is a valuation
+  path; the trades are the accounting. They are related without being the same
+  claim, and a reader who wants realized numbers has `result.trades`.
+- **One observation per processed bar, not per snapshot and not per trade.**
+  A bar the strategy was never asked about, because its ATR window was still
+  warming up, is still marked. The count equals the result's own `bars_seen`,
+  and at every observation
+  `equity == firm_equity + cumulative_realized_pnl + unrealized_pnl`.
+- **`costs.status` is `PARTIAL`, with `spread_cost` and `slippage_cost` `null`.**
+  Both were charged inside the fill prices and the result cannot separate them
+  until 8B2 does, so this run genuinely has not measured them. **A zero is not a
+  substitute for an unmeasured term**: a `PARTIAL` summary with a real `0` in
+  `commission` (a run that booked no trades) is a different state from a `null`,
+  and only the second one means nobody measured. `dataset_sha256` is `null` for
+  the same reason — 8B1 computes no digest of the bar store, and an unavailable
+  hash is the honest record.
+- **The daily series is rectangular over UTC calendar days**, one point per day
+  inclusive, with a day carrying no mark holding the prior end-of-day equity
+  forward and therefore returning a literal `0.00`. That zero is a measurement of
+  an untraded day, not a missing point, and `return_series_basis` is what stops
+  it being read as a marked one. The walk runs past `--end` on purpose: the
+  engine reads one bar beyond the range (inclusive bar open times against a
+  half-open store range), so the last mark can land on the following UTC day,
+  and stopping at `end.date()` would drop an equity change that `net_pnl` still
+  counts.
+- **`MAX_EQUITY_OBSERVATIONS` is 2,000,000, and a run that would exceed it is
+  refused** (exit 18) rather than subsampled. A series with silent gaps in it is
+  indistinguishable from a quiet market, so the ceiling fails with a number
+  instead of filling the disk: the count that broke it rides on the error's
+  private cause for a log reader, and the public message stays as uninformative
+  as every other code here. The remedy is to **narrow the window or use a coarser
+  timeframe** — not to raise the ceiling, and never to accept a shorter series.
+  For scale, the four-year M15 Phase 7 run produced 99,988 observations.
+- **`return_series_basis` is not a quality rating.** A mark-to-market bundle is
+  not better evidence than a `realized_closed_trades` one; it answers a different
+  question, and the three imported Phase 7 bundles stay
+  `realized_closed_trades`, `LEGACY_UNPREGISTERED` and non-promotable forever.
+  Their bar store was deleted, so a mark-to-market series cannot be reconstructed
+  for them at all.
+
 ## Operator commands
 
 ```bash
@@ -1056,6 +1182,7 @@ uv run trading-house --help
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
 | `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
+| `trading-house backtest run --mark-to-market` | Replay the same arm and print a sealable mark-to-market evidence bundle — the mark-to-market series and its digest — instead of the bare result |
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal |
@@ -1151,6 +1278,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 15 | `trial ledger append failed` | A trial ledger event could not be appended — a lost race past its retry budget, a duplicate event id with different content, an event against a trial no protocol declared, or an unreachable ledger database | **Do not record the trial as run.** The append is transactional, so the chain is unchanged. A retried *identical* event is safe; a new event id for the same fact is a caller bug, not a race, and a `start` re-run under a *different* `--started-at` lands here too, with the attempt already in the chain — re-run it with the first run's value |
 | 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
+| 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series could not be produced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, or a series that cannot satisfy its own identity | **Do not record this run as evidence.** Narrow the window or use a coarser timeframe, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates
