@@ -51,7 +51,13 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
     """Fill at the given bar's own open, crossing half its spread -- never the
     close that generated the signal (section 11.1's named violation)."""
 
-    half_spread = Decimal(bar.spread) * contract.point_size / _HALF
+    # The multiplier belongs here rather than in ``CostModel``, because spread is
+    # observed from the bar and never declared: there is no spread field to
+    # scale, and ``tests/acceptance/test_phase6.py`` forbids adding one. At
+    # ``m = 1`` the multiply is ``Decimal(x) * 1`` and changes nothing, so every
+    # result digest stays exactly where it is. Multiplication first and the
+    # halving last, so the only division is by two and it terminates.
+    half_spread = Decimal(bar.spread) * model.stress_multiplier * contract.point_size / _HALF
     raw_price = bar.open + half_spread if side is Side.BUY else bar.open - half_spread
     offset = slippage_price_offset(model=model, side=side, contract=contract, opening=True)
     # ``at`` is the instant of the price, not the instant the bar became

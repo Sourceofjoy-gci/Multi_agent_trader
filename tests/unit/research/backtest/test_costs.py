@@ -350,3 +350,82 @@ def test_a_stress_multiplier_below_one_still_constructs() -> None:
     forbid, so a change to ``ge=1`` must fail here rather than pass quietly."""
 
     assert _model(stress_multiplier=Decimal("0.5")).stress_multiplier == Decimal("0.5")
+
+
+def test_a_charge_becomes_m_times_more_negative() -> None:
+    """A negative rate is a cost, so stress makes it worse. The branch the
+    code already implemented, kept so the two cases are separately pinned."""
+
+    model = _model(swap_long_points_per_day=Decimal("-1"), stress_multiplier=Decimal("2"))
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
+    held = {
+        "lots": Decimal(1),
+        "contract": contract,
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # Monday
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),  # Tuesday, one crossing
+    }
+
+    assert swap_cost(model=model, side=Side.BUY, **held) == Decimal("-2")  # type: ignore[arg-type]
+
+
+def test_a_credit_never_grows_under_stress() -> None:
+    """The defect this replaces. A positive rate is money the broker pays, and
+    the old unconditional ``rate * m`` handed a positive-carry strategy MORE
+    profit at 2x than at 1x -- so it cleared the section 12 gate more easily
+    stressed, which is the opposite of a stress."""
+
+    model = _model(swap_short_points_per_day=Decimal("1"), stress_multiplier=Decimal("2"))
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
+    held = {
+        "lots": Decimal(1),
+        "contract": contract,
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),
+    }
+
+    assert swap_cost(model=model, side=Side.SELL, **held) == Decimal(0)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("rate", [Decimal("-1"), Decimal("1")], ids=["charge", "credit"])
+def test_at_multiplier_one_every_term_exactly_matches_the_baseline(rate: Decimal) -> None:
+    """Section 6.4: "At m = 1, every component exactly matches baseline."
+
+    Both signs, because a rule that only reproduced the baseline for charges
+    would be a redefinition of the baseline dressed as a stress.
+    """
+
+    stressed = _model(
+        swap_long_points_per_day=rate, swap_short_points_per_day=rate, stress_multiplier=Decimal(1)
+    )
+    plain = _model(swap_long_points_per_day=rate, swap_short_points_per_day=rate)
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
+    held = {
+        "lots": Decimal(1),
+        "contract": contract,
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),
+    }
+
+    assert swap_cost(model=stressed, side=Side.BUY, **held) == swap_cost(  # type: ignore[arg-type]
+        model=plain, side=Side.BUY, **held
+    )
+    assert swap_cost(model=stressed, side=Side.SELL, **held) == swap_cost(  # type: ignore[arg-type]
+        model=plain, side=Side.SELL, **held
+    )
+
+
+def test_a_credit_beyond_double_stress_becomes_a_charge() -> None:
+    """``m > 2`` is total, not refused. The field's only bound is ``gt=0``, and
+    "what if costs are worse than 2x" is a legitimate question; answering it by
+    refusing would be less honest than answering it."""
+
+    model = _model(swap_short_points_per_day=Decimal("1"), stress_multiplier=Decimal("3"))
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
+    held = {
+        "lots": Decimal(1),
+        "contract": contract,
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),
+    }
+
+    assert swap_cost(model=model, side=Side.SELL, **held) < 0  # type: ignore[arg-type]

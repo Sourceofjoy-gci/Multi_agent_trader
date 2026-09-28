@@ -23,6 +23,7 @@ from trading_house.core.schemas import Side
 from trading_house.core.values import CanonicalModel
 
 _ROUND_TRIP_SIDES: Final[Decimal] = Decimal(2)
+_TWO: Final[Decimal] = Decimal(2)
 
 
 class CostModel(CanonicalModel):
@@ -43,12 +44,19 @@ class CostModel(CanonicalModel):
     result produced below 1 flatters the strategy and is not evidence it
     passes anything.
 
-    One consequence of section 7.1's "one multiplier over the whole model",
-    stated rather than coded around: ``swap_*_points_per_day`` is signed, so
-    stressing a *positive* carry increases profit and a positive-carry
-    strategy therefore clears the section 12 gate more easily at 2x than at
-    1x. The spec mandates a single multiplier, so this is documented rather
-    than fixed with a second code path.
+    ``swap_*_points_per_day`` is signed, so section 6.4's multiplier is adverse
+    rather than uniform: a charge becomes ``m`` times more negative, while a
+    credit is reduced by ``(m - 1) * abs(rate)`` and so can never grow. The
+    rule lives in this module's ``_stressed_rate``, applied to the rate before
+    the rest of the product, and it is total over the whole ``gt=0`` domain --
+    both branches return the rate unchanged at ``m = 1``, a credit grows below
+    1, is zero at 2, and becomes a charge above 2.
+
+    It is not stated here as an accepted consequence of section 7.1's "one
+    multiplier over the whole model" because a stress that is not adverse is
+    not a stress: the unconditional ``rate * m`` it replaced handed a
+    positive-carry strategy more profit at 2x than at 1x, so that strategy
+    cleared the section 12 gate more easily the harder its costs were stressed.
     """
 
     commission_per_lot_per_side: Decimal  # account currency
@@ -137,14 +145,34 @@ def swap_cost(
         opened_at=opened_at, closed_at=closed_at, triple_swap_weekday=model.triple_swap_weekday
     )
     return (
-        rate
+        _stressed_rate(rate, model.stress_multiplier)
         * Decimal(day_count)
         * lots
         * contract.point_size
         * contract.value_per_price_increment
-        * model.stress_multiplier
         / contract.price_increment
     )
+
+
+def _stressed_rate(rate: Decimal, multiplier: Decimal) -> Decimal:
+    """Section 6.4's adverse multiplier, which is piecewise in the rate's sign.
+
+    A charge becomes ``m`` times more negative. A credit is reduced by
+    ``(m - 1) * abs(rate)``, so stress can never *increase* carry -- which is
+    the defect this replaces. The previous unconditional ``rate * m`` handed a
+    positive-carry strategy more profit at 2x than at 1x, and this module's own
+    docstring had to record that as an accepted consequence rather than fix it.
+
+    At ``m = 1`` both branches return the rate unchanged, which is §6.4's "at
+    m = 1 every component exactly matches baseline" and is what makes this a
+    stress rather than a redefinition of the baseline. Below 1 a credit grows,
+    which is the legitimate "what if costs are lower than assumed" probe
+    ``CostModel`` already invites; at 2 it is zero; above 2 it becomes a charge.
+    """
+
+    if rate < 0:
+        return rate * multiplier
+    return rate * (_TWO - multiplier)
 
 
 def _rollover_day_count(

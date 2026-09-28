@@ -325,3 +325,42 @@ def test_an_exit_fill_pays_slippage_against_the_trade_on_every_exit_kind() -> No
     # open, which is already worse than the 1.10300 stop.
     assert short_stop.fill.price == Decimal("1.11000") + _FOUR_POINTS  # 1.11004
     assert short_target.fill.price == Decimal("1.10500") + _FOUR_POINTS  # 1.10504
+
+
+def test_an_entry_crosses_a_multiplier_scaled_half_spread() -> None:
+    """Spread is observed, never declared, so the multiplier reaches it where
+    it is observed. A stress the run does not pay is not a stress."""
+
+    bar = _bar(open=Decimal("1.10000"), high=Decimal("1.10010"), spread=10)
+    contract = _contract(point_size=Decimal("0.00001"))
+    model = _zero_slip()
+
+    nominal = entry_fill(bar=bar, side=Side.BUY, contract=contract, model=model)
+    stressed = entry_fill(
+        bar=bar,
+        side=Side.BUY,
+        contract=contract,
+        model=model.model_copy(update={"stress_multiplier": Decimal("1.5")}),
+    )
+
+    assert nominal.price - bar.open == Decimal("0.00005")
+    assert stressed.price - bar.open == Decimal("0.000075")
+
+
+def test_a_stop_exit_crosses_no_spread_at_any_multiplier() -> None:
+    """The asymmetry is the model, not an oversight to smooth over. A stop or
+    target exit triggers off a raw bar price and pays only slippage, and §6.3
+    attributes what is charged rather than what would be conventional."""
+
+    bar = _bar(open=Decimal("1.10000"), high=Decimal("1.10010"), low=Decimal("1.09900"), spread=10)
+    contract = _contract(point_size=Decimal("0.00001"))
+    model = _zero_slip(slippage_points_per_side=Decimal(0)).model_copy(
+        update={"stress_multiplier": Decimal("2")}
+    )
+
+    closed = resolve_exit(
+        bar=bar, side=Side.BUY, stop=Decimal("1.09950"), target=None, contract=contract, model=model
+    )
+
+    assert closed is not None
+    assert closed.fill.price == Decimal("1.09950")
