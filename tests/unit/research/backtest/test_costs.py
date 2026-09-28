@@ -419,9 +419,13 @@ def test_the_stressed_rate_matches_hand_derived_constants(
 
     A model built without ``stress_multiplier`` gets the field default
     ``Decimal(1)``, so "stressed at 1 equals plain" compares one model with
-    itself: it still passes with ``_stressed_rate`` replaced by a constant, by
-    the old unconditional ``rate * m``, or by a single branch. These three rows
-    cannot be satisfied that way.
+    itself: it passes with ``_stressed_rate`` replaced by a constant, by the old
+    unconditional ``rate * m``, and also by a *single-branch* rule that
+    applies ``rate * (2 - m)`` to both signs. The single-branch case is what the
+    ``m = 1.5`` credit row below is for -- at ``m = 1`` both rules agree, so no
+    ``m = 1`` row can separate them, and the charge rows at ``m = 2`` are what
+    rule the charge branch out. Between the three rows and the two tests on
+    either side, each of those three mutants is caught somewhere.
 
     ``m = 1`` in both signs is the load-bearing one: both branches return the
     rate unchanged, and that is what makes this a stress rather than a

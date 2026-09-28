@@ -352,10 +352,12 @@ def test_a_stop_exit_crosses_no_spread() -> None:
     target exit triggers off a raw bar price and pays only slippage, and §6.3
     attributes what is charged rather than what would be conventional.
 
-    ``entry_fill`` is where ``stress_multiplier`` reaches a spread; this
-    function never reads the field, at any multiplier, because it never crosses
-    a spread in the first place. The model here is stressed at 2x so the claim
-    is made where it would be wrong if the exit did scale: on this same bar an
+    ``entry_fill`` is where ``stress_multiplier`` reaches a spread. This
+    function *does* read the field — through ``slippage_price_offset``, which
+    scales it — but never through a spread term, because it crosses no spread in
+    the first place. With zero declared slippage that read is invisible here,
+    which is why the model is stressed at 2x: so the claim is made where it
+    would be wrong if the exit did scale. On this same bar an
     entry would have paid ``10 * 2 * 0.00001 / 2 = 0.0001`` of half-spread, and
     this exit pays none of it.
     """

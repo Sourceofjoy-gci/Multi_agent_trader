@@ -53,14 +53,21 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
 
     # The multiplier belongs here rather than in ``CostModel``, because spread is
     # observed from the bar and never declared: there is no spread field to
-    # scale, and ``tests/acceptance/test_phase6.py`` forbids adding one. For
-    # every multiplier this repository can construct the multiply is a no-op:
-    # each of them is a ``1`` with exponent 0, so ``Decimal(x) * 1`` is exact in
-    # value and in exponent and every result digest stays exactly where it is.
-    # That is a claim about the multipliers, not about the field: ``gt=0``
-    # admits ``Decimal("1.0")``, which keeps the value and shifts the exponent
-    # to a string ``digest()`` would see. Nothing in this repository writes
-    # one. Multiplication first and the halving last, so the only division is by
+    # scale, and ``tests/acceptance/test_phase6.py`` forbids adding one. Every
+    # multiplier this repository's own callers construct is a ``1`` with
+    # exponent 0, so ``Decimal(x) * 1`` is exact in value and in exponent and
+    # every result digest stays exactly where it was.
+    #
+    # That is a claim about the multipliers, not about the field, and the
+    # distinction is reachable: ``gt=0`` admits ``Decimal("1.0")``, which
+    # ``backtest run --stress-multiplier 1.0`` will happily construct, and
+    # multiplying by it yields ``1.100050`` against ``1.10005`` -- the same
+    # value, a different string, and so a different ``digest()``. That is
+    # correct rather than a fault: the operator declared something and the
+    # evidence records what they declared. Nothing in this repository's tests
+    # relies on the digest being unmoved for a non-integer spelling of one.
+    #
+    # Multiplication first and the halving last, so the only division is by
     # two and it terminates.
     half_spread = Decimal(bar.spread) * model.stress_multiplier * contract.point_size / _HALF
     raw_price = bar.open + half_spread if side is Side.BUY else bar.open - half_spread
