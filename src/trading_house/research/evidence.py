@@ -46,7 +46,7 @@ from pydantic import Field, NonNegativeInt, PositiveInt, field_validator, model_
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import EvidenceIntegrityError, TimestampError
-from trading_house.core.values import CanonicalModel, NonEmptyStr
+from trading_house.core.values import CanonicalModel, NonEmptyStr, NonNegativeDecimal
 
 # Re-exported, not defined here: the type now lives in research/backtest/mark.py
 # because BACKTEST_ALLOWED admits trading_house.research.backtest and not
@@ -56,7 +56,13 @@ from trading_house.core.values import CanonicalModel, NonEmptyStr
 # serialized shape is byte-identical, so no digest moves. ``EquitySeries`` is
 # imported from the same place for the same reason and is *not* a re-export: the
 # bundle carries it, and a new key in a sealed document is a schema change that
-# has to be declared rather than absorbed.
+# has to be declared rather than absorbed. ``CostAttribution`` comes down the
+# same way, with the one addition that this module *calls* the rule rather than
+# restating it: see ``the_summary_is_the_attribution_it_aggregates``.
+from trading_house.research.backtest.costs_attribution import (
+    CostAttribution,
+    attribution_disagreement,
+)
 from trading_house.research.backtest.mark import DailyReturnPoint as DailyReturnPoint
 from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.backtest.result import BacktestResult
@@ -109,13 +115,28 @@ class CostSummary(CanonicalModel):
     ``COMPLETE`` summary that still omits a component is refused rather than
     accepted, because a promotion gate reading ``COMPLETE`` cannot tell an
     omitted term from a zero one.
+
+    The two bounds are the per-trade split's own, and this summary is a *checked*
+    aggregate of it: a spread or slippage figure here is a sum of
+    ``TradeCostAttribution`` fields that cannot be negative, and a negative
+    aggregate would mean a run was *paid* spread inside the very artifact that
+    exists to say what it paid. ``commission`` and ``swap`` are left bare
+    ``Decimal`` because they aggregate fields that are themselves signed
+    (``SimulatedTrade.commission`` and ``.swap`` are not bounded by that model),
+    and a Phase 7 bundle's totals are sealed from real trade data whose aggregate
+    nothing here can re-derive. ``swap`` is genuinely signed -- a negative is a
+    charge and a positive a credit -- so bounding it would be simply wrong.
     """
 
     status: CostAttributionStatus
     commission: Decimal
     swap: Decimal
-    spread_cost: Decimal | None
-    slippage_cost: Decimal | None
+    spread_cost: NonNegativeDecimal | None
+    """``None`` when nothing measured it, and never negative when something did:
+    a cost that was charged is not a credit."""
+    slippage_cost: NonNegativeDecimal | None
+    """As ``spread_cost`` -- the other half of the same decomposition, and the
+    same reason a compensating pair could not pass here either."""
 
     @model_validator(mode="after")
     def complete_attribution_carries_every_component(self) -> Self:
@@ -193,11 +214,86 @@ class EvidenceBundle(CanonicalModel):
     # will not verify -- a shape nothing in this repo can produce, since every
     # write goes through ``canonical_bytes``.
     mark_to_market: EquitySeries | None = Field(default=None, exclude_if=_is_absent)
+    # The same decision a second time, for the same reason: ``costs`` above is a
+    # *sum* of the per-trade split sealed here, and a total whose inputs the
+    # store does not hold cannot be re-derived or re-audited -- it can only be
+    # believed. ``exclude_if`` is load-bearing here for exactly the reason it is
+    # on ``mark_to_market``: without it a ``PARTIAL`` bundle would encode
+    # ``"cost_attribution":null``, which moves the pinned v1 bundle digest and
+    # makes ``EvidenceStore.read`` refuse every v1 document already sealed in an
+    # operator's store, three of which exist on no machine and cannot be
+    # regenerated. The rationale is stated in full on the field above rather than
+    # restated; a second copy of the argument is a second thing to drift.
+    #
+    # Absent therefore means "this bundle has no per-trade split", and the
+    # coupling validator below is what makes that unambiguous rather than a
+    # hole.
+    cost_attribution: CostAttribution | None = Field(default=None, exclude_if=_is_absent)
 
     @model_validator(mode="after")
     def source_digest_is_the_result_it_carries(self) -> Self:
         if self.source_result_sha256 != self.result.digest():
             raise ValueError("source_result_sha256 must equal the digest of the carried result")
+        return self
+
+    @model_validator(mode="after")
+    def the_attribution_is_present_exactly_where_the_summary_claims_one(self) -> Self:
+        """A ``COMPLETE`` summary and a per-trade attribution are the same claim.
+
+        ``PARTIAL`` with two ``None`` components is the honest record of a run
+        that could not separate spread from slippage -- which is every Phase 7
+        artifact, whose bar store was deleted. A ``COMPLETE`` summary with no
+        attribution behind it asserts a breakdown it does not carry, and an
+        attribution beside a ``PARTIAL`` summary claims a completeness the summary
+        denies. Both directions fail closed, for the reason the basis/series
+        coupling below does: a document whose two halves disagree is not a
+        document anybody can check.
+        """
+
+        complete = self.costs.status is CostAttributionStatus.COMPLETE
+        if complete and self.cost_attribution is None:
+            raise ValueError("a complete cost summary must carry the attribution it aggregates")
+        if not complete and self.cost_attribution is not None:
+            raise ValueError("only a complete cost summary may carry a per-trade attribution")
+        return self
+
+    @model_validator(mode="after")
+    def the_summary_is_the_attribution_it_aggregates(self) -> Self:
+        """The totals are checked against the detail rather than trusted beside it.
+
+        The per-trade checks are NOT restated here. Task 2 left a predicate,
+        ``attribution_disagreement(attribution, result)``, in
+        ``research/backtest/costs_attribution.py`` which returns the refusal
+        reason or ``None``, and ``BacktestOutcome`` calls it. This bundle calls
+        the same one: the two surfaces exist to catch the same defect in the same
+        place, and duplicated string literals drift the moment one is edited and
+        the other is not. ``evidence.py`` may import from ``research.backtest`` --
+        it already does for ``BacktestResult`` and for the series -- so the import
+        is available; the constraint runs the other way, and a module inside
+        ``research/backtest/`` may not import from ``research/``.
+
+        The four sums are this module's own because the predicate does not know
+        about a summary: it binds a split to a result, and the summary is a
+        bundle-level object. They are the reason ``costs`` stopped being an
+        independently asserted total.
+        """
+
+        if self.cost_attribution is None:
+            return self
+        disagreement = attribution_disagreement(self.cost_attribution, self.result)
+        if disagreement is not None:
+            raise ValueError(disagreement)
+        splits = self.cost_attribution.trades
+        if sum((split.spread_cost for split in splits), Decimal(0)) != self.costs.spread_cost:
+            raise ValueError("the summary's spread cost must equal the sum of the splits'")
+        if sum((split.slippage_cost for split in splits), Decimal(0)) != self.costs.slippage_cost:
+            raise ValueError("the summary's slippage cost must equal the sum of the splits'")
+        if self.costs.commission != sum(
+            (trade.commission for trade in self.result.trades), Decimal(0)
+        ):
+            raise ValueError("the summary's commission must equal the sum of the trades'")
+        if self.costs.swap != sum((trade.swap for trade in self.result.trades), Decimal(0)):
+            raise ValueError("the summary's swap must equal the sum of the trades'")
         return self
 
     @model_validator(mode="after")

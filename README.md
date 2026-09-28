@@ -534,7 +534,11 @@ no snapshot trails nothing.
   it is the attribution that is incomplete. Splitting spread and slippage into
   their own fields changes the model, the digest and every known-answer number
   this phase's proof is built on, so it lands with Phase 8's cost attribution
-  rather than at the end of this one.
+  rather than at the end of this one. Phase 8B2a is that phase: the split
+  arrived on a **sidecar** beside the result rather than on `SimulatedTrade`
+  itself, so the two statements above still hold — a trade still names two terms
+  and its `gross_pnl` is still net of spread and slippage — and the third
+  component is now carried beside the trade instead of nowhere.
 - **Spread is charged asymmetrically by exit kind, deliberately.** A round trip
   that exits on its stop or its target pays half a spread — the entry crossing
   only — because those exits fill at a resolved price level rather than at a
@@ -713,12 +717,16 @@ saved result digests and run IDs above are the evidence of those three runs.
   zero-commission backtest D-5 forbids, reached through the one option D-5's
   own guard exempts. Values below 1 are permitted, as the legitimate
   sensitivity probe in the other direction, but a result produced below 1
-  flatters the strategy and is not evidence it passes anything. And because
-  the swap rates are signed and the multiplier applies to the whole model,
-  stressing a *positive* carry increases profit, so a positive-carry strategy
-  clears the section 12 gate more easily at 2x than at 1x; section 7.1
-  mandates one multiplier over the whole model, so this is a stated
-  consequence rather than a second code path. The classic flattering
+  flatters the strategy and is not evidence it passes anything. The multiplier is
+  applied **adversarially and piecewise in each rate's sign**: a charge becomes
+  `m` times more negative, and a credit is reduced by `(m - 1) * abs(rate)` so
+  stress can never *increase* carry — a positive-carry strategy cannot clear the
+  section 12 gate more easily at 2x than at 1x, which is what an unconditional
+  `rate * m` used to hand it and what the cost model recorded as an accepted
+  consequence until Phase 8B2a fixed it. At `m = 1` both branches return the rate
+  unchanged, so a stressed run at 1.0 reproduces the baseline exactly. The
+  observed spread is scaled on the legs that cross spread, so the same rule
+  reaches the term section 7.1 folds into the fill prices. The classic flattering
   backtest is one that silently assumed zero commission; omitting a cost here
   refuses.
 - **`--contract` is a file** for the same reason `order submit --decision` is:
@@ -1154,14 +1162,17 @@ the first time at a later gate.
   prevents. Both directions are refused rather than reconciled. A bundle carrying
   no series has the key absent, which is unambiguous because of that rule — a
   `realized_closed_trades` bundle from the legacy importer has no marks to seal.
-- **`costs.status` is `PARTIAL`, with `spread_cost` and `slippage_cost` `null`.**
-  Both were charged inside the fill prices and the result cannot separate them
-  until 8B2 does, so this run genuinely has not measured them. **A zero is not a
-  substitute for an unmeasured term**: a `PARTIAL` summary with a real `0` in
-  `commission` (a run that booked no trades) is a different state from a `null`,
-  and only the second one means nobody measured. `dataset_sha256` is `null` for
-  the same reason — 8B1 computes no digest of the bar store, and an unavailable
-  hash is the honest record.
+- **`costs.status` is `COMPLETE`, and `CostSummary` is a checked aggregate.**
+  8B1 could only report `PARTIAL` with `spread_cost` and `slippage_cost` `null`,
+  because both were charged inside the fill prices and the result could not
+  separate them; **a zero is not a substitute for an unmeasured term**, and 8B1
+  was careful not to write one. 8B2a gave the fill model a name for what it
+  charges, so a prospective bundle now carries the per-trade split and reports
+  `COMPLETE` with all four components. The three imported Phase 7 bundles stay
+  `PARTIAL` with two `null`s forever — their bar store was deleted, so there is
+  nothing left to attribute. `dataset_sha256` is `null` for the same reason —
+  8B1 computes no digest of the bar store, and an unavailable hash is the honest
+  record.
 - **The daily series is rectangular over UTC calendar days**, one point per day
   inclusive, with a day carrying no mark holding the prior end-of-day equity
   forward and therefore returning a literal `0.00`. That zero is a measurement of
@@ -1200,6 +1211,98 @@ the first time at a later gate.
   Their bar store was deleted, so a mark-to-market series cannot be reconstructed
   for them at all.
 
+## Phase 8B2a — the sealed per-trade cost attribution
+
+8B2a gives every fill a name for what it charges. `SimulatedTrade.gross_pnl` was
+gross of commission and swap but *already net* of spread and slippage, because
+the fill model charged both into the two prices and threw the components away.
+The engine now decomposes that reported number per trade and the decomposition
+travels beside the result, on `BacktestOutcome` — a sidecar, not a new field on
+`BacktestResult`, for the reason 8B1 put the equity series there: a field on the
+result would move `digest()` for every run, and with it four pinned digest
+constants naming Phase 7 artifacts that exist on no machine and can never be
+re-derived.
+
+The decomposition is an equality, not a report:
+`market_pnl - spread_cost - slippage_cost == gross_pnl`, exactly, for every
+trade. `market_pnl` is priced from the two **raw** prices, so it is the move the
+market made; `spread_cost` and `slippage_cost` are what the fills actually
+charged, and neither may be negative — a cost that was charged is not a credit,
+and a compensating pair would reconstruct its own total perfectly while
+reporting one of its terms as money the run was *paid*, in the very artifact
+whose purpose is to say what a run paid. A decomposition that cannot reconstruct
+its own total to the last digit is not a decomposition, so a contract whose point
+size makes the conversion non-terminating refuses the run rather than rounding
+past the difference.
+
+A prospective bundle therefore reports `costs.status` **`complete`** with all
+four components, and carries the split under `cost_attribution`. The summary is
+a *checked aggregate* of that detail rather than a total the command asserts: a
+bundle is refused unless `spread_cost`, `slippage_cost`, `commission` and `swap`
+each equal the sum of the per-trade or per-result terms behind it, and unless the
+split covers every trade exactly once, in result order, with each
+`post_fill_gross` equal to its own trade's `gross_pnl`. That last rule is one
+function, `attribution_disagreement`, called from both `BacktestOutcome` and
+`EvidenceBundle`, so the same defect is reported the same way wherever it is
+caught. **The two halves cannot disagree in either direction**: a `complete`
+summary with no split behind it asserts a breakdown it does not carry, and a split
+beside a `partial` summary claims a completeness the summary denies.
+
+The same reasoning as 8B1's series applies to the field's absence. It is
+**excluded from the serialized bytes when absent** rather than written as `null`,
+because `EvidenceStore.read` re-serializes what it decoded and refuses any
+document whose bytes are not today's canonical encoding — a field that always
+wrote itself out would put `"cost_attribution":null` into every v1 bundle and
+break the v1 documents already sealed in an operator's store, three of which
+cannot be regenerated. The pinned known-answer bundle digest
+(`tests/property/test_trial_evidence.py`) is unmoved, and that is the property
+rather than a coincidence.
+
+### What the stress means now
+
+`--stress-multiplier m` scales costs *adversarially*, piecewise in each rate's
+sign (`costs.py::_stressed_rate`):
+
+- a **charge** becomes `m` times more negative;
+- a **credit** is reduced by `(m - 1) * abs(rate)`, so **stress can never
+  increase carry** — a positive-carry strategy cannot clear the section 12 gate
+  more easily at 2x than at 1x, which is what the unconditional `rate * m` used
+  to hand it;
+- at `m = 1` both branches return the rate unchanged, so a stressed run at 1.0
+  reproduces the baseline exactly;
+- the **observed spread** is scaled on the legs that cross it, which is how the
+  rule reaches the term section 7.1 folds into the fill prices. The integration
+  suite seals a 1.5x run and asserts the thing this exists for: `spread_cost`
+  rises, `market_pnl` does not move, and `post_fill_gross` falls.
+
+**Spread is crossed on entry and on a time exit but not on a stop or a target
+exit**, and that asymmetry is the model rather than an oversight — those exits
+fill at a resolved price level, not at a quote, so they cross no spread. (They
+do pay slippage: the closing leg's slippage offset is computed once and used for
+every exit kind.) A per-trade split is what finally makes that visible; 8B1
+could only state it in prose.
+
+### What the attribution is not
+
+The attribution explains **where the cost went**. It does not make the cost model
+correct. The spread is a **mid-price half-spread the bar store observed**, not a
+depth-aware fill: it is `bar.spread / 2` at the bar's open, with no volume behind
+it, and MT5 does not expose the depth data a better model would need. A bundle
+that reports `complete` says every modelled term was *attributed*; it does not
+say the term was well measured, and nothing in 8B2a changes the numbers a fill
+model can know.
+
+**Known limit: a run at 1.5x and the same run at 1.0x share a `run_id`.**
+`Backtester._run_id` derives the identity from the request and omits the cost
+model, and that is closed on purpose: the legacy importer refuses any artifact
+whose `digest` is not its own `result.digest()`, so folding the scenario into the
+run identity would make every Phase 7 artifact fail its own import. The two runs
+still have different `source_result_sha256` — a different `CostModel` is a
+different result — and the scenario identity rides the **sealed attribution**
+instead, where a reader can see the stress that produced it. A phase that needs
+scenario identity to be part of the run's own identity has to widen that
+deliberately, and to re-import the legacy arms with it.
+
 ## Operator commands
 
 ```bash
@@ -1215,7 +1318,7 @@ uv run trading-house --help
 | `trading-house audit verify` | Independently recompute and verify the hash chain |
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
 | `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
-| `trading-house backtest run --mark-to-market` | Replay the same arm and print a sealable mark-to-market evidence bundle — the mark-to-market series and its digest — instead of the bare result |
+| `trading-house backtest run --mark-to-market` | Replay the same arm and print a sealable mark-to-market evidence bundle — the mark-to-market series, the per-trade cost attribution, and the bundle's digest — instead of the bare result |
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |

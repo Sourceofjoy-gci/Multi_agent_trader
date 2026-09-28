@@ -649,14 +649,18 @@ def test_a_run_ending_holding_a_position_is_reported_and_not_refused(
     bundle = _bundle_of(payload)
     assert bundle.result.trades == ()
     assert len(bundle.daily_returns) == 1
-    # No trades means no commission was measured, so the measured total is a real
-    # zero -- which is exactly what keeps it distinguishable from the two terms
-    # that are ``None`` because nothing measured them. A gate reading COMPLETE
-    # could not tell those three states apart.
-    assert bundle.costs.status is CostAttributionStatus.PARTIAL
+    # No trades means nothing was charged, so every component is a real zero --
+    # and 8B2a is what makes that a measurement rather than a claim: the summary
+    # is COMPLETE and the sealed attribution behind it is an empty tuple, so a
+    # gate reading COMPLETE can see that there was nothing to attribute. Under
+    # 8B1 this run was PARTIAL with two ``None``s, and the distinction between a
+    # measured zero and an unmeasured term was carried by the ``None`` itself.
+    assert bundle.costs.status is CostAttributionStatus.COMPLETE
     assert bundle.costs.commission == 0
-    assert bundle.costs.spread_cost is None
-    assert bundle.costs.slippage_cost is None
+    assert bundle.costs.spread_cost == 0
+    assert bundle.costs.slippage_cost == 0
+    assert bundle.cost_attribution is not None
+    assert bundle.cost_attribution.trades == ()
 
 
 # --- 6/7. the command's two payloads -----------------------------------------

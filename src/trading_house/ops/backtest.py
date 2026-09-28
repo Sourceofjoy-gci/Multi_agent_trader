@@ -116,11 +116,20 @@ def mark_to_market_bundle(
 ) -> EvidenceBundle:
     """The bundle ``research trial record`` seals for one mark-to-market run.
 
-    ``costs`` is PARTIAL and never COMPLETE: 8B1 does not separate spread from
-    slippage, because the fill model folds both into the entry price and
-    discards the components. Writing a zero for either would turn an unmeasured
-    term into a measured one, which is the substitution this framework exists
-    to prevent.
+    ``costs`` is ``COMPLETE`` because 8B2a gave the fill model a name for what
+    it charges: the engine splits every trade's reported ``gross_pnl`` into
+    ``market_pnl - spread_cost - slippage_cost`` and carries that beside the
+    trade. The four components here are sums of that split and of the trades
+    themselves, and ``EvidenceBundle`` refuses the bundle unless they agree -- so
+    the summary is a checked aggregate rather than a total this command asserts.
+
+    The split is sealed whole for the same reason ``mark_to_market`` is, and the
+    reason is the one above it: the summary is a *reduction*, and a reduction
+    whose input the store does not hold cannot be re-derived, re-audited, or
+    checked against a later ``BacktestOutcome``. 8B1's ``PARTIAL`` was the
+    honest record of a run that genuinely could not separate the two; 8B2a
+    removed the inability, and writing ``None`` now would be claiming an
+    unmeasured term that was measured.
 
     ``dataset_sha256`` is None rather than a digest of the bar store. 8B1 does
     not compute one, and an unavailable hash is the honest record; fabricating
@@ -136,6 +145,7 @@ def mark_to_market_bundle(
     """
 
     result = outcome.result
+    attribution = outcome.attribution
     return EvidenceBundle(
         result_schema_version=1,
         trial_id=trial_id,
@@ -164,12 +174,16 @@ def mark_to_market_bundle(
         # hold cannot be re-derived, re-audited, or checked against a later
         # ``BacktestOutcome``.
         mark_to_market=outcome.equity,
+        # Sealed whole, and for the reason the series above is: these four numbers
+        # are a sum of the split below, so the store that keeps only the sum keeps
+        # only arithmetic.
+        cost_attribution=attribution,
         costs=CostSummary(
-            status=CostAttributionStatus.PARTIAL,
+            status=CostAttributionStatus.COMPLETE,
             commission=sum((trade.commission for trade in result.trades), Decimal(0)),
             swap=sum((trade.swap for trade in result.trades), Decimal(0)),
-            spread_cost=None,
-            slippage_cost=None,
+            spread_cost=sum((split.spread_cost for split in attribution.trades), Decimal(0)),
+            slippage_cost=sum((split.slippage_cost for split in attribution.trades), Decimal(0)),
         ),
         provenance=EvidenceProvenance(
             agent_run_id=agent_run_id,

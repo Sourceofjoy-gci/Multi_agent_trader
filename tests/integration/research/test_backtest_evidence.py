@@ -277,22 +277,26 @@ def _record(
     return json.loads(result.stdout)
 
 
-def test_mark_to_market_emits_a_marked_series_and_a_partial_cost_summary(
+def test_mark_to_market_emits_a_marked_series_and_a_complete_cost_summary(
     seeded: Fixture, research_env: Path
 ) -> None:
-    """What the flag buys, and the two things it refuses to invent.
+    """What the flag buys, and the one thing it still refuses to invent.
 
     The series is ``MARK_TO_MARKET`` and rectangular: one point per calendar day
     across the whole window, no day omitted, which is what a daily reduction is
     for and what a month of missing days would silently break.
 
-    ``costs`` is PARTIAL with both unknown components ``None``, and that is the
-    point of the assertion rather than an incompleteness in it. Spread and
-    slippage are charged inside the fill prices, so this run genuinely cannot
-    separate them -- and writing a zero would turn an unmeasured term into a
-    measured one. ``dataset_sha256`` is ``None`` for the same reason: 8B1 does
-    not compute a digest of the bar store, and an unavailable hash is the honest
-    record.
+    ``costs`` is ``COMPLETE`` with all four components present, and 8B2a is what
+    made that possible: the engine splits every trade's reported ``gross_pnl``
+    into ``market_pnl - spread_cost - slippage_cost``, so this run genuinely
+    measured spread and slippage rather than folding them into the fill prices
+    and discarding the components. The summary is not trusted for it -- the
+    bundle refuses to construct unless each of the four equals the sum of the
+    per-trade detail sealed beside it, which the last two assertions are the
+    reader's own version of.
+
+    ``dataset_sha256`` is ``None`` and that is still honest: 8B1 computes no
+    digest of the bar store, and an unavailable hash is the honest record.
     """
 
     payload = _run(seeded, marked=True)
@@ -310,15 +314,71 @@ def test_mark_to_market_emits_a_marked_series_and_a_partial_cost_summary(
     # same number. What says the window was walked rather than sampled is that
     # the day carrying the 16:00 exit is not one: that equity is in the series.
     assert str(bundle.daily_returns[-2].value) != "0"
-    assert bundle.costs.status.value == "partial"
-    assert bundle.costs.spread_cost is None
-    assert bundle.costs.slippage_cost is None
-    # Commission and swap are measured, so they are not None. A PARTIAL summary
-    # reporting zero for these would be indistinguishable from one that measured
-    # nothing at all.
+    assert bundle.costs.status.value == "complete"
+    assert bundle.costs.spread_cost is not None
+    assert bundle.costs.slippage_cost is not None
+    # Commission and swap are measured, so they are not None, and now neither is
+    # spread: every modelled term has a number and a per-trade split behind it.
     assert bundle.costs.commission > 0
     assert bundle.provenance.dataset_sha256 is None
     assert payload["mark_to_market_flat"] is True
+
+    # The aggregate, recomputed here rather than read: this is the check the model
+    # makes, and a reader of the sealed document can make it too.
+    assert bundle.cost_attribution is not None
+    splits = bundle.cost_attribution.trades
+    assert len(splits) == len(bundle.result.trades)
+    assert bundle.costs.spread_cost == sum((split.spread_cost for split in splits), Decimal(0))
+    assert bundle.costs.slippage_cost == sum((split.slippage_cost for split in splits), Decimal(0))
+    for split, trade in zip(splits, bundle.result.trades, strict=True):
+        assert split.proposal_id == trade.proposal_id
+        assert split.post_fill_gross == trade.gross_pnl
+
+
+def test_a_stressed_run_pays_more_spread_and_keeps_the_market_move(
+    seeded: Fixture, research_env: Path
+) -> None:
+    """C-4 at the level of a sealed document: the stress is paid, the market is not distorted.
+
+    ``--stress-multiplier 1.5`` over the same window must move the cost terms and
+    nothing else. ``spread_cost`` rises because the observed spread is scaled on
+    the legs that cross it; ``market_pnl`` is priced from the two *raw* prices, so
+    it is the move the market made and cannot move with the scenario. A stressed
+    run whose market P&L drifted would be reporting a different market, and the
+    attribution is the only place that would show it.
+
+    The two runs share a ``run_id``: ``Backtester._run_id`` omits the cost model,
+    and the fix is closed, because the legacy importer refuses any artifact whose
+    digest is not its own ``result.digest()`` and folding the scenario into the
+    identity would make every Phase 7 artifact fail its own import. So the
+    scenario identity rides the sealed attribution instead -- which is exactly
+    what the first two assertions below are reading.
+    """
+
+    baseline = _bundle_of(_run(seeded, marked=True))
+    stressed = _bundle_of(_run(seeded, marked=True, **{"--stress-multiplier": "1.5"}))
+
+    assert stressed.result.run_id == baseline.result.run_id
+    assert stressed.source_result_sha256 != baseline.source_result_sha256
+    assert stressed.cost_attribution is not None
+    assert baseline.cost_attribution is not None
+    assert stressed.cost_attribution.trades
+    assert len(stressed.cost_attribution.trades) == len(baseline.cost_attribution.trades)
+
+    for stressed_split, base_split in zip(
+        stressed.cost_attribution.trades, baseline.cost_attribution.trades, strict=True
+    ):
+        assert stressed_split.proposal_id == base_split.proposal_id
+        assert stressed_split.spread_cost > base_split.spread_cost
+        # The raw prices are the same bars, so the market's move is the same
+        # number in both runs -- a scenario that changed it would be a different
+        # market rather than a harsher one.
+        assert stressed_split.market_pnl == base_split.market_pnl
+        assert stressed_split.post_fill_gross < base_split.post_fill_gross
+
+    assert stressed.costs.spread_cost is not None
+    assert baseline.costs.spread_cost is not None
+    assert stressed.costs.spread_cost > baseline.costs.spread_cost
 
 
 def test_the_bundle_seals_the_series_its_daily_returns_were_reduced_from(
@@ -798,9 +858,10 @@ def test_a_run_ending_with_an_open_position_is_reported_and_still_seals(
     ``mark_to_market_flat`` is the report.
 
     The zero-trade result is also what makes the cost assertions here rather than
-    a copy of the first test's: with no trades measured, ``commission == 0`` and
-    ``spread_cost is None`` sit side by side -- the two states a gate reading
-    ``COMPLETE`` could not tell apart.
+    a copy of the first test's: with nothing traded, every component is a real
+    zero and the sealed attribution is an empty tuple -- and it is that tuple,
+    not a ``None``, which is what tells a gate reading ``COMPLETE`` that the
+    zeros were measured rather than assumed.
     """
 
     _register(tmp_path)
@@ -819,7 +880,9 @@ def test_a_run_ending_with_an_open_position_is_reported_and_still_seals(
     bundle = _bundle_of(payload)
     assert bundle.result.trades == ()
     assert bundle.costs.commission == 0
-    assert bundle.costs.spread_cost is None
+    assert bundle.costs.spread_cost == 0
+    assert bundle.cost_attribution is not None
+    assert bundle.cost_attribution.trades == ()
     # A day the series must still cover: the open position is a mark, not a gap.
     assert [point.day for point in bundle.daily_returns] == [seeded.first_bar.date()]
 
