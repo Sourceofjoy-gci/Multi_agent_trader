@@ -298,14 +298,53 @@ Two rules, both fail-closed:
   carrying a mark-to-market series would claim two different returns for one run, and a
   reader would have no way to tell which one a downstream number used.
 
-Two more, and they are the same two `BacktestOutcome` asserts on the same pair
+Three more, and they are the same three `BacktestOutcome` asserts on the same pair
 (`research/backtest/mark.py`): the sealed series and the carried result must share one
-`firm_equity`, and the series must hold exactly one observation per `bars_seen`. A series
-that satisfies every rule about itself can still be another run's, or a truncated one, and
-the field exists to be auditable — so the check lives on the bundle too, which is what a
-later reader is handed rather than a command's memory. Both refusals reuse `mark.py`'s
-wording, so a disagreement reads the same whether it was caught at construction or at
-`EvidenceStore.read`.
+`firm_equity`; the series must hold exactly one observation per `bars_seen`; and a flat
+run's final cumulative realized total must equal `result.net_pnl`. A series that satisfies
+every rule about itself can still be another run's, or a truncated one, and the field exists
+to be auditable — so the checks live on the bundle too, which is what a later reader is
+handed rather than a command's memory. All three reuse `mark.py`'s wording and its
+`is_flat` gate, so a disagreement reads the same whether it was caught at construction or at
+`EvidenceStore.read`, and a non-flat run is still buildable here: refusing it would hide
+the defect rather than name it.
+
+The third is the only one of the three that binds the series to the *trades* rather than
+to the result's shape — the first two accept a series from the right capital base with the
+right number of bars whose realized total belongs to some other run — so leaving it on
+`BacktestOutcome` alone would have left the sealed artifact, the one that is re-read years
+later, checking two thirds of what the type that produced it checks.
+
+Sealing every bar is the decision B1-5 makes on purpose — one canonical form, one digest
+rule, one read path — and it is a trade, so the price is stated rather than implied. What
+follows is what an operator pays to *verify* that evidence later, measured by sealing and
+re-reading the four-year M15 run that produced 99,988 processed bars through the
+production `EvidenceStore`. These are **measurements taken on this repository**, not
+estimates and not a projection, so a later reader can tell what was observed from what was
+assumed.
+
+| quantity | measured |
+|---|---|
+| sealed bundle size, 99,988 observations | ≈ 12.7 MiB |
+| `EvidenceStore.verify`, per document | ≈ 0.84 s |
+
+Both are linear in the **processed bar count** — the window length times the bar
+frequency — because that is the number of observations in the document and the number of
+bytes and pydantic validations `read` walks. Nothing about them is per-trade or per-day, so
+a coarser timeframe is the lever that moves both, exactly as it is for the ceiling in §7.
+
+What multiplies the total rather than its unit cost is the **number of documents**: 8B2
+adds three cost scenarios per run and 8B3 adds a compounding rerun, so a candidate's
+evidence stops being one document and becomes several, and `research trial verify` pays
+`verify` once per document over the whole chain. The cost is therefore linear in
+candidates × scenarios × bars, and it is paid at verification time — a long ledger is
+verified in full — not at write time.
+
+This is the accepted price of B1-5, not a defect and not a case for reopening the
+decision: a compact second format would save the bytes and spend a normalization rule, a
+second digest definition, and a second read path, on a local store that was never the
+bottleneck. A change should be made when *verifying* stops being cheap at the scale a real
+operator reaches, and the measurement above is what tells a later reader whether it has.
 
 The field is defaulted, not required, and that is deliberate. `CanonicalModel` sets
 `extra="forbid"`, so a **required** field would make every v1 document already sealed in an

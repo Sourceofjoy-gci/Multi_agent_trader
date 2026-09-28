@@ -219,7 +219,7 @@ class EvidenceBundle(CanonicalModel):
 
     @model_validator(mode="after")
     def the_sealed_series_is_the_result_it_carries(self) -> Self:
-        """The two equalities ``BacktestOutcome`` asserts, on the same pair of objects.
+        """The three equalities ``BacktestOutcome`` asserts, on the same pair of objects.
 
         A bundle may hold a series that satisfies every rule about itself and
         still be describing a different run: another run's series, or a truncated
@@ -227,9 +227,16 @@ class EvidenceBundle(CanonicalModel):
         this result did not produce is still a reduction. The pair is checked here
         rather than left to ``BacktestOutcome`` because the bundle outlives it --
         the outcome is a command's memory and this is what a later reader is
-        handed. Both refusals are worded as ``research/backtest/mark.py`` words
-        them, so a disagreement is reported the same way whether it was caught at
-        construction or at read time.
+        handed, sealed and re-read years later. All three refusals are worded as
+        ``research/backtest/mark.py`` words them, so a disagreement is reported
+        the same way whether it was caught at construction or at read time.
+
+        The third is conditional on ``is_flat`` there too, and for the same
+        reason: when the engine discarded a position the range ran out on, the
+        final cumulative total legitimately excludes that mark and so does
+        ``net_pnl``. Nothing is forced flat to make it pass, which is why a
+        non-flat bundle still builds here -- it is honest evidence of a defect a
+        later gate refuses, and refusing it here would only hide the defect.
         """
 
         if self.mark_to_market is None:
@@ -238,6 +245,12 @@ class EvidenceBundle(CanonicalModel):
             raise ValueError("the series and the result must share one firm equity")
         if len(self.mark_to_market.observations) != self.result.bars_seen:
             raise ValueError("the series must hold one observation per processed bar")
+        if self.mark_to_market.is_flat:
+            final = self.mark_to_market.observations[-1].cumulative_realized_pnl
+            if final != self.result.net_pnl:
+                raise ValueError(
+                    "a flat run's final realized total must equal the result's net PnL"
+                )
         return self
 
 

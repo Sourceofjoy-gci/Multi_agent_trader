@@ -1179,6 +1179,18 @@ the first time at a later gate.
   as every other code here. The remedy is to **narrow the window or use a coarser
   timeframe** — not to raise the ceiling, and never to accept a shorter series.
   For scale, the four-year M15 Phase 7 run produced 99,988 observations.
+- **Verifying a sealed series costs real time and disk, and both scale with the bar
+  count.** At that same four-year M15 scale the sealed bundle is about **12.7 MiB** and
+  `research trial verify` takes roughly **0.84 s per document** — these are measured
+  figures, not a projection, and both are linear in processed bars (window length × bar
+  frequency), so a coarser timeframe moves both. The unit cost is per *document*, and
+  8B2 (three cost scenarios per run) and 8B3 (a compounding rerun) will multiply the
+  document count. Budget the time **before** you run `verify` over a long ledger, not
+  after: it re-reads and re-validates every document in the chain, and the work happens
+  at verification rather than at write. This is the accepted price of sealing every bar
+  as one canonical JSON form — one digest rule and one read path — not a defect; a
+  compact second format would save the bytes and cost a normalization rule and a second
+  read path on a local store that was never the bottleneck.
 - **`return_series_basis` is not a quality rating.** A mark-to-market bundle is
   not better evidence than a `realized_closed_trades` one; it answers a different
   question, and the three imported Phase 7 bundles stay

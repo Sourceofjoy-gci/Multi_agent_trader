@@ -79,7 +79,8 @@ class EquitySeries(CanonicalModel):
     """Every processed bar's observation, over a fixed capital base.
 
     Validated against itself alone: the three assertions that need the trades
-    live on ``BacktestOutcome``, which is the only type that holds both.
+    live on ``BacktestOutcome`` and, for a sealed document, on
+    ``EvidenceBundle`` -- the two types that hold the pair.
     """
 
     firm_equity: Decimal

@@ -43,10 +43,11 @@ What is asserted, in the order a reader should meet it:
    reduction whose input the store does not hold cannot be re-derived;
 5. the basis and the series cannot disagree: a ``MARK_TO_MARKET`` bundle with no
    series is refused, and so is any other basis carrying one; and the sealed
-   series must be the carried result's own — a firm equity or an observation
-   count that disagrees with ``result`` is refused in ``BacktestOutcome``'s
-   words, so the same disagreement is reported the same way whether it was caught
-   at construction or at read time;
+   series must be the carried result's own — a firm equity, an observation
+   count, or (on a flat run) a final realized total that disagrees with
+   ``result`` is refused in ``BacktestOutcome``'s words, so the same disagreement
+   is reported the same way whether it was caught at construction or at read
+   time;
 6. a flat run reconciles its final realized total to ``net_pnl``, and a run that
    ends holding a position is *reported* by ``backtest run`` rather than refused;
 7. ``MARK_TO_MARKET`` -- the enum member 8A declared with no producer -- is now
@@ -809,6 +810,46 @@ def test_a_sealed_series_must_hold_one_observation_per_processed_bar(
 
     with pytest.raises(ValidationError, match="one observation per processed bar"):
         EvidenceBundle.model_validate_json(json.dumps(truncated))
+
+
+def test_a_flat_sealed_series_must_reduce_to_the_results_own_net_pnl(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A flat series that stops short of the result's own total is a different run.
+
+    The third of the three equalities ``BacktestOutcome`` asserts, and the one
+    that binds the series to the trades rather than to the result's shape: the
+    first two accept a series from the right firm equity with the right number of
+    bars, and a realized total that belongs to some other run passes both. The
+    mark is re-based with the same amount, so every point still reconciles and
+    ``EquitySeries`` accepts it -- the bundle's rule is the only thing left.
+
+    Conditional on ``is_flat`` exactly as ``mark.py`` gates it, and the case
+    below the assertion is gated on is the reason it can be: the non-flat run
+    recorded one bar earlier carries a legitimate final total that excludes the
+    mark its open position never realized, and it still validates.
+    """
+
+    marked = _bundle_of(_run_command(monkeypatch, tmp_path, marked=True))
+    assert marked.mark_to_market is not None, "the case below is vacuous without a series"
+    assert marked.mark_to_market.is_flat is True, "the assertion under test does not apply"
+
+    understated = json.loads(marked.model_dump_json())
+    final = understated["mark_to_market"]["observations"][-1]
+    final["cumulative_realized_pnl"] = str(Decimal(final["cumulative_realized_pnl"]) - 1)
+    final["equity"] = str(Decimal(final["equity"]) - 1)
+
+    with pytest.raises(ValidationError, match="final realized total must equal the result"):
+        EvidenceBundle.model_validate_json(json.dumps(understated))
+
+    # The gate is the conditional branch, not a blanket refusal: the same run
+    # ended one bar early ends holding a position, and that document is still
+    # valid evidence of a defect a later gate refuses.
+    open_position = _run_command(monkeypatch, tmp_path, marked=True, last_bar=_MID_MORNING_BAR)
+    bundle = _bundle_of(open_position)
+    assert bundle.mark_to_market is not None
+    assert bundle.mark_to_market.is_flat is False
+    assert EvidenceBundle.model_validate_json(json.dumps(open_position["bundle"])) == bundle
 
 
 def test_without_the_flag_the_payload_is_the_phase7_artifact_and_names_no_bundle(
