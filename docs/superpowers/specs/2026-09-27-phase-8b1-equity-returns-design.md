@@ -282,6 +282,40 @@ The flat-day `Decimal(0)` matches what 8A's `derive_realized_daily_returns`
 already emits at `research/legacy_import.py`, so the two bases produce the same
 shape and differ only in what the marks contain.
 
+### 6.5 Where the series is sealed
+
+The per-bar series is evidence, and evidence is sealed in the bundle. `EvidenceBundle`
+gains one field for it:
+
+```python
+mark_to_market: EquitySeries | None = None
+```
+
+Two rules, both fail-closed:
+
+- a bundle whose `return_series_basis` is `MARK_TO_MARKET` **must** carry the series;
+- a bundle whose basis is anything else **must not** — a `REALIZED_CLOSED_TRADES` bundle
+  carrying a mark-to-market series would claim two different returns for one run, and a
+  reader would have no way to tell which one a downstream number used.
+
+The field is defaulted, not required, and that is deliberate. `CanonicalModel` sets
+`extra="forbid"`, so a **required** field would make every v1 document already sealed in an
+operator's evidence store unreadable, and `research trial verify` would start failing on a
+chain it sealed and verified itself. Absent means "this bundle has no mark-to-market series",
+and the coupling rule above is what makes that unambiguous rather than a hole. The legacy
+importer, which has no marks to seal, leaves it `None`.
+
+`bundle_schema_version` stays `1`. The extension is additive and backward compatible: a v1
+document still parses, still means what it meant, and a document carrying the new field is
+identified by its `return_series_basis` rather than by its version. Bumping the literal would
+require a parallel v1 read path to keep the legacy bundles verifiable, which buys a version
+number that says nothing the basis field does not already say.
+
+Without this field the series is computed and thrown away: `derive_daily_returns` consumes it,
+and nothing else carries it out of the command. That is not a smaller design, it is a different
+one — the daily series is a *reduction* of the series, and a reduction whose input is not itself
+retained cannot be re-derived, re-audited, or checked against a later `BacktestOutcome`.
+
 ## 7. Fail-closed behaviour
 
 One new typed error, `EquityEvidenceError`, on the next free exit code,
@@ -371,10 +405,21 @@ trading-house research trial register --protocol protocol.json
 trading-house research trial start --trial-id trial-1 --attempt-id att-1 `
     --spec-sha256 <digest> --started-at 2026-09-27T12:00:00
 trading-house backtest run --mark-to-market --trial-id trial-1 --attempt-id att-1 `
-    --spec-sha256 <digest> --occurred-at 2026-09-27T12:30:00 ... > bundle.json
-trading-house research trial record --trial-id trial-1 --attempt-id att-1 --evidence bundle.json
+    --spec-sha256 <digest> --occurred-at 2026-09-27T12:30:00 --registered-at 2026-09-27T12:00:00 `
+    --agent-run-id run-1 ... > run.json
+trading-house research trial record --trial-id trial-1 --attempt-id att-1 --evidence run.json
 trading-house research trial verify
 ```
+
+`record` therefore reads two document shapes, and only because `backtest run` is the producer
+of one of them: a bare `EvidenceBundle`, or a command payload carrying one under `"bundle"`.
+It reads nothing else, and anything else is `ConfigurationError` — the same refusal it already
+gives a mistyped path. The alternative, having `backtest run` emit a bare bundle with no status
+envelope, would break the convention every command in this CLI follows and would lose the
+`mark_to_market_flat` signal the design reports.
+
+`register` is unaffected: it still wants a bare `TrialProtocol`, and the unwrap is scoped to
+the command whose sibling produced the wrapper.
 
 ## 9. Honesty constraints carried into the documentation
 
