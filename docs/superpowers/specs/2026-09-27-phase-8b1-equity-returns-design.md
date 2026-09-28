@@ -397,6 +397,22 @@ trading-house research trial verify
   distinguishable from a legacy one by its `return_series_basis` and by the
   presence of the series, and the legacy path is untouched.
 
+### 9.1 Known gap, recorded rather than fixed here
+
+`research trial record` accepts the bundle's declared `spec_sha256` and does
+not cross-check it against the sealed `PREREGISTERED` event's candidate. The
+digest is therefore carried and preserved but unvouched, in the same way the
+8A review established for the counters: the chain keeps the label, it does not
+attest to it. Closing this means the record command resolving the candidate
+inside the preregistration, which is ledger-side gate work and belongs with the
+promotion gates rather than in a slice whose subject is equity evidence.
+
+The declared value is not therefore lost or unverifiable — it is in the sealed
+bundle, and the `PREREGISTERED` payload in the same chain carries the candidate
+family a reader can compare it against. What is missing is an automatic
+refusal when they disagree.
+
+
 ## 10. Testing
 
 **Unit** — per-point identity; strictly increasing timestamps; empty-series

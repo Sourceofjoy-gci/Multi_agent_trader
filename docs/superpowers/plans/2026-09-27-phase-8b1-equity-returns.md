@@ -908,11 +908,18 @@ Guard at the top of `operation()`:
 
 ```python
         identity = (trial_id, attempt_id, spec_sha256, agent_run_id, occurred_at, registered_at)
-        if mark_to_market != all(value is not None for value in identity):
-            # An operator who left a flag off has made a mistake, not produced
-            # evidence that cannot be trusted, so this is configuration rather
-            # than an equity failure. A bundle is only sealable if it names the
-            # attempt it belongs to.
+        supplied = [value for value in identity if value is not None]
+        # Two directions, and the second is the one a one-sided ``!= all(...)``
+        # misses: a *partial* set of identity options with no ``--mark-to-market``
+        # would otherwise be dropped silently and the operator told nothing.
+        if (mark_to_market and len(supplied) != len(identity)) or (
+            not mark_to_market and supplied
+        ):
+            # An operator who left a flag off, or typed identity without asking
+            # for a bundle, has made a mistake rather than produced evidence
+            # that cannot be trusted -- so this is configuration, not an equity
+            # failure. A bundle is only sealable if it names the attempt it
+            # belongs to, and an identity nobody asked for is a flag typo.
             raise ConfigurationError()
 ```
 

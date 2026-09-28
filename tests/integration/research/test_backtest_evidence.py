@@ -513,8 +513,9 @@ def test_a_bundle_missing_an_identity_option_is_refused_and_writes_nothing(
     that needed a test -- the two timestamp options are the pair the guard alone
     refuses, and they are the pair that goes red.
 
-    ``research_env`` starts empty and the ledger holds one event, so "wrote
-    nothing" is a statement about the filesystem rather than a claim.
+    ``research_env`` starts empty, and this test's own ``_register`` and
+    ``_start`` are the only two events in the ledger, so "wrote nothing" is a
+    statement about those two rather than a claim.
     """
 
     _register(tmp_path)
