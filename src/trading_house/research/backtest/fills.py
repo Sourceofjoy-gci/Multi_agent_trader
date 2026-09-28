@@ -39,6 +39,16 @@ class ExitKind(str, Enum):  # noqa: UP042
 class Fill:
     price: Decimal
     at: datetime
+    raw_price: Decimal
+    """The price before any spread or slippage: this leg's own ``bar.open`` for
+    an entry or a time exit, and the trigger price for a stop or target."""
+
+    spread_charged: Decimal
+    """The half-spread this leg crossed, in price terms and never negative. Zero
+    for a stop or target exit, which crosses no spread at all."""
+
+    slippage_charged: Decimal
+    """The absolute slippage offset this leg paid, in price terms."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +94,13 @@ def entry_fill(*, bar: Bar, side: Side, contract: InstrumentContract, model: Cos
     # stamping it there misreported every ``entry_at``/``exit_at``, gave the
     # engine's time stop H plus one bar, and shifted ``swap_cost``'s date pair
     # by the same bar (D-9).
-    return Fill(price=raw_price + offset, at=bar.event_time)
+    return Fill(
+        price=raw_price + offset,
+        at=bar.event_time,
+        raw_price=bar.open,
+        spread_charged=half_spread,
+        slippage_charged=abs(offset),
+    )
 
 
 def resolve_exit(
@@ -102,6 +118,10 @@ def resolve_exit(
     decision (D-2). A bar's range cannot say which was touched first, and
     silently reordering this into "whichever is closer" reintroduces the
     defect.
+
+    Every ``Fill`` here reports ``spread_charged`` as zero: the stop and the
+    target trigger off a raw bar price and cross no spread. The slippage is
+    charged on all four branches.
     """
 
     offset = slippage_price_offset(model=model, side=side, contract=contract, opening=False)
@@ -109,14 +129,50 @@ def resolve_exit(
     if side is Side.BUY:
         if bar.low <= stop:
             raw_price = min(stop, bar.open)
-            return Exit(kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time))
+            return Exit(
+                kind=ExitKind.STOP,
+                fill=Fill(
+                    price=raw_price + offset,
+                    at=bar.event_time,
+                    raw_price=raw_price,
+                    spread_charged=Decimal(0),
+                    slippage_charged=abs(offset),
+                ),
+            )
         if target is not None and bar.high >= target:
-            return Exit(kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time))
+            return Exit(
+                kind=ExitKind.TARGET,
+                fill=Fill(
+                    price=target + offset,
+                    at=bar.event_time,
+                    raw_price=target,
+                    spread_charged=Decimal(0),
+                    slippage_charged=abs(offset),
+                ),
+            )
         return None
 
     if bar.high >= stop:
         raw_price = max(stop, bar.open)
-        return Exit(kind=ExitKind.STOP, fill=Fill(price=raw_price + offset, at=bar.event_time))
+        return Exit(
+            kind=ExitKind.STOP,
+            fill=Fill(
+                price=raw_price + offset,
+                at=bar.event_time,
+                raw_price=raw_price,
+                spread_charged=Decimal(0),
+                slippage_charged=abs(offset),
+            ),
+        )
     if target is not None and bar.low <= target:
-        return Exit(kind=ExitKind.TARGET, fill=Fill(price=target + offset, at=bar.event_time))
+        return Exit(
+            kind=ExitKind.TARGET,
+            fill=Fill(
+                price=target + offset,
+                at=bar.event_time,
+                raw_price=target,
+                spread_charged=Decimal(0),
+                slippage_charged=abs(offset),
+            ),
+        )
     return None

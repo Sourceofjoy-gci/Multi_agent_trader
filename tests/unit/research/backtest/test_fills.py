@@ -374,3 +374,45 @@ def test_a_stop_exit_crosses_no_spread() -> None:
 
     assert closed is not None
     assert closed.fill.price == Decimal("1.09950")
+
+
+def test_a_fill_reports_what_it_charged_separately_from_what_it_filled_at() -> None:
+    """Phase 8B2a: the components the engine's attribution is assembled from, and
+    the only place they can still be right.
+
+    The engine does not decompose the price -- it sums what each leg reported,
+    then checks the sum against the number the result already carries. So
+    ``spread_charged`` and ``slippage_charged`` must be COSTS, positive on every
+    leg: a sell entry crosses the half-spread downwards and a sell exit upwards,
+    so signed deltas would cancel and report a spread nobody paid. And
+    ``raw_price`` must be the leg's own pre-cost price, because the engine
+    prices ``market_pnl`` from the two raw prices -- the fill prices already
+    contain the costs, and reusing them would make ``market_pnl`` a second copy
+    of ``gross_pnl`` and the decomposition a tautology.
+    """
+
+    bar = _bar(open=Decimal("1.10000"), high=Decimal("1.10010"), low=Decimal("1.09900"), spread=20)
+    contract = _contract(point_size=Decimal("0.00001"))
+    model = _zero_slip(slippage_points_per_side=Decimal(4))
+    half_spread = Decimal("0.00010")
+
+    buy = entry_fill(bar=bar, side=Side.BUY, contract=contract, model=model)
+    sell = entry_fill(bar=bar, side=Side.SELL, contract=contract, model=model)
+    # The gapped-through variant: a stop below the open fills at the open, and
+    # ``raw_price`` has to say which of the two it was.
+    gapped = resolve_exit(
+        bar=_bar(open=Decimal("1.09000"), high=Decimal("1.09100"), low=Decimal("1.08900")),
+        side=Side.BUY,
+        stop=Decimal("1.09700"),
+        target=None,
+        contract=contract,
+        model=model,
+    )
+
+    assert buy.raw_price == sell.raw_price == bar.open
+    assert buy.spread_charged == sell.spread_charged == half_spread
+    assert buy.slippage_charged == sell.slippage_charged == _FOUR_POINTS
+    assert gapped is not None
+    assert gapped.fill.raw_price == Decimal("1.09000")
+    assert gapped.fill.spread_charged == Decimal(0)
+    assert gapped.fill.slippage_charged == _FOUR_POINTS

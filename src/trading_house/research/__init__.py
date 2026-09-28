@@ -1,5 +1,9 @@
 """The strategy foundry boundary: what a candidate strategy is, and what it took to get there."""
 
+from trading_house.research.backtest.costs_attribution import (
+    CostAttribution,
+    TradeCostAttribution,
+)
 from trading_house.research.backtest.mark import (
     MAX_EQUITY_OBSERVATIONS,
     BacktestOutcome,
@@ -40,6 +44,7 @@ from trading_house.research.trial_ledger import (
 __all__ = [
     "MAX_EQUITY_OBSERVATIONS",
     "BacktestOutcome",
+    "CostAttribution",
     "CostAttributionStatus",
     "CostSummary",
     "DailyReturnPoint",
@@ -60,6 +65,7 @@ __all__ = [
     "StoredEvidence",
     "StrategyPackage",
     "StrategySpec",
+    "TradeCostAttribution",
     "Trial",
     "TrialCounters",
     "TrialLedger",

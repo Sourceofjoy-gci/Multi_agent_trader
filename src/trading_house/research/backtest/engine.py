@@ -63,6 +63,7 @@ from trading_house.features.engine import BarReader, FeatureEngine, Materialized
 from trading_house.features.sessions import session_of
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel, commission_cost, swap_cost
+from trading_house.research.backtest.costs_attribution import CostAttribution, TradeCostAttribution
 from trading_house.research.backtest.fills import Exit, ExitKind, Fill, entry_fill, resolve_exit
 from trading_house.research.backtest.mark import (
     MAX_EQUITY_OBSERVATIONS,
@@ -353,6 +354,7 @@ class Backtester:
         trail, target_arm = _exit_arms(policy)
 
         trades: list[SimulatedTrade] = []
+        attributions: list[TradeCostAttribution] = []
         rejections: list[tuple[str, ...]] = []
         position: _Position | None = None
         queued: _Signal | None = None
@@ -372,8 +374,12 @@ class Backtester:
             if position is not None:
                 closed = self._close_if_done(position, bar, request)
                 if closed is not None:
-                    trades.append(closed)
-                    realized += closed.net_pnl
+                    trade, split = closed
+                    # Appended in one place, so the two tuples cannot fall out
+                    # of step; ``BacktestOutcome`` would catch it either way.
+                    trades.append(trade)
+                    attributions.append(split)
+                    realized += trade.net_pnl
                     position = None
 
             # The mark is the state at this bar's close, so it is taken after
@@ -505,6 +511,7 @@ class Backtester:
         return BacktestOutcome(
             result=result,
             equity=EquitySeries(firm_equity=request.firm_equity, observations=tuple(observations)),
+            attribution=CostAttribution(trades=tuple(attributions)),
         )
 
     def _refuse_outside_coverage(self, request: BacktestRequest, coverage: Coverage) -> None:
@@ -643,8 +650,8 @@ class Backtester:
 
     def _close_if_done(
         self, position: _Position, bar: Bar, request: BacktestRequest
-    ) -> SimulatedTrade | None:
-        """Whether this bar ended the position, and the trade it produced.
+    ) -> tuple[SimulatedTrade, TradeCostAttribution] | None:
+        """Whether this bar ended the position, and the trade and split it made.
 
         The stop and the target are asked first and the time stop second, so a
         bar that could have done either is charged the stop -- the same
@@ -688,13 +695,31 @@ class Backtester:
             bar=bar, side=closing_side, contract=self._contract, model=request.cost_model
         )
 
-    def _trade(self, position: _Position, closed: Exit, request: BacktestRequest) -> SimulatedTrade:
+    def _trade(
+        self, position: _Position, closed: Exit, request: BacktestRequest
+    ) -> tuple[SimulatedTrade, TradeCostAttribution]:
         signal = position.signal
         gross_pnl = self._gross_pnl(
             side=signal.side,
             entry_price=position.entry.price,
             exit_price=closed.fill.price,
             lots=signal.lots,
+        )
+        # Priced from the two RAW prices, so ``market_pnl`` is the move the
+        # market made. The fill prices already contain the spread and the
+        # slippage, and pricing from those would make this a second copy of
+        # ``gross_pnl`` -- which is the restatement this split exists to avoid.
+        market_pnl = self._gross_pnl(
+            side=signal.side,
+            entry_price=position.entry.raw_price,
+            exit_price=closed.fill.raw_price,
+            lots=signal.lots,
+        )
+        spread_cost = self._price_to_money(
+            position.entry.spread_charged + closed.fill.spread_charged, signal.lots
+        )
+        slippage_cost = self._price_to_money(
+            position.entry.slippage_charged + closed.fill.slippage_charged, signal.lots
         )
         commission = commission_cost(model=request.cost_model, lots=signal.lots)
         swap = swap_cost(
@@ -705,19 +730,48 @@ class Backtester:
             opened_at=position.entry.at,
             closed_at=closed.fill.at,
         )
-        return SimulatedTrade(
-            proposal_id=signal.proposal_id,
-            side=signal.side,
-            lots=signal.lots,
-            entry_price=position.entry.price,
-            entry_at=position.entry.at,
-            exit_price=closed.fill.price,
-            exit_at=closed.fill.at,
-            exit_kind=closed.kind,
-            gross_pnl=gross_pnl,
-            commission=commission,
-            swap=swap,
-            net_pnl=gross_pnl - commission + swap,
+        return (
+            SimulatedTrade(
+                proposal_id=signal.proposal_id,
+                side=signal.side,
+                lots=signal.lots,
+                entry_price=position.entry.price,
+                entry_at=position.entry.at,
+                exit_price=closed.fill.price,
+                exit_at=closed.fill.at,
+                exit_kind=closed.kind,
+                gross_pnl=gross_pnl,
+                commission=commission,
+                swap=swap,
+                net_pnl=gross_pnl - commission + swap,
+            ),
+            # Built from the components and NOT from ``gross_pnl``: the two are
+            # computed by different routes on purpose, and the whole claim is
+            # that they land on the same number. Copying would make the check on
+            # ``BacktestOutcome`` a tautology.
+            TradeCostAttribution(
+                proposal_id=signal.proposal_id,
+                market_pnl=market_pnl,
+                spread_cost=spread_cost,
+                slippage_cost=slippage_cost,
+                post_fill_gross=market_pnl - spread_cost - slippage_cost,
+            ),
+        )
+
+    def _price_to_money(self, price_delta: Decimal, lots: Decimal) -> Decimal:
+        """A price distance in account currency, for one quantity.
+
+        The single division by ``price_increment`` runs last, on an
+        already-exact numerator -- the shape ``swap_cost`` uses and the reason
+        two runs over identical inputs cannot differ only in trailing zeros and
+        so cannot differ in digest.
+        """
+
+        return (
+            price_delta
+            * lots
+            * self._contract.value_per_price_increment
+            / self._contract.price_increment
         )
 
     def _gross_pnl(
@@ -730,20 +784,16 @@ class Backtester:
         already charged the half-spread and the slippage offset into both, so
         this number already contains those two and excludes only
         ``commission`` and ``swap`` -- the two ``SimulatedTrade`` carries as
-        named lines beside it. ``net_pnl`` is right either way; the breakdown
-        is partial, and splitting spread and slippage out is Phase 8's, with
-        the cost attribution that needs them. See ``SimulatedTrade``.
+        named lines beside it. ``net_pnl`` is right either way.
 
-        Every exact factor multiplies first and the single division by
-        ``price_increment`` runs last, on an already-exact numerator -- the
-        shape ``swap_cost`` uses, and the reason two runs over identical inputs
-        cannot differ only in trailing zeros and so cannot differ in digest.
+        The other two are not left inside it, though: the full split now lives
+        in ``costs_attribution.TradeCostAttribution``, which prices the raw
+        move separately and subtracts what each leg charged, so this number is
+        decomposed rather than merely labelled. See ``SimulatedTrade``.
         """
 
         move = exit_price - entry_price if side is Side.BUY else entry_price - exit_price
-        return (
-            move * lots * self._contract.value_per_price_increment / self._contract.price_increment
-        )
+        return self._price_to_money(move, lots)
 
     def _result(
         self,

@@ -10,6 +10,10 @@ from trading_house.core.exits import NoExitPolicy
 from trading_house.core.schemas import Side
 from trading_house.marketdata.models import Timeframe
 from trading_house.research.backtest.costs import CostModel
+from trading_house.research.backtest.costs_attribution import (
+    CostAttribution,
+    TradeCostAttribution,
+)
 from trading_house.research.backtest.fills import ExitKind
 from trading_house.research.backtest.mark import (
     BacktestOutcome,
@@ -267,6 +271,25 @@ def _result(*, bars_seen: int, net_pnl: Decimal) -> BacktestResult:
     )
 
 
+def _attribution() -> CostAttribution:
+    """The split ``_result``'s single trade implies: a 102 raw move less 2 of
+    spread is the 100 of gross PnL that trade reports. Rebuilt rather than
+    mutated per call site, because a tampered copy is the refusal
+    ``test_costs_attribution.py`` exists to make."""
+
+    return CostAttribution(
+        trades=(
+            TradeCostAttribution(
+                proposal_id="p-1",
+                market_pnl=Decimal("102"),
+                spread_cost=Decimal("2"),
+                slippage_cost=Decimal(0),
+                post_fill_gross=Decimal("100"),
+            ),
+        )
+    )
+
+
 def _outcome_observation(
     *,
     realized: Decimal,
@@ -290,7 +313,9 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
 
     result = _result(bars_seen=1, net_pnl=Decimal("90"))
     outcome = BacktestOutcome(
-        result=result, equity=_series(_outcome_observation(realized=Decimal("90")))
+        result=result,
+        equity=_series(_outcome_observation(realized=Decimal("90"))),
+        attribution=_attribution(),
     )
     assert outcome.equity.is_flat is True
 
@@ -312,6 +337,7 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
                     ),
                 ),
             ),
+            attribution=_attribution(),
         )
 
     with pytest.raises(ValidationError, match="one observation per processed bar"):
@@ -321,6 +347,7 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
                 _outcome_observation(realized=Decimal("90")),
                 _outcome_observation(realized=Decimal("90"), minutes=15),
             ),
+            attribution=_attribution(),
         )
 
     with pytest.raises(ValidationError, match="net PnL"):
@@ -329,6 +356,7 @@ def test_the_outcome_cross_checks_the_series_against_the_result_it_came_from() -
         BacktestOutcome(
             result=result,
             equity=_series(_outcome_observation(realized=Decimal("50"))),
+            attribution=_attribution(),
         )
 
 
@@ -353,6 +381,7 @@ def test_the_final_realized_total_is_reconciled_against_the_result_only_when_fla
         equity=_series(
             _outcome_observation(realized=Decimal("50"), unrealized=Decimal("40"), open_=1)
         ),
+        attribution=_attribution(),
     )
     assert outcome.equity.is_flat is False
 
@@ -363,4 +392,5 @@ def test_the_final_realized_total_is_reconciled_against_the_result_only_when_fla
         BacktestOutcome(
             result=result,
             equity=_series(_outcome_observation(realized=Decimal("50"))),
+            attribution=_attribution(),
         )

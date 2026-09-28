@@ -99,6 +99,26 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     assert outcome.equity.observations[-1].cumulative_realized_pnl == Decimal("-40.44")
     assert outcome.equity.observations[-1].unrealized_pnl == Decimal(0)
     assert outcome.equity.observations[-1].equity == Decimal("100000") + Decimal("-40.44")
+    # Phase 8B2a: the decomposition reconstructs the number above exactly. A
+    # fill-model regression fails a hand-computed value, not a shape. The raw
+    # move is 11 points and the two crossed half-spreads are 5 and 5, so
+    # market = 11 x 3.37 = 37.07, spread = 10 x 3.37 = 33.70, slippage = 0, and
+    # 37.07 - 33.70 = 3.37.
+    attribution = outcome.attribution
+    assert len(attribution.trades) == len(outcome.result.trades)
+    for entry, trade in zip(attribution.trades, outcome.result.trades, strict=True):
+        assert entry.proposal_id == trade.proposal_id
+        assert entry.post_fill_gross == trade.gross_pnl
+        assert entry.market_pnl - entry.spread_cost - entry.slippage_cost == trade.gross_pnl
+    # Both trades in this fixture are TIME exits, so each crosses a second
+    # half-spread from its own exit bar.
+    assert all(entry.spread_cost > 0 for entry in attribution.trades)
+    assert all(entry.slippage_cost == 0 for entry in attribution.trades)
+    # And the components themselves by hand, because the identity above holds for
+    # any pair of numbers a symmetric bug produced. Only an absolute can fail.
+    assert attribution.trades[0].market_pnl == Decimal("37.07")
+    assert attribution.trades[0].spread_cost == Decimal("33.70")
+    assert attribution.trades[0].slippage_cost == Decimal(0)
 
 
 def test_a_processed_bar_with_no_proposal_still_gets_a_mark() -> None:
@@ -316,11 +336,17 @@ def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop(
         *bars[deadline_bar + 1 :],
     )
 
-    result = _run(bars=dipped, strategy=ToyStrategy(every_n=20))
+    outcome = _outcome(bars=dipped, strategy=ToyStrategy(every_n=20))
+    result = outcome.result
 
     assert [trade.exit_kind for trade in result.trades] == [ExitKind.STOP]
     assert result.trades[0].exit_price == stop
     assert result.trades[0].exit_at == bars[deadline_bar].event_time
+    # Phase 8B2a: a stop crosses no spread, so the attribution carries the
+    # entry's half-spread alone -- 5 points at $1 a point on 3.37 lots. The two
+    # TIME exits of the known-answer run above pay twice this, and the asymmetry
+    # is the model rather than a residual to be smoothed away.
+    assert outcome.attribution.trades[0].spread_cost == Decimal("16.85")
 
 
 def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None:
