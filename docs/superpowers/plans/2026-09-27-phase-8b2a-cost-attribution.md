@@ -457,8 +457,9 @@ class Fill:
     )
 ```
 
-Each of the three `Exit` constructions in `resolve_exit` gains the same three
-arguments, with `spread_charged=Decimal(0)` and `slippage_charged=abs(offset)`.
+All **four** `Exit` constructions in `resolve_exit` — a STOP and a TARGET under each
+side — gain the same three arguments, with `spread_charged=Decimal(0)` and
+`slippage_charged=abs(offset)`. Count them: `fills.py` builds four, not three.
 
 - [ ] **Step 5: Assemble the attribution in the engine and bind it to the trades**
 
