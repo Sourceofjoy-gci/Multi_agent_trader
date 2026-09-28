@@ -47,6 +47,20 @@ class TradeCostAttribution(CanonicalModel):
     because a stored value which must equal its own derivation is a *checked*
     duplicate rather than a silent one -- the same pattern ``BacktestOutcome``
     uses to bind a series to a result.
+
+    **What this identifies is the total, not the split.** Every check in the
+    chain -- the reconstruction below, ``attribution_disagreement``, and the
+    bundle's four sums -- sees the pair of charges only through the value they
+    add up to, so moving an amount from ``spread_cost`` to ``slippage_cost``
+    (both non-negative, total unchanged) is accepted by all of them. That is
+    inherent rather than a gap to be closed: ``gross_pnl`` was computed from two
+    prices, and nothing anywhere records which part of the difference was the
+    broker's spread and which was the price moving past us. The engine is the sole
+    producer and its components are pinned by fixture tests against
+    hand-derived numbers, so the split is attested by those fixtures -- not
+    re-derived at read time, and not attested separately by this evidence.
+    ``tests/unit/research/backtest/test_costs_attribution.py`` pins the limit as a
+    test rather than leaving it as a sentence here.
     """
 
     proposal_id: NonEmptyStr

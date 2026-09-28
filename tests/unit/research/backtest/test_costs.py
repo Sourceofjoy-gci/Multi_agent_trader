@@ -482,3 +482,51 @@ def test_a_credit_beyond_double_stress_becomes_a_charge() -> None:
     }
 
     assert swap_cost(model=model, side=Side.SELL, **held) < 0  # type: ignore[arg-type]
+
+
+def test_a_zero_rate_stays_an_unambiguous_zero_above_double_stress() -> None:
+    """The exactly-zero cell of the ``gt=0`` domain, which is the one that misbehaved.
+
+    ``CostModel``'s docstring claims ``_stressed_rate`` is total over the whole
+    positive-multiplier domain, and no other test here set either swap rate to
+    ``0`` -- so the one cell that produced ``Decimal('-0')`` was uncovered.
+    ``0 * (2 - 3)`` carries the sign of ``2 - m``, and the residue then survives
+    ``swap_cost``'s product chain into ``SimulatedTrade.swap``, where
+    ``BacktestResult.digest()`` hashes it as a string reading ``"-0"``: a sealed
+    per-trade swap presented as a negative number where the truth is that no
+    swap was charged, and a different digest from the ``m = 1`` spelling of the
+    same zero.
+
+    ``str`` rather than ``==`` is what makes this case, and the comparison alone
+    cannot: ``Decimal('-0') == Decimal(0)`` is ``True``, which is why every
+    identity, sum and bundle bound passed while it was wrong. The multipliers run
+    across the whole domain below 1, at 1, at 2 and above it, because the one that
+    misbehaved is ``m > 2`` with a rate of exactly zero and nothing else.
+    """
+
+    contract = _contract(point_size=Decimal("0.00001"), value_per_price_increment=Decimal("1"))
+    held = {
+        "lots": Decimal(1),
+        "contract": contract,
+        "opened_at": datetime(2026, 9, 21, 9, 0, tzinfo=UTC),  # Monday
+        "closed_at": datetime(2026, 9, 22, 9, 0, tzinfo=UTC),  # Tuesday, one crossing
+    }
+    zero = _model(swap_long_points_per_day=Decimal(0), swap_short_points_per_day=Decimal(0))
+
+    unstressed = swap_cost(model=zero, side=Side.BUY, **held)  # type: ignore[arg-type]
+    for multiplier in ("0.5", "1", "1.5", "2", "2.5", "3"):
+        stressed = swap_cost(
+            model=zero.model_copy(update={"stress_multiplier": Decimal(multiplier)}),
+            side=Side.BUY,
+            **held,  # type: ignore[arg-type]
+        )
+        assert stressed == 0
+        # The string is the assertion. ``Decimal('-0.0') == Decimal(0)`` is
+        # ``True``, which is why every ``==`` in the suite -- including the sum in
+        # ``CostSummary.swap`` -- sat content while this cell was wrong, and
+        # ``digest()`` hashes the string form rather than the value.
+        assert not str(stressed).startswith("-")
+
+    # The control: the same zero at the unstressed multiplier, spelled as it has
+    # always been spelled.
+    assert str(unstressed) == "0"

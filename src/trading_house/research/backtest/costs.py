@@ -117,11 +117,15 @@ def swap_cost(
     ``point_size * value_per_price_increment / price_increment`` in money.
     Every exact factor (the stressed rate, day count, lots, ``point_size`` and
     ``value_per_price_increment``) is multiplied together first; the division
-    by ``price_increment`` runs last, on that already-exact numerator, so it is
-    the only rounding boundary in the expression. ``stress_multiplier`` reaches
-    that numerator through ``_stressed_rate``, which runs first, and must:
-    ``_stressed_rate`` is a product, and on the credit branch a subtraction, but
-    no division, so it stays exact. Applying the multiplier *after* the division
+    by ``price_increment`` runs last, so it is the only *new* rounding boundary
+    the expression introduces. ``stress_multiplier`` reaches that numerator
+    through ``_stressed_rate``, which runs first, and must: it is a
+    multiplication, and on the credit branch a subtraction, and neither is a
+    division -- so the stressed rate adds no rounding boundary of its own. (Both
+    still round at Decimal's 28-digit context like every other operation here:
+    a multiplier of ``1 + 1e-30`` is treated as exactly 1. That is immaterial to
+    a rate, and it is the ceiling of putting the rate in front of the division
+    rather than behind it.) Applying the multiplier *after* the division
     instead would round a second time, and with ``point_size=0.00001``,
     ``price_increment=0.00003`` and a stress of 3 the two orders differ by one
     ulp (``-0.9999999999999999999999999999`` against ``-1``). ``digest()``
@@ -173,7 +177,16 @@ def _stressed_rate(rate: Decimal, multiplier: Decimal) -> Decimal:
 
     if rate < 0:
         return rate * multiplier
-    return rate * (_TWO - multiplier)
+    stressed = rate * (_TWO - multiplier)
+    # A zero rate above ``m = 2`` is a charge of nothing, and the product carries
+    # the sign of ``2 - m`` into ``-0``. ``-0`` compares equal to ``0`` so every
+    # identity and sum above it passes, which is exactly why nothing would notice
+    # it going into a sealed ``SimulatedTrade.swap`` as a string that reads "-0" --
+    # a negative number where the truth is "no swap at all", and a different
+    # digest from the ``m = 1`` spelling of the same zero. ``copy_abs`` moves
+    # nothing but the sign: same value, same exponent, same trailing zeros, so
+    # the only cell whose spelling changes is the one that was wrong.
+    return stressed.copy_abs() if stressed == 0 else stressed
 
 
 def _rollover_day_count(

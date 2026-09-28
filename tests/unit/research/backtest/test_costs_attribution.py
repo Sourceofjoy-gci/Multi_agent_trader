@@ -174,3 +174,59 @@ def test_an_attribution_out_of_result_order_is_refused() -> None:
             equity=outcome.equity,
             attribution=CostAttribution(trades=tuple(reversed(outcome.attribution.trades))),
         )
+
+
+def test_a_same_sign_re_split_passes_everything_and_that_is_the_limits_edge() -> None:
+    """The limit of the claim, demonstrated rather than stated.
+
+    A dollar moves from ``spread_cost`` to ``slippage_cost``. Both stay
+    non-negative, so the sign bound above is satisfied; the pair sums to what it
+    summed to, so the reconstruction is satisfied; the total is the trade's own
+    ``gross_pnl``, so ``attribution_disagreement`` is satisfied. Every rule in the
+    chain accepts it, and the assertions below say so -- this is a test that
+    *passes*, deliberately, because what it pins is the boundary of what the
+    evidence attests.
+
+    The total is what this chain identifies; the split between the two charges is
+    not separately attested by anything, and cannot be: ``gross_pnl`` was priced
+    from two fill prices and the difference between them was never recorded as
+    being part spread and part slippage. So the honest statement is the one this
+    test makes -- the split is pinned by the hand-derived fixtures over the
+    engine's own output, not re-derived when a bundle is read. A reader who needs
+    the split itself to be attested has to ask for a different artifact, and
+    pretending otherwise would be the overclaim this repository is built against.
+    """
+
+    outcome = _known_answer_run()
+    first = outcome.attribution.trades[0]
+    assert first.spread_cost >= 1, "this fixture must carry a spread to move a dollar out of"
+
+    resplit = TradeCostAttribution(
+        proposal_id=first.proposal_id,
+        market_pnl=first.market_pnl,
+        spread_cost=first.spread_cost - 1,
+        slippage_cost=first.slippage_cost + 1,
+        post_fill_gross=first.post_fill_gross,
+    )
+    attribution = CostAttribution(trades=(resplit, *outcome.attribution.trades[1:]))
+
+    # Every assertion names something the move was chosen *not* to disturb, so
+    # the acceptance below is the limit and not a fixture that never checked out.
+    assert resplit.post_fill_gross == first.post_fill_gross
+    assert resplit.spread_cost + resplit.slippage_cost == (first.spread_cost + first.slippage_cost)
+    assert resplit.spread_cost != first.spread_cost
+
+    accepted = BacktestOutcome(
+        result=outcome.result, equity=outcome.equity, attribution=attribution
+    )
+    assert accepted.attribution.trades[0].spread_cost == first.spread_cost - 1
+    # What a sealed bundle would then need: the same one-dollar edit to the
+    # summary's own two totals. ``costs`` is a *checked* aggregate, so it is
+    # checked against the detail beside it -- and a detail that was re-split
+    # before it was sealed is the detail it is honestly checked against. That is
+    # the whole of the limit, and it is why this is stated here rather than
+    # defended as a rule someone should add later.
+    assert (
+        sum((split.spread_cost for split in accepted.attribution.trades), Decimal(0))
+        == sum((split.spread_cost for split in outcome.attribution.trades), Decimal(0)) - 1
+    )

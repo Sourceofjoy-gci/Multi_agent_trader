@@ -108,13 +108,23 @@ def _utc(value: datetime) -> datetime:
 class CostSummary(CanonicalModel):
     """Cost attribution for one result, and how much of it is real.
 
-    ``status`` is load-bearing rather than decorative. Spread and slippage are
-    charged inside the fill prices, so a Phase 7 artifact cannot separate them
-    from ``gross_pnl``; ``PARTIAL`` with two ``None`` components is the honest
-    record of that, and ``UNAVAILABLE`` says there is no attribution at all. A
-    ``COMPLETE`` summary that still omits a component is refused rather than
-    accepted, because a promotion gate reading ``COMPLETE`` cannot tell an
-    omitted term from a zero one.
+    ``status`` is load-bearing rather than decorative, and it licenses exactly
+    the components the summary carries. Spread and slippage are charged inside
+    the fill prices, so a Phase 7 artifact cannot separate them from
+    ``gross_pnl``; ``PARTIAL`` with two ``None`` components is the honest
+    record of that, and ``UNAVAILABLE`` says there is no attribution at all.
+
+    The coupling is **symmetric**, and the second direction is the one a bundle
+    is received rather than built under. A ``COMPLETE`` summary that omits a
+    component is refused because a promotion gate reading ``COMPLETE`` cannot
+    tell an omitted term from a zero one. But a ``PARTIAL`` or ``UNAVAILABLE``
+    summary carrying ``0`` in either component is refused for the same reason
+    from the other side: those two statuses say the terms are *unknown*, and a
+    zero is a measured value, not an unknown one. The design's "the legacy
+    adapter must not write either unknown as zero holds by construction rather
+    than by vigilance" is true of ``legacy_import.py`` and false of this model --
+    a bundle is a document an operator can hand to ``research trial record``, so
+    what protects the claim is this validator, not the producer's discipline.
 
     The two bounds are the per-trade split's own, and this summary is a *checked*
     aggregate of it: a spread or slippage figure here is a sum of
@@ -139,11 +149,20 @@ class CostSummary(CanonicalModel):
     same reason a compensating pair could not pass here either."""
 
     @model_validator(mode="after")
-    def complete_attribution_carries_every_component(self) -> Self:
-        if self.status is CostAttributionStatus.COMPLETE and (
-            self.spread_cost is None or self.slippage_cost is None
-        ):
-            raise ValueError("a complete cost summary has every component attributed")
+    def the_status_licenses_exactly_the_components_it_carries(self) -> Self:
+        """Both directions, because the coupling is symmetric.
+
+        The name says what the rule is rather than which end of it this method
+        happens to implement, so a later reader adding a third status is told to
+        extend both branches rather than the one they can see.
+        """
+
+        if self.status is CostAttributionStatus.COMPLETE:
+            if self.spread_cost is None or self.slippage_cost is None:
+                raise ValueError("a complete cost summary has every component attributed")
+            return self
+        if self.spread_cost is not None or self.slippage_cost is not None:
+            raise ValueError("an incomplete cost summary must attribute neither component")
         return self
 
 

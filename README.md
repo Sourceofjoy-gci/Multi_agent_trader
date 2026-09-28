@@ -1171,7 +1171,11 @@ the first time at a later gate.
   8B1 could only report `PARTIAL` with `spread_cost` and `slippage_cost` `null`,
   because both were charged inside the fill prices and the result could not
   separate them; **a zero is not a substitute for an unmeasured term**, and 8B1
-  was careful not to write one. 8B2a gave the fill model a name for what it
+  was careful not to write one. 8B2a made the model enforce that rather than the
+  producer's care: a `PARTIAL` or `UNAVAILABLE` summary that carries either
+  component — a real `0` included — is refused, as is a `COMPLETE` that omits
+  one, because a bundle is a document this system *receives* as well as one it
+  builds. 8B2a gave the fill model a name for what it
   charges, so a prospective bundle now carries the per-trade split and reports
   `COMPLETE` with all four components. The three imported Phase 7 bundles stay
   `PARTIAL` with two `null`s forever — their bar store was deleted, so there is

@@ -189,11 +189,20 @@ narrative, and without asserting anything a mid-price valuation does not claim.
 ### 4.3 Legacy
 
 The importer builds no attribution, so legacy bundles keep `PARTIAL` with both
-unknown components `None` and are refused by rule 1 if one ever appeared. §6.3's
-"the legacy adapter must not invent a numeric residual or write either unknown
-as zero" holds by construction rather than by vigilance: there is no code path
-that could produce a number for a Phase 7 artifact, whose bar store was deleted
-and which therefore can never be re-derived.
+unknown components `None`. §6.3's "the legacy adapter must not invent a numeric
+residual or write either unknown as zero" holds for the adapter *by construction*:
+there is no code path in `legacy_import.py` that could produce a number for a
+Phase 7 artifact, whose bar store was deleted and which therefore can never be
+re-derived. It does **not** hold by construction in the model, because a bundle
+is a *received* document — `research trial record` takes one from a caller, and
+editing `"spread_cost": "0"` into a sealed v1 bundle's costs object satisfies
+every other rule (the digest is derived from the carried result, and a `PARTIAL`
+summary is entitled to carry no attribution) and seals. What closes it is
+`CostSummary`'s own coupling, in both directions: a non-`COMPLETE` summary that
+attributes either component is refused, so an unmeasured term cannot be written as
+a measured zero. A one-sided `PARTIAL` is therefore a real requirement to be
+argued for if a future phase needs one, not something to inherit by accident —
+nothing in the tree produces one.
 
 ## 5. Three options the code closes
 
@@ -266,7 +275,13 @@ refuses a tampered digest.
 **Property.** Over generated trades, the three components reconstruct
 `gross_pnl` exactly — the same falsifiable shape 8B1's property suite was
 corrected to, asserting a *mutated* series is refused rather than that a valid
-one is accepted.
+one is accepted. `tests/property/test_cost_attribution.py` is that test: it
+generates a run's trades and the two charges each split will carry, builds the
+splits valid by construction, and asserts both layers refuse a mutated split —
+`CostAttribution`'s own reconstruction, and
+`attribution_disagreement`'s comparison against the trade's `gross_pnl` — with
+the unmutated pair asserted to satisfy both, so neither refusal can pass for a
+property the generator happened to produce.
 
 ## 8. Definition of done
 

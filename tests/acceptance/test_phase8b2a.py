@@ -11,8 +11,9 @@ bundle whose summary says ``COMPLETE`` carries the per-trade split that produced
 every one of those four numbers, and a bundle cannot claim a completeness the
 summary denies.
 
-Seven cases, each through a real command or the real legacy importer rather than a
-hand-built document:
+Nine cases in eight themes, each through a real command or the real legacy
+importer rather than a hand-built document (theme 6 is two functions, and theme 2
+covers the wrong-trade pairing as well as the length and gross checks):
 
 1. the coupling holds in **both** directions -- a ``COMPLETE`` summary must carry
    the attribution it aggregates, and a ``PARTIAL`` one must not;
@@ -26,9 +27,13 @@ hand-built document:
 5. and that holds for a **legacy** ``PARTIAL`` bundle too, where commission and
    swap are checked against its trades and spread and slippage are not -- the two
    the early return used to skip along with them;
-6. the sealed detail is the engine's own split, trade for trade, rather than a
+6. a non-``COMPLETE`` summary may not report a **measured zero** in either
+   component: a bundle is a document this repository *receives*, so ``PARTIAL``
+   and ``UNAVAILABLE`` are held to the coupling the ``COMPLETE`` side already
+   had;
+7. the sealed detail is the engine's own split, trade for trade, rather than a
    recomputation of it;
-7. and every refusal is one edit from a document that validates, so each is the
+8. and every refusal is one edit from a document that validates, so each is the
    rule rather than an accident of the fixtures.
 
 Every ``match=`` below is the whole clause its own rule speaks in. A ``match``
@@ -387,6 +392,64 @@ def test_a_legacy_summary_that_disagrees_with_its_own_trades_is_refused(tmp_path
 
     # The control: the sealed document itself is refused by neither, so the two
     # refusals above are the totals and not a legacy bundle that never validated.
+    assert EvidenceBundle.model_validate_json(legacy.model_dump_json()) == legacy
+
+
+@pytest.mark.parametrize("component", ["spread_cost", "slippage_cost"])
+def test_a_partial_summary_may_not_report_a_measured_zero(component: str, tmp_path: Path) -> None:
+    """The substitution this framework exists to prevent, on a *received* document.
+
+    A bundle is a thing this repository also *receives*: ``research trial record``
+    takes one a caller hands it, and the design's claim that the legacy adapter's
+    "never write either unknown as zero" "holds by construction rather than by
+    vigilance" is true of the importer and false of the model. One keystroke --
+    editing ``"spread_cost": "0"`` into a sealed v1 bundle's costs object --
+    otherwise leaves every other invariant satisfied: ``source_result_sha256`` is
+    derived from the carried result, so it still matches; a ``PARTIAL`` summary is
+    entitled to carry no attribution, so the coupling is satisfied; and the two
+    totals that *are* checked are untouched. The result is a self-consistent
+    document that seals and verifies under a new address, claiming a measurement
+    nobody ever made.
+
+    ``PARTIAL`` means "these two terms are unknown", and a zero is a *measured*
+    value rather than an unknown one, so the two are not spellings of each other.
+    The control below is what keeps the case from being vacuous: the untouched
+    sealed document, whose two components really are ``None``, still validates.
+    """
+
+    _store, legacy = _sealed_legacy_bundle(tmp_path)
+
+    assert legacy.costs.status is CostAttributionStatus.PARTIAL
+    with pytest.raises(ValidationError, match="an incomplete cost summary must attribute neither"):
+        _revised(legacy, costs=legacy.costs.model_copy(update={component: Decimal(0)}))
+
+    assert EvidenceBundle.model_validate_json(legacy.model_dump_json()) == legacy
+
+
+def test_an_unavailable_summary_may_not_carry_components_either(tmp_path: Path) -> None:
+    """The other non-``COMPLETE`` status, because the rule is about the status and
+    not about ``PARTIAL`` in particular.
+
+    ``UNAVAILABLE`` says there is no attribution at all, which is a stronger
+    denial than ``PARTIAL``'s "these two terms are unknown" -- so a number in
+    either component contradicts it at least as hard. The case is separate from
+    the one above for the same reason that one is parametrised over both
+    components rather than written once per field: it is a status that could be
+    waved through by a rule that special-cased ``PARTIAL`` as the only legacy
+    shape, and nothing else in the tree ever builds an ``UNAVAILABLE`` summary.
+    """
+
+    _store, legacy = _sealed_legacy_bundle(tmp_path)
+
+    for component in ("spread_cost", "slippage_cost"):
+        costs = legacy.costs.model_copy(
+            update={"status": CostAttributionStatus.UNAVAILABLE, component: Decimal(0)}
+        )
+        with pytest.raises(
+            ValidationError, match="an incomplete cost summary must attribute neither"
+        ):
+            _revised(legacy, costs=costs)
+
     assert EvidenceBundle.model_validate_json(legacy.model_dump_json()) == legacy
 
 

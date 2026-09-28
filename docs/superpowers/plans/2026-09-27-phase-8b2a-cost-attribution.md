@@ -744,6 +744,17 @@ wording as the outcome so a disagreement reads the same wherever it is caught:
 ```python
     @model_validator(mode="after")
     def the_summary_is_the_attribution_it_aggregates(self) -> Self:
+        # Commission and swap are sums over result.trades, which every bundle
+        # carries whole -- legacy included -- so they are checkable
+        # unconditionally and sit ABOVE the early return. Below it they stay
+        # asserted rather than derived for precisely the Phase 7 artifacts that
+        # cannot be regenerated; that ordering was a real defect, not a style
+        # choice, and the split is the per-trade attribution, which does not
+        # exist without one.
+        if self.costs.commission != sum((t.commission for t in self.result.trades), Decimal(0)):
+            raise ValueError("the summary's commission must equal the sum of the trades'")
+        if self.costs.swap != sum((t.swap for t in self.result.trades), Decimal(0)):
+            raise ValueError("the summary's swap must equal the sum of the trades'")
         if self.cost_attribution is None:
             return self
         # The three per-trade checks are NOT restated here. Task 2 left a
@@ -766,10 +777,6 @@ wording as the outcome so a disagreement reads the same wherever it is caught:
             != self.costs.slippage_cost
         ):
             raise ValueError("the summary's slippage cost must equal the sum of the splits'")
-        if self.costs.commission != sum((t.commission for t in self.result.trades), Decimal(0)):
-            raise ValueError("the summary's commission must equal the sum of the trades'")
-        if self.costs.swap != sum((t.swap for t in self.result.trades), Decimal(0)):
-            raise ValueError("the summary's swap must equal the sum of the trades'")
         return self
 ```
 
