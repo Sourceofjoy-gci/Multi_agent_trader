@@ -550,26 +550,37 @@ def test_a_document_sealed_before_the_series_existed_still_verifies(tmp_path: Pa
     document outright. A merely *defaulted* one is worse: ``EvidenceStore.read``
     re-serializes what it decoded and refuses any document whose bytes are not
     today's canonical encoding, so a field that always wrote itself out would add
-    ``"mark_to_market":null`` to these bytes, fail the read, and turn
-    ``research trial verify`` into a failure on a chain it sealed itself.
+    its own ``null`` to these bytes, fail the read, and turn ``research trial
+    verify`` into a failure on a chain it sealed itself.
 
-    So the pinned address is the assertion, and the absence of the key in the
+    So the pinned address is the assertion, and the absence of the keys in the
     stored bytes is what makes it the pre-extension document rather than a
-    description of one.
+    description of one. **Both** fields are asserted, and that is the whole
+    subject of the test: ``mark_to_market`` here, and 8B2a's
+    ``cost_attribution`` beside it, are one decision taken twice for one reason,
+    and the second decision is a regression guard only if the *same* stored bytes
+    are checked for it. A copy of this test in 8B2a's own file would buy the same
+    protection less well -- deleting ``cost_attribution`` outright would leave the
+    copy passing trivially on ``reparsed.cost_attribution is None``, while these
+    two lines would still see the key in the bytes.
     """
 
     store, bundle = _sealed_legacy_bundle(tmp_path, "none")
     document = (store.root / LEGACY_NONE_SHA256[:2] / f"{LEGACY_NONE_SHA256}.json").read_bytes()
 
     # No key at all: this is what the previous build wrote, byte for byte, so the
-    # extension is invisible to it rather than tolerated by it.
+    # extension is invisible to it rather than tolerated by it. Both keys, because
+    # both fields are defaulted-and-excluded and neither is allowed into a v1
+    # document's bytes.
     assert b"mark_to_market" not in document
+    assert b"cost_attribution" not in document
     assert canonical_sha256(bundle) == LEGACY_NONE_SHA256
 
     store.verify(LEGACY_NONE_SHA256)
     reparsed = store.read(LEGACY_NONE_SHA256)
     assert reparsed == bundle
     assert reparsed.mark_to_market is None
+    assert reparsed.cost_attribution is None
     assert reparsed.daily_returns == bundle.daily_returns
 
 

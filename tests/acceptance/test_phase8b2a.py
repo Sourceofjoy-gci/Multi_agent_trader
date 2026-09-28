@@ -19,15 +19,15 @@ hand-built document:
 2. an attribution that does not describe the carried result is refused, in
    ``costs_attribution.attribution_disagreement``'s own words, because the bundle
    **calls that predicate** rather than restating it;
-3. a summary whose totals are numbers the trades behind them do not produce is
+3. and so is a split shifted *consistently*, which every other rule in the bundle
+   is satisfied by -- the one defect here that only the call can see;
+4. a summary whose totals are numbers the trades behind them do not produce is
    refused: the aggregate is checked, not trusted;
-4. and that holds for a **legacy** ``PARTIAL`` bundle too, where commission and
+5. and that holds for a **legacy** ``PARTIAL`` bundle too, where commission and
    swap are checked against its trades and spread and slippage are not -- the two
    the early return used to skip along with them;
-5. the sealed detail is the engine's own split, trade for trade, rather than a
+6. the sealed detail is the engine's own split, trade for trade, rather than a
    recomputation of it;
-6. a v1 legacy document still encodes to the bytes it did before, so both new
-   fields are invisible to evidence already sealed in an operator's store;
 7. and every refusal is one edit from a document that validates, so each is the
    rule rather than an accident of the fixtures.
 
@@ -41,7 +41,9 @@ The helpers are 8B1's, imported rather than re-created: ``_run_command`` and
 every reader takes, ``_sealed_legacy_bundle`` is the production importer and the
 content-addressed store, and ``_outcome`` is the same factory the CLI itself
 calls. A second copy of any of them would be a second thing that can drift from
-the one under test.
+the one under test. The one property this file shares rather than states is the
+v1 bytes, and it is asserted in ``test_phase8b1.py`` beside
+``mark_to_market``'s: one document, one stored-address check, both keys absent.
 
 What is deliberately **not** asserted here: that the bundle's ``spec_sha256`` is
 cross-checked against the sealed ``PREREGISTERED`` event, and anything about
@@ -59,7 +61,6 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from tests.acceptance.test_phase8b1 import (
-    LEGACY_NONE_SHA256,
     _bundle_of,
     _outcome,
     _run_command,
@@ -70,7 +71,6 @@ from trading_house.research.backtest.costs_attribution import (
     CostAttribution,
     TradeCostAttribution,
 )
-from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
 from trading_house.research.trial_ledger import CostAttributionStatus
 
@@ -218,6 +218,65 @@ def test_an_attribution_that_disagrees_with_its_trades_is_refused(
         )
 
 
+def test_a_consistently_shifted_split_is_refused_by_the_shared_predicate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The one defect in this file that no other rule can see.
+
+    ``market_pnl`` and ``post_fill_gross`` are moved *together*, so the split
+    still reconstructs its own total -- which is all
+    ``CostAttribution.each_split_reconstructs_its_own_total`` checks, and it
+    runs on the sub-model, before any bundle validator is reached. The two
+    charges are left alone, so both of the sums the bundle derives from the
+    split are unchanged; and ``result.trades`` is untouched, so the commission
+    and swap sums are unchanged too. Every rule in ``evidence.py`` apart from one
+    is therefore satisfied by a document that reports one dollar more market move
+    than the run made, and what refuses it is
+    ``attribution_disagreement``'s comparison of the split's ``post_fill_gross``
+    against the trade's own ``gross_pnl``.
+
+    That is what makes it a test of its own rather than a third case in the test
+    above, and it is what this task's one structural decision rests on. Remove the
+    bundle's *call* and this document is accepted -- verified, by deleting the
+    call and watching only the two predicate tests go red. The limit of the claim
+    is worth stating too, because it is the same one every test in this file has:
+    an inline that restated all three checks faithfully would still pass, since
+    it would catch the same document. What no bundle-side test can catch is the
+    *drift* the sharing exists to prevent -- two copies of three messages edited
+    in different commits -- and that is a property of the code, not of a case.
+    What this guards is the check itself: that the bundle has a per-trade
+    comparison against the trade's own ``gross_pnl`` at all, rather than only the
+    sums and the sub-model's decomposition, neither of which can see it.
+
+    The assertions before the refusal are what keep the case from being
+    vacuous: each names something the shift was chosen *not* to disturb.
+    """
+
+    bundle = _bundle_of(_run_command(monkeypatch, tmp_path, marked=True))
+    assert bundle.cost_attribution is not None
+    trades = bundle.cost_attribution.trades
+    assert trades, "an attribution with no trades cannot carry a doctored split"
+    split = trades[0]
+
+    shifted = split.model_copy(
+        update={"market_pnl": split.market_pnl + 1, "post_fill_gross": split.post_fill_gross + 1}
+    )
+    # The sub-model's own rule, satisfied -- the layer that catches the flat
+    # ``999`` in the test above, and that this case walks straight past.
+    assert (
+        shifted.market_pnl - shifted.spread_cost - shifted.slippage_cost == shifted.post_fill_gross
+    )
+    # The two sums the bundle derives from the split, both unmoved.
+    assert shifted.spread_cost == split.spread_cost
+    assert shifted.slippage_cost == split.slippage_cost
+
+    with pytest.raises(ValidationError, match="post-fill gross must equal its trade's gross PnL"):
+        _revised(
+            bundle,
+            cost_attribution=bundle.cost_attribution.model_copy(update={"trades": (shifted,)}),
+        )
+
+
 def test_a_summary_that_disagrees_with_its_attribution_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -321,32 +380,3 @@ def test_the_sealed_attribution_is_the_engines_own_split(
         split.market_pnl - split.spread_cost - split.slippage_cost == split.post_fill_gross
         for split in bundle.cost_attribution.trades
     )
-
-
-def test_a_v1_document_sealed_before_the_attribution_existed_still_verifies(tmp_path: Path) -> None:
-    """The backward-compatibility claim, made on the bytes rather than assumed.
-
-    8B1's ``mark_to_market`` and this field's ``cost_attribution`` are the same
-    decision taken twice, and the reason is the same: ``EvidenceStore.read``
-    re-serializes what it decoded and refuses any document whose bytes are not
-    today's canonical encoding. A field that always wrote itself out would put
-    ``"cost_attribution":null`` into every v1 bundle -- including the three
-    Phase 7 artifacts that exist on no machine and cannot be regenerated -- and
-    ``research trial verify`` would start failing on a chain it sealed itself.
-
-    So the pinned address is the assertion, and the absence of both keys from
-    the stored bytes is what makes this document the pre-extension one rather
-    than a description of it.
-    """
-
-    store, bundle = _sealed_legacy_bundle(tmp_path, "none")
-    document = (store.root / LEGACY_NONE_SHA256[:2] / f"{LEGACY_NONE_SHA256}.json").read_bytes()
-
-    assert b"cost_attribution" not in document
-    assert b"mark_to_market" not in document
-    assert canonical_sha256(bundle) == LEGACY_NONE_SHA256
-
-    store.verify(LEGACY_NONE_SHA256)
-    reparsed = store.read(LEGACY_NONE_SHA256)
-    assert reparsed == bundle
-    assert reparsed.cost_attribution is None
