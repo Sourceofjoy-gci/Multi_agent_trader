@@ -717,18 +717,23 @@ saved result digests and run IDs above are the evidence of those three runs.
   zero-commission backtest D-5 forbids, reached through the one option D-5's
   own guard exempts. Values below 1 are permitted, as the legitimate
   sensitivity probe in the other direction, but a result produced below 1
-  flatters the strategy and is not evidence it passes anything. The multiplier is
-  applied **adversarially and piecewise in each rate's sign**: a charge becomes
-  `m` times more negative, and a credit is reduced by `(m - 1) * abs(rate)` so
-  stress can never *increase* carry — a positive-carry strategy cannot clear the
-  section 12 gate more easily at 2x than at 1x, which is what an unconditional
-  `rate * m` used to hand it and what the cost model recorded as an accepted
-  consequence until Phase 8B2a fixed it. At `m = 1` both branches return the rate
-  unchanged, so a stressed run at 1.0 reproduces the baseline exactly. The
-  observed spread is scaled on the legs that cross spread, so the same rule
-  reaches the term section 7.1 folds into the fill prices. The classic flattering
-  backtest is one that silently assumed zero commission; omitting a cost here
-  refuses.
+flatters the strategy and is not evidence it passes anything. The multiplier is
+applied **adversarially and piecewise in the sign of the swap rates**, which are
+the signed ones (`costs.py::_stressed_rate`): a charge becomes
+`m` times more negative, and a credit is reduced by `(m - 1) * abs(rate)` so
+stress can never *increase* carry — a positive-carry strategy cannot clear the
+section 12 gate more easily at 2x than at 1x, which is what an unconditional
+`rate * m` used to hand it and what the cost model recorded as an accepted
+consequence until Phase 8B2a fixed it. Commission and slippage are scaled
+without regard to sign: slippage's rate is bounded at zero, so the charge branch
+is the only one it can take, while `commission_per_lot_per_side` is a signed
+`Decimal` the CLI will accept as `"-3.50"` — a credit the stress would enlarge.
+At `m = 1` both branches return the rate
+unchanged, so a stressed run at 1.0 reproduces the baseline exactly. The
+observed spread is scaled on the legs that cross spread, so the same rule
+reaches the term section 7.1 folds into the fill prices. The classic flattering
+backtest is one that silently assumed zero commission; omitting a cost here
+refuses.
 - **`--contract` is a file** for the same reason `order submit --decision` is:
   nothing in this repo can produce an `InstrumentContract` without a live
   MetaTrader 5 terminal, and a research command that needs one cannot be
@@ -1260,8 +1265,8 @@ rather than a coincidence.
 
 ### What the stress means now
 
-`--stress-multiplier m` scales costs *adversarially*, piecewise in each rate's
-sign (`costs.py::_stressed_rate`):
+`--stress-multiplier m` scales costs *adversarially*, piecewise in the sign of the
+**swap** rates — the signed ones — in `costs.py::_stressed_rate`:
 
 - a **charge** becomes `m` times more negative;
 - a **credit** is reduced by `(m - 1) * abs(rate)`, so **stress can never
@@ -1274,6 +1279,16 @@ sign (`costs.py::_stressed_rate`):
   rule reaches the term section 7.1 folds into the fill prices. The integration
   suite seals a 1.5x run and asserts the thing this exists for: `spread_cost`
   rises, `market_pnl` does not move, and `post_fill_gross` falls.
+
+**Commission and slippage are scaled without regard to sign.** Slippage's rate is
+bounded at zero, so it is always a charge and the multiplier already does the
+adverse thing. `commission_per_lot_per_side` is *not* bounded: it is a signed
+`Decimal` and the CLI accepts `"-3.50"`, which is a credit the stress would
+enlarge — the same defect the swap rule closes, on the one rate that has no
+adverse branch. Bounding it belongs with `SimulatedTrade.commission` and
+`CostModel.commission_per_lot_per_side` together, which is out of this slice
+because the legacy importer seals a Phase 7 bundle's commission as a sum of real
+trade data that cannot be regenerated.
 
 **Spread is crossed on entry and on a time exit but not on a stop or a target
 exit**, and that asymmetry is the model rather than an oversight — those exits

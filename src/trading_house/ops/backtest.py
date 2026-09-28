@@ -174,9 +174,9 @@ def mark_to_market_bundle(
         # hold cannot be re-derived, re-audited, or checked against a later
         # ``BacktestOutcome``.
         mark_to_market=outcome.equity,
-        # Sealed whole, and for the reason the series above is: these four numbers
-        # are a sum of the split below, so the store that keeps only the sum keeps
-        # only arithmetic.
+        # Sealed whole, and for the reason the series above is: the ``costs`` below
+        # is a sum of this split, so the store that keeps only the sum keeps only
+        # arithmetic.
         cost_attribution=attribution,
         costs=CostSummary(
             status=CostAttributionStatus.COMPLETE,

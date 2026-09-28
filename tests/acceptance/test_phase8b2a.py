@@ -11,7 +11,7 @@ bundle whose summary says ``COMPLETE`` carries the per-trade split that produced
 every one of those four numbers, and a bundle cannot claim a completeness the
 summary denies.
 
-Six claims, each through a real command or the real legacy importer rather than a
+Seven cases, each through a real command or the real legacy importer rather than a
 hand-built document:
 
 1. the coupling holds in **both** directions -- a ``COMPLETE`` summary must carry
@@ -19,14 +19,22 @@ hand-built document:
 2. an attribution that does not describe the carried result is refused, in
    ``costs_attribution.attribution_disagreement``'s own words, because the bundle
    **calls that predicate** rather than restating it;
-3. a summary whose spread total is a number the trades behind it do not produce is
+3. a summary whose totals are numbers the trades behind them do not produce is
    refused: the aggregate is checked, not trusted;
-4. the sealed detail is the engine's own split, trade for trade, rather than a
+4. and that holds for a **legacy** ``PARTIAL`` bundle too, where commission and
+   swap are checked against its trades and spread and slippage are not -- the two
+   the early return used to skip along with them;
+5. the sealed detail is the engine's own split, trade for trade, rather than a
    recomputation of it;
-5. a v1 legacy document still encodes to the bytes it did before, so both new
+6. a v1 legacy document still encodes to the bytes it did before, so both new
    fields are invisible to evidence already sealed in an operator's store;
-6. and every refusal is one edit from a document that validates, so each is the
+7. and every refusal is one edit from a document that validates, so each is the
    rule rather than an accident of the fixtures.
+
+Every ``match=`` below is the whole clause its own rule speaks in. A ``match``
+that several refusals satisfy is a test that keeps passing when the rule it
+names is removed, and the point of naming a rule here is that removing it turns
+something red.
 
 The helpers are 8B1's, imported rather than re-created: ``_run_command`` and
 ``_bundle_of`` are a real ``backtest run`` over in-memory bars and the JSON path
@@ -140,7 +148,7 @@ def test_a_complete_cost_summary_must_carry_the_attribution_it_aggregates(
 
     assert bundle.costs.status is CostAttributionStatus.COMPLETE
     assert bundle.cost_attribution is not None
-    with pytest.raises(ValidationError, match="attribution"):
+    with pytest.raises(ValidationError, match="a complete cost summary must carry the attribution"):
         _revised(bundle, cost_attribution=None)
 
 
@@ -152,13 +160,21 @@ def test_a_partial_summary_must_not_carry_one(tmp_path: Path) -> None:
     refuse rather than seal a document whose two halves disagree -- and the
     attribution it is offered is perfectly well formed, so the coupling is what
     fires.
+
+    The wording is the coupling validator's own, whole. This fixture is a
+    one-trade legacy bundle and the attribution offered is one well-formed
+    split, which is exactly the shape ``attribution_disagreement`` also objects
+    to (``the attribution must be in result order``), so a looser substring
+    would be satisfied by that rule instead -- and the test would still be green
+    with the coupling deleted. A ``match`` several refusals satisfy is a test
+    that keeps passing when the rule it names is removed.
     """
 
     _store, legacy = _sealed_legacy_bundle(tmp_path)
 
     assert legacy.costs.status is CostAttributionStatus.PARTIAL
     assert legacy.cost_attribution is None
-    with pytest.raises(ValidationError, match="attribution"):
+    with pytest.raises(ValidationError, match="only a complete cost summary may carry"):
         _revised(legacy, cost_attribution=_prospective_attribution())
 
 
@@ -193,7 +209,7 @@ def test_an_attribution_that_disagrees_with_its_trades_is_refused(
         _revised(bundle, cost_attribution=shortened)
 
     tampered = trades[0].model_copy(update={"post_fill_gross": Decimal("999")})
-    with pytest.raises(ValidationError, match="post-fill gross"):
+    with pytest.raises(ValidationError, match="must equal its post-fill gross"):
         _revised(
             bundle,
             cost_attribution=bundle.cost_attribution.model_copy(
@@ -209,31 +225,74 @@ def test_a_summary_that_disagrees_with_its_attribution_is_refused(
 
     ``CostSummary``'s own validator already refuses a ``COMPLETE`` with a
     ``None``; this is the other direction -- a ``COMPLETE`` whose four fields are
-    all present and whose spread total is a number the trades behind it do not
+    all present and whose totals are numbers the trades behind them do not
     produce. A summary that can be written without reference to the split is a
     total this framework cannot check, which is the whole defect 8B2a closes.
+
+    Every ``match`` is the whole clause its rule speaks in, and no two rules
+    here share a clause. ``the summary's commission must equal the sum of the
+    trades'`` is the only one any of these edits can produce, so dropping the
+    check that speaks it turns this test red instead of leaving a refusal from
+    somewhere else standing in for it.
     """
 
     bundle = _bundle_of(_run_command(monkeypatch, tmp_path, marked=True))
 
-    with pytest.raises(ValidationError, match="spread cost"):
+    with pytest.raises(ValidationError, match="the summary's spread cost"):
         _revised(bundle, costs=bundle.costs.model_copy(update={"spread_cost": Decimal("12345")}))
 
-    with pytest.raises(ValidationError, match="slippage cost"):
+    with pytest.raises(ValidationError, match="the summary's slippage cost"):
         _revised(bundle, costs=bundle.costs.model_copy(update={"slippage_cost": Decimal("12345")}))
 
-    with pytest.raises(ValidationError, match="commission"):
+    with pytest.raises(ValidationError, match="the summary's commission"):
         _revised(
             bundle,
             costs=bundle.costs.model_copy(update={"commission": _bumped(bundle.costs.commission)}),
         )
 
-    with pytest.raises(ValidationError, match="swap"):
+    with pytest.raises(ValidationError, match="the summary's swap"):
         _revised(bundle, costs=bundle.costs.model_copy(update={"swap": _bumped(bundle.costs.swap)}))
 
     # The control: with every component untouched, this bundle validates. Without
     # it the four refusals above would not prove the validator is what fired.
     assert EvidenceBundle.model_validate_json(bundle.model_dump_json()) == bundle
+
+
+def test_a_legacy_summary_that_disagrees_with_its_own_trades_is_refused(tmp_path: Path) -> None:
+    """The two totals a ``PARTIAL`` summary can still be checked against.
+
+    ``PARTIAL`` is a statement about spread and slippage -- the two terms a
+    Phase 7 artifact cannot separate out of ``gross_pnl`` -- and it says nothing
+    about commission or swap. Both are sums over ``result.trades``, which the
+    legacy bundle carries whole, so a legacy document that claims a commission
+    its own trades do not produce is refused exactly as a prospective one is.
+
+    This is the case that made the check worth hoisting: the sum lives below an
+    early return that every bundle without an attribution hits, and every legacy
+    bundle is a bundle without one. Left there, the two numbers 8B1 had no split
+    to check them against stayed asserted rather than derived for precisely the
+    three artifacts that cannot be regenerated and re-verified -- which is the
+    defect this slice exists to remove, not to leave standing in its own gap.
+    """
+
+    _store, legacy = _sealed_legacy_bundle(tmp_path)
+
+    assert legacy.costs.status is CostAttributionStatus.PARTIAL
+    assert legacy.cost_attribution is None
+    with pytest.raises(ValidationError, match="the summary's commission"):
+        _revised(
+            legacy,
+            costs=legacy.costs.model_copy(update={"commission": _bumped(legacy.costs.commission)}),
+        )
+    with pytest.raises(ValidationError, match="the summary's swap"):
+        _revised(
+            legacy,
+            costs=legacy.costs.model_copy(update={"swap": _bumped(legacy.costs.swap)}),
+        )
+
+    # The control: the sealed document itself is refused by neither, so the two
+    # refusals above are the totals and not a legacy bundle that never validated.
+    assert EvidenceBundle.model_validate_json(legacy.model_dump_json()) == legacy
 
 
 def test_the_sealed_attribution_is_the_engines_own_split(

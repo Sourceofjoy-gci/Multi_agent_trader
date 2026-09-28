@@ -51,11 +51,11 @@ class SimulatedTrade(CanonicalModel):
     slippage, which appear nowhere in this model. ``net_pnl`` is the correct
     total either way; what is partial is the attribution, not the arithmetic.
 
-    Splitting spread and slippage into their own fields belongs with Phase 8's
-    cost attribution, which is the first thing that needs them. Doing it here
-    would change this model, the digest, and every known-answer number in the
-    phase whose proof those numbers are -- at the end of that phase, for a
-    breakdown nothing yet consumes.
+    Splitting spread and slippage into their own fields happened, on a sidecar
+    rather than here: ``research/backtest/costs_attribution.py`` carries
+    ``TradeCostAttribution`` beside each trade, matched by ``proposal_id``.
+    Doing it on this model would have changed the model, the digest, and every
+    known-answer number in the phase whose proof those numbers are.
     """
 
     proposal_id: NonEmptyStr

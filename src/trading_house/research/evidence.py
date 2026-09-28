@@ -276,8 +276,28 @@ class EvidenceBundle(CanonicalModel):
         about a summary: it binds a split to a result, and the summary is a
         bundle-level object. They are the reason ``costs`` stopped being an
         independently asserted total.
+
+        The four are split across the two halves of this method because they
+        come from two different places, and only two of them depend on the
+        attribution. ``commission`` and ``swap`` are sums over ``result.trades``,
+        which every bundle carries in full -- including every Phase 7 legacy
+        artifact, which is whole precisely because the store keeps the result
+        inline -- so they are checkable unconditionally and sit above the early
+        return. ``spread_cost`` and ``slippage_cost`` are sums over
+        ``cost_attribution.trades`` and exist only when there is a split to sum,
+        which is what puts them below it. A ``PARTIAL`` summary is the honest
+        record of a run that could not separate spread from slippage, and that
+        inability is a statement about those two terms alone: commission and
+        swap were never in doubt, and a legacy bundle claiming a total its own
+        trades do not produce is refused like any other.
         """
 
+        if self.costs.commission != sum(
+            (trade.commission for trade in self.result.trades), Decimal(0)
+        ):
+            raise ValueError("the summary's commission must equal the sum of the trades'")
+        if self.costs.swap != sum((trade.swap for trade in self.result.trades), Decimal(0)):
+            raise ValueError("the summary's swap must equal the sum of the trades'")
         if self.cost_attribution is None:
             return self
         disagreement = attribution_disagreement(self.cost_attribution, self.result)
@@ -288,12 +308,6 @@ class EvidenceBundle(CanonicalModel):
             raise ValueError("the summary's spread cost must equal the sum of the splits'")
         if sum((split.slippage_cost for split in splits), Decimal(0)) != self.costs.slippage_cost:
             raise ValueError("the summary's slippage cost must equal the sum of the splits'")
-        if self.costs.commission != sum(
-            (trade.commission for trade in self.result.trades), Decimal(0)
-        ):
-            raise ValueError("the summary's commission must equal the sum of the trades'")
-        if self.costs.swap != sum((trade.swap for trade in self.result.trades), Decimal(0)):
-            raise ValueError("the summary's swap must equal the sum of the trades'")
         return self
 
     @model_validator(mode="after")
