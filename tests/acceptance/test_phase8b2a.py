@@ -277,6 +277,42 @@ def test_a_consistently_shifted_split_is_refused_by_the_shared_predicate(
         )
 
 
+def test_a_split_attached_to_the_wrong_trade_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other predicate check no other rule can see.
+
+    A single-trade bundle cannot be *reordered*, so the branch that matches each
+    split to its trade by ``proposal_id`` looked unreachable here. It is not: a
+    split naming a proposal the result never carried is the same defect reached
+    the other way round, and it costs three lines rather than a second bar series
+    -- ``conftest.py`` documents staying under 90 bars precisely to avoid
+    crossing sessions, so manufacturing a two-trade run would have meant a
+    fixture nobody should have added.
+
+    Renaming the split leaves its own arithmetic intact, so
+    ``CostAttribution``'s per-trade rule is satisfied and the four sums are
+    unchanged. Length still matches, so the size check passes. Only the
+    identity of the pairing is wrong, and only the predicate looks at it.
+    """
+
+    bundle = _bundle_of(_run_command(monkeypatch, tmp_path, marked=True))
+    assert bundle.cost_attribution is not None
+    trades = bundle.cost_attribution.trades
+    assert trades, "an attribution with no trades cannot carry a doctored split"
+    split = trades[0]
+
+    renamed = split.model_copy(update={"proposal_id": f"{split.proposal_id}-moved"})
+    assert renamed.market_pnl - renamed.spread_cost - renamed.slippage_cost == split.post_fill_gross
+    assert bundle.result.trades[0].proposal_id != renamed.proposal_id
+
+    with pytest.raises(ValidationError, match="must be in result order"):
+        _revised(
+            bundle,
+            cost_attribution=bundle.cost_attribution.model_copy(update={"trades": (renamed,)}),
+        )
+
+
 def test_a_summary_that_disagrees_with_its_attribution_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
