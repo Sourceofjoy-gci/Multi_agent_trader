@@ -195,6 +195,17 @@ PROTOCOL_KEYS = tuple(_protocol_payload())
 # ``Decimal`` change moves the bytes, which is what the promise needs. Regenerate
 # with ``canonical_sha256(_bundle())`` and commit the new value on its own,
 # naming the version that moved the encoding.
+#
+# Restated once, deliberately, when ``EvidenceBundle`` gained ``mark_to_market``
+# -- and then *not* restated, which is the point. A plain ``= None`` would have
+# written ``"mark_to_market":null`` into every bundle's canonical bytes, moved
+# this digest, and made ``EvidenceStore.read`` refuse every v1 document already
+# sealed in an operator's store, since it re-serializes what it decoded. The
+# field therefore carries ``exclude_if`` and a v1 bundle's bytes are unchanged;
+# ``test_a_document_sealed_before_the_series_existed_still_verifies`` in
+# ``tests/acceptance/test_phase8b1.py`` proves it by cutting the key out of real
+# stored bytes and reading the result back at its own address. This constant did
+# not move because that test is green, not because bundle digests are free.
 _CANONICAL_BUNDLE_SHA256 = "b07618429d5992d0fb038b6ad53b8401fa1aa9ad467efd06c20421a3557d8558"
 
 

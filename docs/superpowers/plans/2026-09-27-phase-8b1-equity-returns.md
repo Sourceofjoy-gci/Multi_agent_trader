@@ -869,6 +869,15 @@ def mark_to_market_bundle(
             ),
         ),
         return_series_basis=ReturnSeriesBasis.MARK_TO_MARKET,
+        # The series itself, sealed whole and not only reduced. ``daily_returns``
+        # is a function of it, and a reduction whose input the evidence store
+        # does not hold cannot be re-derived, re-audited, or checked against a
+        # later ``BacktestOutcome``. ``EvidenceBundle``'s field is
+        # ``Field(default=None, exclude_if=...)``: a plain ``= None`` would put
+        # ``"mark_to_market":null`` into every bundle's canonical bytes, move
+        # every v1 document's encoding, and make ``EvidenceStore.read`` refuse
+        # the v1 bundles already sealed in an operator's store.
+        mark_to_market=outcome.equity,
         costs=CostSummary(
             status=CostAttributionStatus.PARTIAL,
             commission=sum((trade.commission for trade in result.trades), Decimal(0)),

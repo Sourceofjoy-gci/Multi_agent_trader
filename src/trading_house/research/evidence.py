@@ -42,7 +42,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import NonNegativeInt, PositiveInt, field_validator, model_validator
+from pydantic import Field, NonNegativeInt, PositiveInt, field_validator, model_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import EvidenceIntegrityError, TimestampError
@@ -53,8 +53,12 @@ from trading_house.core.values import CanonicalModel, NonEmptyStr
 # trading_house.research, so the direction of the dependency had to invert. The
 # redundant alias is PEP 484's explicit re-export marker, which strict mypy's
 # no_implicit_reexport requires and this module's many importers depend on. The
-# serialized shape is byte-identical, so no digest moves.
+# serialized shape is byte-identical, so no digest moves. ``EquitySeries`` is
+# imported from the same place for the same reason and is *not* a re-export: the
+# bundle carries it, and a new key in a sealed document is a schema change that
+# has to be declared rather than absorbed.
 from trading_house.research.backtest.mark import DailyReturnPoint as DailyReturnPoint
+from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.canonical import DOMAIN_SEPARATOR, canonical_bytes, canonical_sha256
 from trading_house.research.trial_ledger import (
@@ -70,6 +74,16 @@ _HEX_DIGEST_ALPHABET = frozenset("0123456789abcdef")
 
 def _is_digest(value: str) -> bool:
     return len(value) == _HEX_DIGEST_LENGTH and _HEX_DIGEST_ALPHABET.issuperset(value)
+
+
+def _is_absent(value: object) -> bool:
+    """``Field(exclude_if=...)``: leave ``None`` out of the serialized bytes.
+
+    Named rather than inlined as a lambda so the field that depends on it can
+    say what it does, and so mypy has a type to check the call against.
+    """
+
+    return value is None
 
 
 def _utc(value: datetime) -> datetime:
@@ -155,11 +169,52 @@ class EvidenceBundle(CanonicalModel):
     return_series_basis: ReturnSeriesBasis
     costs: CostSummary
     provenance: EvidenceProvenance
+    # The per-bar series ``daily_returns`` was reduced from, sealed whole. The
+    # daily series is a *reduction*, and a reduction whose input is not retained
+    # cannot be re-derived, re-audited, or checked against a later
+    # ``BacktestOutcome`` -- so without this field the engine computes an equity
+    # path and the evidence store keeps only its arithmetic.
+    #
+    # ``exclude_if`` is load-bearing, not cosmetic, and a plain ``= None`` would
+    # be a real regression. ``EvidenceStore.read`` re-serializes what it decoded
+    # and refuses any document whose bytes are not today's canonical encoding, so
+    # a field that always wrote itself out would put ``"mark_to_market":null``
+    # into every bundle -- and every v1 document already sealed in an operator's
+    # store, three of which exist on no machine and cannot be regenerated, would
+    # then fail that check. ``research trial verify`` would start failing on a
+    # chain it sealed and verified itself. Omitting the key when it is absent
+    # keeps a v1 document's bytes exactly what they were, so the extension is
+    # invisible to it; the pinned known-answer bundle digest does not move, and
+    # that is the property the exclusion buys rather than a consequence of it.
+    #
+    # Absent therefore means "this bundle has no mark-to-market series", and the
+    # validator below is what makes that unambiguous rather than a hole. It does
+    # mean a document that spells the key out as ``null`` is not canonical and
+    # will not verify -- a shape nothing in this repo can produce, since every
+    # write goes through ``canonical_bytes``.
+    mark_to_market: EquitySeries | None = Field(default=None, exclude_if=_is_absent)
 
     @model_validator(mode="after")
     def source_digest_is_the_result_it_carries(self) -> Self:
         if self.source_result_sha256 != self.result.digest():
             raise ValueError("source_result_sha256 must equal the digest of the carried result")
+        return self
+
+    @model_validator(mode="after")
+    def the_series_is_present_exactly_where_the_basis_claims_one(self) -> Self:
+        """The basis names the series, so the two cannot disagree.
+
+        Both directions fail closed. A ``MARK_TO_MARKET`` bundle with no series
+        claims a return series it does not carry; a bundle on any other basis
+        carrying one would claim two different returns for a single run, with
+        nothing to tell a reader which of them a downstream number used.
+        """
+
+        marked = self.return_series_basis is ReturnSeriesBasis.MARK_TO_MARKET
+        if marked and self.mark_to_market is None:
+            raise ValueError("a mark-to-market bundle must carry the series it reduced")
+        if not marked and self.mark_to_market is not None:
+            raise ValueError("only a mark-to-market bundle may carry a per-bar equity series")
         return self
 
 

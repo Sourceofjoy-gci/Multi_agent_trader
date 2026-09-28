@@ -1005,7 +1005,11 @@ uv run trading-house research trial verify
   the same `--started-at`, is recognised under the same event id, and appends
   nothing. A retry under a *different* value is a different body under an id the
   chain already holds, and is refused with exit 15 as it should be.
-- **`record`** takes an `EvidenceBundle` JSON document. The bundle is the single
+- **`record`** takes an `EvidenceBundle` JSON document, in either of two shapes: a
+  bare bundle, or the document `backtest run --mark-to-market` printed, which
+  carries one under `"bundle"` inside the status envelope every command here emits
+  — so the documented `> run.json` redirect works without editing the file. Nothing
+  else is read, and anything else is exit 2. The bundle is the single
   source of identity, so `--trial-id` and `--attempt-id` are *checked against it*
   rather than trusted, and the trial's declaration is checked against the ledger
   before anything is written. Evidence is written before the events are appended:
@@ -1061,6 +1065,14 @@ v1 bundle digest `tests/property/test_trial_evidence.py` pins. Those four
 constants name artifacts that exist on no machine but the one that produced
 them, so they cannot be recomputed, only refused — which is what
 `tests/acceptance/test_phase8b1.py` does with them.
+
+The bundle **seals the series itself**, under `mark_to_market`, alongside the
+daily returns reduced from it. That is the whole point of the field: the daily
+series is a *reduction*, and a reduction whose input the evidence store does not
+hold cannot be re-derived, re-audited, or checked against a later run. The field
+is absent — not `null` — on a bundle that carries no series, which is what keeps
+every already-sealed v1 bundle byte-identical and readable; `bundle_schema_version`
+stays `1` for the same reason.
 
 ### Commands
 
@@ -1135,6 +1147,13 @@ the first time at a later gate.
   warming up, is still marked. The count equals the result's own `bars_seen`,
   and at every observation
   `equity == firm_equity + cumulative_realized_pnl + unrealized_pnl`.
+- **The basis and the series cannot disagree.** A bundle whose
+  `return_series_basis` is `mark_to_market` **must** carry `mark_to_market`, and
+  a bundle on any other basis **must not**: two series in one run with nothing to
+  say which one a downstream number used is the failure this pair of rules
+  prevents. Both directions are refused rather than reconciled. A bundle carrying
+  no series has the key absent, which is unambiguous because of that rule — a
+  `realized_closed_trades` bundle from the legacy importer has no marks to seal.
 - **`costs.status` is `PARTIAL`, with `spread_cost` and `slippage_cost` `null`.**
   Both were charged inside the fill prices and the result cannot separate them
   until 8B2 does, so this run genuinely has not measured them. **A zero is not a
@@ -1185,7 +1204,7 @@ uv run trading-house --help
 | `trading-house backtest run --mark-to-market` | Replay the same arm and print a sealable mark-to-market evidence bundle — the mark-to-market series and its digest — instead of the bare result |
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
-| `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal |
+| `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
 | `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |

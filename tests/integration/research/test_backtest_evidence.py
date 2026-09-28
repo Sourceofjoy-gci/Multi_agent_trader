@@ -321,15 +321,65 @@ def test_mark_to_market_emits_a_marked_series_and_a_partial_cost_summary(
     assert payload["mark_to_market_flat"] is True
 
 
+def test_the_bundle_seals_the_series_its_daily_returns_were_reduced_from(
+    seeded: Fixture, research_env: Path
+) -> None:
+    """The assertion four review passes were missing: the series is *in* the bundle.
+
+    ``daily_returns`` is derived from the per-bar series, so every test that only
+    reads the daily series passes whether or not the series was ever sealed -- the
+    reduction is present either way. That is precisely how the whole of 8B1's
+    central artifact could be computed, fed into a function, and dropped without
+    any of it going red: no field carried it out of the command, so it never
+    reached the evidence store, and the design, the plan, the README and the
+    acceptance file all described a sealed series no document contained.
+
+    The count is against ``result.bars_seen`` rather than a literal, so a stored,
+    subsampled or per-snapshot series fails it -- the same equality the engine's
+    own ``BacktestOutcome`` validator makes, restated where the document is
+    checked. The last two assertions are the ones tying the two series together:
+    the daily walk's coverage is a fact about the sealed observations, and
+    ``mark_to_market_flat`` is a fact about the same series, so a bundle whose
+    reduction and whose input disagreed would be visible here.
+    """
+
+    payload = _run(seeded, marked=True)
+    bundle = _bundle_of(payload)
+
+    assert bundle.mark_to_market is not None, "the per-bar series must reach the evidence store"
+    series = bundle.mark_to_market
+    assert len(series.observations) == bundle.result.bars_seen
+    assert series.firm_equity == bundle.result.firm_equity
+    assert series.observations, (
+        "an empty series is refused by the model, so this is belt and braces"
+    )
+    # The daily series is a function of this one, and the window reaches the day
+    # the last mark falls on rather than the day ``result.end`` does.
+    assert bundle.daily_returns[-1].day == series.observations[-1].marked_at.date()
+    assert bundle.daily_returns[-1].day > bundle.result.end.date()
+    # One report of flatness, two fields, and they must agree: the payload's
+    # boolean is derived from the sealed series' own last observation.
+    assert series.is_flat is payload["mark_to_market_flat"]
+    assert series.observations[-1].open_positions == 0
+    # And the identity at every point, in the document rather than in the engine.
+    for point in series.observations:
+        assert point.equity == (
+            series.firm_equity + point.cumulative_realized_pnl + point.unrealized_pnl
+        )
+
+
 def _recomposed_close(bundle: EvidenceBundle) -> Fraction:
     """The equity the bundle's daily series compounds up to, in exact arithmetic.
 
-    The bundle carries the *reduced* series and not the observations, so the only
-    way to ask whether it reconciles with the result beside it is to compound its
-    own returns. ``Fraction`` because the *inputs* are the problem, not the walk:
-    the returns are already rounded to Decimal's context by the time they are
-    serialized, so ``Decimal`` would compound that rounding into its own and the
-    residual would depend on the context rather than on anything being asserted.
+    Recomputed from the reduced series rather than read off the sealed
+    observations on purpose: that is the only way to ask whether the *reduction*
+    still reconciles with the result beside it, which is a different question
+    from whether the observations are present (the first test in this file) and
+    the one the rounding in ``derive_daily_returns`` lives in. ``Fraction``
+    because the *inputs* are the problem, not the walk: the returns are already
+    rounded to Decimal's context by the time they are serialized, so ``Decimal``
+    would compound that rounding into its own and the residual would depend on
+    the context rather than on anything being asserted.
     """
 
     close = Fraction(bundle.result.firm_equity)
@@ -349,30 +399,41 @@ def test_the_daily_series_reaches_the_day_the_final_bar_closes_on(
     bar is processed and its equity is inside ``net_pnl``, so a daily walk that
     stops at ``end.date()`` drops a mark the result already accounts for -- and
     for a window that ends on a bar realizing P&L it drops the whole of it.
-    Nothing notices, because the series is an opaque tuple inside the bundle;
     ``legacy_import.derive_realized_daily_returns`` extends its walk for the same
     reason and says so at length.
 
-    So the assertions are about *coverage* and about reconciling with
-    ``net_pnl``, never about the length of the series: a silently short series
-    is the entire failure mode, and a test that re-asserts today's output cannot
-    catch it. The coverage assertion is the one that goes red without the
-    extension; the reconciliation is the invariant the extension has to keep.
+    The seal is what makes this observable at all, and it is worth naming: the
+    bundle now carries the observations the walk was taken from, so a walk that
+    silently stopped short is a disagreement between two fields of one document
+    rather than a number nobody can re-derive. The coverage assertion is checked
+    against the sealed series' own last mark, not against ``end.date()``, so it
+    goes red exactly when the extension is dropped -- and it would not have been
+    checkable at all before the series was sealed, which is why the two tests
+    below are the pair.
     """
 
     bundle = _bundle_of(_run(seeded, marked=True))
+    assert bundle.mark_to_market is not None
 
     # The off-by-one, stated rather than implied: the last mark is one bar
     # *past* ``result.end`` and on the following UTC day because of it.
     final_mark = bundle.result.end + timedelta(minutes=15)
     assert bundle.result.end == seeded.last_bar
     assert final_mark.date() > bundle.result.end.date()
+    # ...and it is the sealed series' own last observation, so the daily walk is
+    # asserted against the marks it reduced rather than against a second reading
+    # of the result.
+    assert bundle.mark_to_market.observations[-1].marked_at == final_mark
 
     assert bundle.daily_returns[-1].day == final_mark.date()
     # Flat, so the final mark is ``firm_equity + net_pnl`` with nothing
     # unrealized left in it, and the compounded series has to land there.
     assert bundle.result.trades
     expected = Fraction(bundle.result.firm_equity + bundle.result.net_pnl)
+    # The sealed series says the same thing outright, which is what makes the
+    # compounded walk a check on the *reduction* rather than a second reading of
+    # one number the bundle already carries.
+    assert Fraction(bundle.mark_to_market.observations[-1].equity) == expected
     # A cent rather than an equality, because the returns were rounded to
     # Decimal's context before they were serialized -- four orders of magnitude
     # below the smallest P&L this run books.
@@ -402,16 +463,72 @@ def test_the_payload_digest_is_the_bundle_address_not_the_result_digest(
     assert bundle.source_result_sha256 == bundle.result.digest()
 
 
-def test_a_marked_bundle_is_sealed_by_the_ledger_and_read_back(
+def test_the_documented_operator_flow_seals_and_verifies(
     seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
 ) -> None:
-    """The whole round trip, with nothing rewritten in between.
+    """The four commands the design writes down, run in that order, unmodified.
 
-    A registered protocol, a started attempt, then the emitted bundle written out
-    and handed to ``record`` as an operator would -- the CLI prints a document
-    and the sealing command takes a file. The ledger stores what the store
-    produced, so the equality below is between the address the command reported
-    and the address a reader gets back, not a digest recomputed by the test.
+    ``backtest run --mark-to-market ... > run.json`` then
+    ``research trial record --evidence run.json`` is the flow the README and
+    design 8 document, and the redirect is the point: what lands in ``run.json``
+    is the *whole* command payload -- ``{"status", "bundle", "digest",
+    "mark_to_market_flat"}`` -- because that is what the CLI prints. The round
+    trip below used to hand ``record`` ``payload["bundle"]`` instead, a document
+    no operator ever produces, and every test in this file passed while the
+    documented flow exited 2 with ``configuration invalid``. So the file written
+    here is the file the command wrote, and this is the test that would have
+    caught it.
+
+    Nothing is rewritten in between, and the equality below is between the
+    address the run reported and the address a reader gets back off disk rather
+    than a digest the test recomputed. ``mark_to_market`` is read back out of the
+    *stored* document as well, because a flow that ends at a green ``verify`` is
+    not the claim: a bundle that verifies while missing the series is exactly the
+    defect this suite is here to close.
+    """
+
+    _register(tmp_path)
+    started = _start()
+    assert started.exit_code == cli.ExitCode.OK, started.stderr
+
+    payload = _run(seeded, marked=True)
+    document = _write(tmp_path / "run.json", payload)
+    assert json.loads(document.read_text(encoding="utf-8")) == payload
+
+    recorded = _record(document)
+
+    assert recorded["evidence_sha256"] == payload["digest"]
+    assert [record.event_type for record in _ledger(research_ledger_dsn).events()] == [
+        LedgerEventType.PREREGISTERED,
+        LedgerEventType.EXECUTION_STARTED,
+        LedgerEventType.RESULT_RECORDED,
+        LedgerEventType.EVIDENCE_SEALED,
+    ]
+    sealed = _store(research_env).read(recorded["evidence_sha256"])
+    assert sealed == _bundle_of(payload)
+    assert sealed.mark_to_market is not None
+    assert len(sealed.mark_to_market.observations) == sealed.result.bars_seen
+    verified = runner.invoke(cli.app, ["research", "trial", "verify"])
+    assert verified.exit_code == cli.ExitCode.OK, verified.stderr
+    assert json.loads(verified.stdout) == {
+        "status": "ok",
+        "valid": True,
+        "checked_events": 4,
+        "reason": None,
+    }
+
+
+def test_a_bare_bundle_is_still_what_record_accepts(
+    seeded: Fixture, research_env: Path, tmp_path: Path
+) -> None:
+    """The second accepted shape, kept because ``record`` still takes it.
+
+    ``--evidence`` reads a bare ``EvidenceBundle`` or the command payload that
+    wraps one under ``"bundle"``, and nothing else. The flow test above covers
+    the second; this covers the first, because it is the shape every other
+    ``record`` caller in this file and in ``test_trial_cli.py`` uses, and a fix
+    that taught the command to unwrap the wrapper would be free to stop accepting
+    the document it was always given.
     """
 
     _register(tmp_path)
@@ -422,22 +539,58 @@ def test_a_marked_bundle_is_sealed_by_the_ledger_and_read_back(
     recorded = _record(_write(tmp_path / "bundle.json", payload["bundle"]))
 
     assert recorded["evidence_sha256"] == payload["digest"]
-    assert [record.event_type for record in _ledger(research_ledger_dsn).events()] == [
-        LedgerEventType.PREREGISTERED,
-        LedgerEventType.EXECUTION_STARTED,
-        LedgerEventType.RESULT_RECORDED,
-        LedgerEventType.EVIDENCE_SEALED,
-    ]
-    # Re-read from the bytes on disk rather than from the payload the test still
-    # holds: the store is what a later phase consults, and a bundle that survives
-    # the round trip only in memory has proved nothing.
-    assert _store(research_env).read(recorded["evidence_sha256"]) == _bundle_of(payload)
+    assert _store(research_env).read(recorded["evidence_sha256"]).mark_to_market is not None
+    verified = runner.invoke(cli.app, ["research", "trial", "verify"])
+    assert verified.exit_code == cli.ExitCode.OK, verified.stderr
+    assert json.loads(verified.stdout)["valid"] is True
+
+
+def test_a_document_that_is_neither_shape_is_refused_and_writes_nothing(
+    seeded: Fixture, research_env: Path, tmp_path: Path
+) -> None:
+    """The fail-closed half of the two shapes, on the likeliest wrong document.
+
+    A real ``backtest run`` payload -- the same command without
+    ``--mark-to-market``, so a real document an operator produced and a real
+    mistake to make, with a real result inside it. It is refused at exit 2 and
+    nothing is written, which is the same answer a mistyped path gets: an
+    operator who named a document this command does not accept has made a
+    mistake, not produced evidence that cannot be trusted.
+
+    The point of the case is that the unwrap is narrow. A ``record`` that reached
+    for a nested bundle, or that accepted anything with a ``result`` in it, would
+    pass the documented flow and this document both; only the two named shapes
+    do neither.
+    """
+
+    _register(tmp_path)
+    started = _start()
+    assert started.exit_code == cli.ExitCode.OK, started.stderr
+
+    phase7 = _write(tmp_path / "phase7.json", _run(seeded, marked=False))
+    result = runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "record",
+            "--trial-id",
+            TRIAL_ID,
+            "--attempt-id",
+            ATTEMPT_ID,
+            "--evidence",
+            str(phase7),
+        ],
+    )
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert not list(research_env.rglob("*.json"))
     verified = runner.invoke(cli.app, ["research", "trial", "verify"])
     assert verified.exit_code == cli.ExitCode.OK, verified.stderr
     assert json.loads(verified.stdout) == {
         "status": "ok",
         "valid": True,
-        "checked_events": 4,
+        "checked_events": 2,
         "reason": None,
     }
 
@@ -637,11 +790,13 @@ def test_a_doctored_daily_return_is_refused_by_the_store(
 ) -> None:
     """One number edited in a sealed document, and the typed refusal that follows.
 
-    The bundle carries the *reduced* series, so nothing inside it ties
-    ``daily_returns[0]`` back to the result's own start and end equity -- the raw
-    observations stay in the engine's outcome and are not in the bundle at all.
-    The store's content address is therefore the only thing standing between a
-    doctored return and a reader, and this is the case that says so.
+    Nothing inside the bundle *derives* ``daily_returns[0]`` from the sealed
+    observations -- the reduction happened in the engine and the store does not
+    recompute it -- so a reader who trusts the reduction has to take it on the
+    content address. That is what this case says, and it is a different claim
+    from the series being present: sealing the observations makes a wrong
+    reduction *checkable* by a reader or a later phase, and this test is about the
+    layer below that, which is the address.
 
     The edited document is still well-formed JSON and still parses into a
     plausible bundle, so the refusal cannot be a parse accident: it is the

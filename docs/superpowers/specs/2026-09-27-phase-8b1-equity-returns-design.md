@@ -305,6 +305,19 @@ chain it sealed and verified itself. Absent means "this bundle has no mark-to-ma
 and the coupling rule above is what makes that unambiguous rather than a hole. The legacy
 importer, which has no marks to seal, leaves it `None`.
 
+**Defaulted is necessary and not sufficient.** `EvidenceStore.read` re-serializes what it
+decoded and refuses any document whose bytes are not today's canonical encoding, so a field
+that merely defaulted to `None` would write `"mark_to_market":null` into every bundle and
+fail that check for every v1 document — the same outcome the required field produces, by a
+path nothing in this section predicted. The field is therefore declared with
+`Field(default=None, exclude_if=...)`, so an absent series leaves no key and a v1 bundle's
+canonical bytes are exactly what they were. `_CANONICAL_BUNDLE_SHA256` and the three legacy
+bundle addresses do not move, and that is the observable consequence rather than a matter of
+taste: `tests/acceptance/test_phase8b1.py` pins a legacy bundle's address and reads it back
+through the production `EvidenceStore`. The price is that a document spelling the key out as
+an explicit `null` is not canonical and will not verify; no write path in this repository can
+produce one, since every write goes through `canonical_bytes`.
+
 `bundle_schema_version` stays `1`. The extension is additive and backward compatible: a v1
 document still parses, still means what it meant, and a document carrying the new field is
 identified by its `return_series_basis` rather than by its version. Bumping the literal would

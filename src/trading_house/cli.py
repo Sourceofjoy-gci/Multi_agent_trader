@@ -1380,6 +1380,41 @@ def _load_json_model[T: CanonicalModel](path: Path, model: type[T]) -> T:
     return model.model_validate_json(data)
 
 
+def _evidence_bundle(path: Path) -> EvidenceBundle:
+    """The bundle ``record`` seals, from either of the two documents it accepts.
+
+    A bare ``EvidenceBundle``, or the command payload ``backtest run --mark-to-market``
+    writes, which wraps one under ``"bundle"`` inside the status envelope every
+    command here emits. The second shape is accepted only because that command
+    produces it: an operator following the documented flow redirects one into
+    ``--evidence`` verbatim, and refusing it would refuse the flow the design
+    documents. It is unwrapped here rather than in ``_load_json_model`` because
+    that helper has other callers -- ``register`` still wants a bare
+    ``TrialProtocol`` -- and a wrapper one command produces is not a wrapper
+    every caller should learn to accept.
+
+    Nothing else is read. A document that is neither shape fails validation
+    exactly as a mistyped path does, which is the same ``configuration invalid``
+    refusal at exit 2, because both are an operator who named a document this
+    command does not accept.
+    """
+
+    try:
+        data = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigurationError() from error
+    try:
+        document = json.loads(data)
+    except json.JSONDecodeError as error:
+        # Same exit and message as the pydantic refusal below, reached before it:
+        # malformed JSON is not a bundle in either shape, and letting the decode
+        # error escape would answer it with a correlation id.
+        raise ConfigurationError() from error
+    if isinstance(document, dict) and "bundle" in document:
+        data = json.dumps(document["bundle"])
+    return EvidenceBundle.model_validate_json(data)
+
+
 def _trial_ledger() -> PostgresTrialLedger:
     """The research ledger, behind the migration check every trial command shares.
 
@@ -1517,9 +1552,22 @@ def research_trial_start(
 def research_trial_record(
     trial_id: Annotated[str, typer.Option("--trial-id")],
     attempt_id: Annotated[str, typer.Option("--attempt-id")],
-    evidence: Annotated[Path, typer.Option("--evidence", help="Evidence bundle JSON.")],
+    evidence: Annotated[
+        Path,
+        typer.Option(
+            "--evidence",
+            help=(
+                "Evidence bundle JSON: a bare bundle, or the document "
+                "`backtest run --mark-to-market` printed."
+            ),
+        ),
+    ],
 ) -> None:
     """Seal one attempt's evidence and record that it was written.
+
+    ``--evidence`` takes the document ``backtest run --mark-to-market`` printed,
+    status envelope and all, as well as a bare bundle: see ``_evidence_bundle``,
+    which reads those two shapes and nothing else.
 
     The bundle is the single source of identity, so ``--trial-id`` and
     ``--attempt-id`` are checked against it rather than trusted: a row whose
@@ -1534,7 +1582,7 @@ def research_trial_record(
     """
 
     def operation() -> dict[str, JsonValue]:
-        bundle = _load_json_model(evidence, EvidenceBundle)
+        bundle = _evidence_bundle(evidence)
         if bundle.trial_id != trial_id or bundle.attempt_id != attempt_id:
             raise SchemaValidationError()
         # The ledger is resolved -- and the migration head checked -- before the
