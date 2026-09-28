@@ -13,16 +13,18 @@ store, and two databases. The only fake is the bar series, which is seeded
 through the real store so the replay reads it the way it reads stored bars in
 production.
 
-``research_env`` is requested by every test here, including the two that read
+``research_env`` is requested by every test here, including the ones that read
 nothing from the evidence root: it is the fixture that points the command at the
-two databases, and ``backtest run`` opens one of them on its own.
+two databases, and ``backtest run`` opens one of them on its own. It is also what
+makes the identity-guard tests mean anything -- see
+``test_a_bundle_missing_an_identity_option_is_refused_and_writes_nothing``.
 
-The case that matters most is the fourth one. Without the flag the payload is
+The case that matters most is the Phase 7 one. Without the flag the payload is
 Phase 7's artifact byte for byte, because ``research trial import-legacy``
 depends on those three keys and on the ``margin_modelled`` beside them. That test
-does not merely assert the key set: it hands the emitted document to the importer
-that reads it, so a fourth key, a renamed one, or a digest taken over a different
-serialisation fails as a refusal rather than as a shape nobody looked at again.
+asserts the key set exactly *and* hands the emitted document to the importer that
+reads it, so a renamed key or a digest taken over a different serialisation fails
+as a refusal rather than as a shape nobody looked at again.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -48,6 +51,7 @@ from tests.integration.marketdata.conftest import seed
 # belong to. The environment they all need -- the two DSNs and an emptied evidence
 # root -- is this directory's ``research_env`` fixture, in ``conftest.py``.
 from tests.integration.research.test_trial_cli import (
+    _ledger,
     _protocol,
     _register,
     _start,
@@ -62,7 +66,6 @@ from trading_house.marketdata.store import PostgresBarStore
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
-from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.trial_ledger import LedgerEventType
 
 pytestmark = [
@@ -158,6 +161,28 @@ def seeded(
             cursor.execute("TRUNCATE marketdata.bars, marketdata.ingest_runs")
 
 
+def _identity_options(trial_id: str = TRIAL_ID, attempt_id: str = ATTEMPT_ID) -> dict[str, str]:
+    """The six options that travel with ``--mark-to-market``, and only with it.
+
+    Declared once so the sweeps below name the same six the command takes; a
+    second copy of the list is a second thing that can drift from it.
+    """
+
+    return {
+        "--trial-id": trial_id,
+        "--attempt-id": attempt_id,
+        # The registered protocol's own digest, which is what an operator
+        # copying the README types. Nothing in 8B1 compares it to a
+        # preregistration -- ``trial record`` checks the bundle's trial and
+        # attempt ids and no more -- so the bundle carries what the operator
+        # declared, recorded rather than verified.
+        "--spec-sha256": canonical_sha256(_protocol()),
+        "--agent-run-id": "run-evidence",
+        "--occurred-at": OCCURRED_AT,
+        "--registered-at": REGISTERED_AT,
+    }
+
+
 def _args(
     seeded: Fixture,
     *,
@@ -185,17 +210,7 @@ def _args(
         "--defective-bar-tolerance": "0",
     }
     if identity:
-        options |= {
-            "--trial-id": trial_id,
-            "--attempt-id": attempt_id,
-            # The registered protocol's own digest, which is what an operator
-            # copying the README types, and what the bundle's spec_sha256 is then
-            # checked against by ``trial record``.
-            "--spec-sha256": canonical_sha256(_protocol()),
-            "--agent-run-id": "run-evidence",
-            "--occurred-at": OCCURRED_AT,
-            "--registered-at": REGISTERED_AT,
-        }
+        options |= _identity_options(trial_id, attempt_id)
     options.update(overrides)
     return ["backtest", "run", *[value for pair in options.items() for value in pair]]
 
@@ -239,10 +254,6 @@ def _bundle_of(payload: dict[str, Any]) -> EvidenceBundle:
 def _write(path: Path, document: dict[str, Any]) -> Path:
     path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
     return path
-
-
-def _ledger(research_ledger_dsn: str) -> PostgresTrialLedger:
-    return PostgresTrialLedger(lambda: open_runtime_connection(SecretStr(research_ledger_dsn)))
 
 
 def _record(
@@ -289,16 +300,16 @@ def test_mark_to_market_emits_a_marked_series_and_a_partial_cost_summary(
     assert sorted(payload) == ["bundle", "digest", "mark_to_market_flat", "status"]
     bundle = _bundle_of(payload)
     assert bundle.return_series_basis.value == "mark_to_market"
+    # ``DAYS + 1``, not ``DAYS``: the final mark lands on the following UTC day
+    # because the engine reads one bar past ``end``. Which day that is, and why
+    # the series has to reach it, is the next test's whole subject.
     assert [point.day for point in bundle.daily_returns] == [
-        seeded.first_bar.date(),
-        seeded.first_bar.date() + timedelta(days=1),
-        seeded.first_bar.date() + timedelta(days=DAYS - 1),
+        seeded.first_bar.date() + timedelta(days=offset) for offset in range(DAYS + 1)
     ]
     # A day with no mark returns a literal zero, so a gap and a flat day are the
     # same number. What says the window was walked rather than sampled is that
-    # the last day is not one: the position closed at 16:00 and the equity that
-    # produced that return is in the series.
-    assert str(bundle.daily_returns[-1].value) != "0"
+    # the day carrying the 16:00 exit is not one: that equity is in the series.
+    assert str(bundle.daily_returns[-2].value) != "0"
     assert bundle.costs.status.value == "partial"
     assert bundle.costs.spread_cost is None
     assert bundle.costs.slippage_cost is None
@@ -308,6 +319,64 @@ def test_mark_to_market_emits_a_marked_series_and_a_partial_cost_summary(
     assert bundle.costs.commission > 0
     assert bundle.provenance.dataset_sha256 is None
     assert payload["mark_to_market_flat"] is True
+
+
+def _recomposed_close(bundle: EvidenceBundle) -> Fraction:
+    """The equity the bundle's daily series compounds up to, in exact arithmetic.
+
+    The bundle carries the *reduced* series and not the observations, so the only
+    way to ask whether it reconciles with the result beside it is to compound its
+    own returns. ``Fraction`` because the *inputs* are the problem, not the walk:
+    the returns are already rounded to Decimal's context by the time they are
+    serialized, so ``Decimal`` would compound that rounding into its own and the
+    residual would depend on the context rather than on anything being asserted.
+    """
+
+    close = Fraction(bundle.result.firm_equity)
+    for point in bundle.daily_returns:
+        close *= 1 + Fraction(point.value)
+    return close
+
+
+def test_the_daily_series_reaches_the_day_the_final_bar_closes_on(
+    seeded: Fixture, research_env: Path
+) -> None:
+    """The series must cover every observation, and reconcile with ``net_pnl``.
+
+    ``start``/``end`` are inclusive bar *open* times and the store's range is
+    half-open, so ``_replay_bars`` reads one bar past ``end``: this window ends
+    at 23:45 and the last equity mark is stamped at the next UTC midnight. That
+    bar is processed and its equity is inside ``net_pnl``, so a daily walk that
+    stops at ``end.date()`` drops a mark the result already accounts for -- and
+    for a window that ends on a bar realizing P&L it drops the whole of it.
+    Nothing notices, because the series is an opaque tuple inside the bundle;
+    ``legacy_import.derive_realized_daily_returns`` extends its walk for the same
+    reason and says so at length.
+
+    So the assertions are about *coverage* and about reconciling with
+    ``net_pnl``, never about the length of the series: a silently short series
+    is the entire failure mode, and a test that re-asserts today's output cannot
+    catch it. The coverage assertion is the one that goes red without the
+    extension; the reconciliation is the invariant the extension has to keep.
+    """
+
+    bundle = _bundle_of(_run(seeded, marked=True))
+
+    # The off-by-one, stated rather than implied: the last mark is one bar
+    # *past* ``result.end`` and on the following UTC day because of it.
+    final_mark = bundle.result.end + timedelta(minutes=15)
+    assert bundle.result.end == seeded.last_bar
+    assert final_mark.date() > bundle.result.end.date()
+
+    assert bundle.daily_returns[-1].day == final_mark.date()
+    # Flat, so the final mark is ``firm_equity + net_pnl`` with nothing
+    # unrealized left in it, and the compounded series has to land there.
+    assert bundle.result.trades
+    expected = Fraction(bundle.result.firm_equity + bundle.result.net_pnl)
+    # A cent rather than an equality, because the returns were rounded to
+    # Decimal's context before they were serialized -- four orders of magnitude
+    # below the smallest P&L this run books.
+    assert abs(_recomposed_close(bundle) - expected) < Fraction(1, 100)
 
 
 def test_the_payload_digest_is_the_bundle_address_not_the_result_digest(
@@ -379,11 +448,14 @@ def test_without_the_flag_the_payload_is_the_phase7_artifact_unchanged(
     """The contract ``research/legacy_import.py`` reads, proven by letting it read it.
 
     Phase 7's artifact is ``{"status": "ok", "result": ..., "digest": ...,
-    "margin_modelled": false}``, and the importer parses exactly those keys and
-    re-derives the digest from the result it carries. So the assertion here is
-    not "the keys look right" but that the emitted document, byte for byte, still
-    imports -- a fourth key, a renamed one, or a digest taken over a different
-    serialisation comes back as a refusal.
+    "margin_modelled": false}``, and the importer parses the three it needs and
+    re-derives the digest from the result it carries. The key set is therefore
+    asserted *exactly* here and on its own: the importer reads the keys it wants
+    and no more, so a fourth key would import cleanly and "the payload is
+    unchanged" is not something the round trip can establish on its own. What the
+    round trip does establish -- and what the key set cannot -- is that a renamed
+    key or a digest taken over a different serialisation comes back as a
+    refusal.
 
     The digest is then compared across the two invocations, so the flag is proved
     to change the payload's *address* and not the result inside it: the same run
@@ -393,10 +465,12 @@ def test_without_the_flag_the_payload_is_the_phase7_artifact_unchanged(
     plain = _run(seeded, marked=False)
     marked = _run(seeded, marked=True)
 
+    # The exact key set, stated as an equality on both the set and the order:
+    # this is the only assertion here that a *fourth* key cannot slip past.
     assert sorted(plain) == ["digest", "margin_modelled", "result", "status"]
+    assert list(plain) == sorted(plain)
     assert plain["status"] == "ok"
     assert plain["margin_modelled"] is False
-    assert list(plain) == sorted(plain)
     emitted = BacktestResult.model_validate_json(json.dumps(plain["result"]))
     assert plain["digest"] == emitted.digest()
     assert emitted.trades
@@ -415,7 +489,7 @@ def test_without_the_flag_the_payload_is_the_phase7_artifact_unchanged(
     assert payload["already_present"] is False
 
 
-@pytest.mark.parametrize("omitted", ["trial-id", "attempt-id", "spec-sha256", "agent-run-id"])
+@pytest.mark.parametrize("omitted", sorted(_identity_options()))
 def test_a_bundle_missing_an_identity_option_is_refused_and_writes_nothing(
     seeded: Fixture, research_env: Path, tmp_path: Path, omitted: str
 ) -> None:
@@ -425,11 +499,22 @@ def test_a_bundle_missing_an_identity_option_is_refused_and_writes_nothing(
     a flag off can fix it by typing it, while exit 18 reads as "this run's equity
     cannot be valued" and sends them looking in the wrong place.
 
-    The two timestamp options are not parametrized here because Typer refuses a
-    malformed value before the command body runs at all; the six-way sweep that
-    reaches the guard itself is ``tests/unit/test_cli.py``'s, where it costs no
-    database. ``research_env`` starts empty and the ledger holds one event, so
-    "wrote nothing" is a statement about the filesystem rather than a claim.
+    It runs under ``research_env`` because that is what makes the exit code mean
+    anything. These tests set no DSN, so a *complete, valid* run also exits 2
+    with empty stdout -- the unit sweep that used to sit here passed with the
+    guard deleted for exactly that reason. Here a bare run of the same window
+    succeeds (``test_without_the_flag_the_payload_is_the_phase7_artifact_unchanged``),
+    so exit 2 is about the identity and nothing else.
+
+    Four of the six still pass with the guard deleted, and that is worth saying
+    rather than leaning on: a ``None`` reaches ``EvidenceBundle``, whose
+    ``ValidationError`` ``_execute`` maps to exit 2 as well. The second line of
+    defence is real, and it is why the *with-flag* direction was never the one
+    that needed a test -- the two timestamp options are the pair the guard alone
+    refuses, and they are the pair that goes red.
+
+    ``research_env`` starts empty and the ledger holds one event, so "wrote
+    nothing" is a statement about the filesystem rather than a claim.
     """
 
     _register(tmp_path)
@@ -437,9 +522,56 @@ def test_a_bundle_missing_an_identity_option_is_refused_and_writes_nothing(
     assert started.exit_code == cli.ExitCode.OK, started.stderr
 
     options = _args(seeded, start=seeded.first_bar, end=seeded.last_bar)
-    index = options.index(f"--{omitted}")
+    index = options.index(omitted)
     del options[index : index + 2]
     options.insert(2, "--mark-to-market")
+
+    result = runner.invoke(cli.app, options)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert result.stdout == ""
+    assert not list(research_env.rglob("*.json"))
+
+
+@pytest.mark.parametrize("supplied", sorted(_identity_options()))
+def test_one_identity_option_without_the_flag_is_refused_and_writes_nothing(
+    seeded: Fixture, research_env: Path, supplied: str
+) -> None:
+    """The direction a one-sided guard misses, one option at a time.
+
+    ``mark_to_market != all(...)`` catches a *complete* set without the flag and
+    lets a partial one through: ``--trial-id`` typed and ``--mark-to-market``
+    forgotten produces the Phase 7 artifact at exit 0, carrying no identity at
+    all, and the operator is told nothing. Unlike the direction above there is no
+    second line of defence here -- nothing downstream ever sees the option, so
+    every one of these six is red with the guard deleted, and the full set below
+    is red with it too. That is the whole reason this sweep lives.
+    """
+
+    options = _args(seeded, start=seeded.first_bar, end=seeded.last_bar, identity=False)
+    options += [supplied, _identity_options()[supplied]]
+
+    result = runner.invoke(cli.app, options)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert result.stdout == ""
+    assert not list(research_env.rglob("*.json"))
+
+
+def test_every_identity_option_without_the_flag_is_refused_and_writes_nothing(
+    seeded: Fixture, research_env: Path
+) -> None:
+    """All six without the flag: refused, and the payload is not produced.
+
+    The whole set is the case the original guard was written for, and it is the
+    one an operator most plausibly types by pasting a documented invocation.
+    Without the guard it exits 0 and hands back the Phase 7 artifact, so the
+    operator believes a bundle has been recorded when nothing was named.
+    """
+
+    options = _args(seeded, start=seeded.first_bar, end=seeded.last_bar, identity=False)
+    for name, value in _identity_options().items():
+        options += [name, value]
 
     result = runner.invoke(cli.app, options)
 

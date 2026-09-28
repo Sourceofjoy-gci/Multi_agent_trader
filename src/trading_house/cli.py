@@ -1245,20 +1245,28 @@ def backtest_run(
     seals, in place of the bare result. The six options beside it are what name
     the attempt a bundle belongs to, and all six are required with the flag: a
     bundle that cannot be traced to one declared candidate is not evidence of
-    anything in particular. They are all-or-nothing in both directions, so
-    identity passed without the flag is refused too rather than silently
-    ignored. The declared timestamps are provenance rather than evidence of
-    order -- the ledger's own ``recorded_at`` is the only registration-order
-    authority -- for the reason ``trial start`` gives.
+    anything in particular. The pair is all-or-nothing in both directions -- all
+    six with the flag, none of them without it -- so identity typed without the
+    flag is refused rather than silently dropped. The declared timestamps are
+    provenance rather than evidence of order -- the ledger's own ``recorded_at``
+    is the only registration-order authority -- for the reason ``trial start``
+    gives.
     """
 
     def operation() -> dict[str, JsonValue]:
         identity = (trial_id, attempt_id, spec_sha256, agent_run_id, occurred_at, registered_at)
-        if mark_to_market != all(value is not None for value in identity):
-            # An operator who left a flag off has made a mistake, not produced
-            # evidence that cannot be trusted, so this is configuration rather
-            # than an equity failure. A bundle is only sealable if it names the
-            # attempt it belongs to.
+        supplied = tuple(value is not None for value in identity)
+        if (mark_to_market and not all(supplied)) or (not mark_to_market and any(supplied)):
+            # The rule, and the whole rule: the flag and the six options are
+            # all-or-nothing in both directions. With the flag every one of them
+            # is required, because a bundle that cannot name its attempt is not
+            # evidence of anything. Without it none may be given, because a
+            # partial set is otherwise accepted and dropped -- an operator who
+            # typed ``--trial-id`` and forgot ``--mark-to-market`` is told
+            # nothing, and the Phase 7 artifact they get carries no identity at
+            # all. Configuration rather than an equity failure either way: an
+            # operator who left a flag off has made a mistake, not produced
+            # evidence that cannot be trusted.
             raise ConfigurationError()
         policy = _exit_policy(exit_policy)
         settings = _settings()

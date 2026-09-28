@@ -1247,66 +1247,14 @@ def test_backtest_refuses_an_invalid_exit_policy(tmp_path: Path) -> None:
 
 # --- backtest run --mark-to-market: the identity guard ------------------------
 #
-# Six options that are required with the flag and refused without it. A Typer
-# signature cannot express "required only when", so the rule lives in the command
-# body -- and a rule that lives in a body is a rule nothing else holds, which is
-# what the two tests below are for. Neither needs a bar store: the guard runs
-# before the run does, so an operator who mistypes the identity finds out
-# without a database having been consulted.
-
-_IDENTITY_OPTIONS = {
-    "--trial-id": "trial-1",
-    "--attempt-id": "attempt-1",
-    "--spec-sha256": "a" * 64,
-    "--agent-run-id": "run-1",
-    "--occurred-at": "2026-03-01T12:00:00",
-    "--registered-at": "2026-03-01T13:00:00",
-}
-
-
-def _marked_to_market_args(tmp_path: Path, **overrides: str) -> list[str]:
-    args = _backtest_args(tmp_path, **{**_IDENTITY_OPTIONS, **overrides})
-    # Inserted rather than passed through ``_backtest_args``, which spells every
-    # option as a name/value pair and a flag has no value.
-    return [*args[:2], "--mark-to-market", *args[2:]]
-
-
-@pytest.mark.parametrize("omitted", sorted(_IDENTITY_OPTIONS))
-def test_backtest_refuses_a_bundle_missing_one_identity_option(
-    tmp_path: Path, omitted: str
-) -> None:
-    """A bundle that cannot name its attempt is not evidence of a trial.
-
-    ``ConfigurationError`` rather than the equity code, and the distinction is
-    the point: an operator who left a flag off has made a mistake, while exit 18
-    is reserved for a run whose equity cannot honestly be valued. Reporting this
-    as an equity failure would train an operator to retry a run that never
-    started.
-    """
-
-    argv = _marked_to_market_args(tmp_path)
-    index = argv.index(omitted)
-    del argv[index : index + 2]
-
-    result = runner.invoke(cli.app, argv)
-
-    assert result.exit_code == cli.ExitCode.CONFIGURATION
-    assert result.stdout == ""
-
-
-def test_backtest_refuses_identity_passed_without_the_flag(tmp_path: Path) -> None:
-    """The other direction, which a one-sided guard would miss.
-
-    With the flag off the six options are unreachable, and a command that
-    ignored them would let an operator believe a bundle had been produced when
-    the payload still holds the Phase 7 artifact. The mismatch is refused
-    instead, so the pair is symmetric.
-    """
-
-    result = runner.invoke(cli.app, _backtest_args(tmp_path, **_IDENTITY_OPTIONS))
-
-    assert result.exit_code == cli.ExitCode.CONFIGURATION
-    assert result.stdout == ""
+# The guard is not tested here. Six options that are all-or-nothing with
+# ``--mark-to-market`` cannot be reached from a unit invocation: these tests set
+# no DSN, so a *complete and valid* run exits 2 with empty stdout too, and an
+# assertion of "exit 2, no stdout" cannot tell a refused operator mistake from a
+# missing database. A guard test that passes with the guard deleted is not
+# coverage. It lives in ``tests/integration/research/test_backtest_evidence.py``
+# instead, under ``research_env``, where a bare run of the same window succeeds
+# and a refusal is therefore discriminating.
 
 
 @pytest.mark.usefixtures("_dsn")
