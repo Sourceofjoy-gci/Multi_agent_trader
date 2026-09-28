@@ -298,6 +298,15 @@ Two rules, both fail-closed:
   carrying a mark-to-market series would claim two different returns for one run, and a
   reader would have no way to tell which one a downstream number used.
 
+Two more, and they are the same two `BacktestOutcome` asserts on the same pair
+(`research/backtest/mark.py`): the sealed series and the carried result must share one
+`firm_equity`, and the series must hold exactly one observation per `bars_seen`. A series
+that satisfies every rule about itself can still be another run's, or a truncated one, and
+the field exists to be auditable — so the check lives on the bundle too, which is what a
+later reader is handed rather than a command's memory. Both refusals reuse `mark.py`'s
+wording, so a disagreement reads the same whether it was caught at construction or at
+`EvidenceStore.read`.
+
 The field is defaulted, not required, and that is deliberate. `CanonicalModel` sets
 `extra="forbid"`, so a **required** field would make every v1 document already sealed in an
 operator's evidence store unreadable, and `research trial verify` would start failing on a
@@ -409,7 +418,9 @@ the Phase 7 artifact contract and the legacy importer are untouched.
 `return_series_basis` is set to `MARK_TO_MARKET`, which is what finally gives
 that declared enum member a producer. The ledger needs no new event type:
 `EvidenceSealedPayload` already carries `evidence_sha256`, and the basis lives
-inside the bundle, so `research trial record` and `verify` are unchanged.
+inside the bundle, so `verify` is unchanged. `record` is unchanged too except in
+what it reads: it now accepts two document shapes rather than one, for the reason
+given below.
 
 The operator flow is 8A's, unchanged in shape:
 

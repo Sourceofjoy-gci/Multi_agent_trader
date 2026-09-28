@@ -42,7 +42,11 @@ What is asserted, in the order a reader should meet it:
    is sealed in the bundle -- the daily reduction is a function of it, and a
    reduction whose input the store does not hold cannot be re-derived;
 5. the basis and the series cannot disagree: a ``MARK_TO_MARKET`` bundle with no
-   series is refused, and so is any other basis carrying one;
+   series is refused, and so is any other basis carrying one; and the sealed
+   series must be the carried result's own — a firm equity or an observation
+   count that disagrees with ``result`` is refused in ``BacktestOutcome``'s
+   words, so the same disagreement is reported the same way whether it was caught
+   at construction or at read time;
 6. a flat run reconciles its final realized total to ``net_pnl``, and a run that
    ends holding a position is *reported* by ``backtest run`` rather than refused;
 7. ``MARK_TO_MARKET`` -- the enum member 8A declared with no producer -- is now
@@ -752,6 +756,59 @@ def test_the_basis_and_the_sealed_series_cannot_disagree(
     # accident of the fixtures.
     assert EvidenceBundle.model_validate_json(marked.model_dump_json()) == marked
     assert EvidenceBundle.model_validate_json(realized.model_dump_json()) == realized
+
+
+def test_a_sealed_series_must_share_the_result_it_reduces_one_firm_equity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A self-consistent series from the wrong firm equity is still the wrong run.
+
+    The series is sealed so a reader can audit the reduction, and an audit of
+    somebody else's equity path audits nothing. Rebasing the series *and* every
+    observation by the same amount keeps each point reconciling against the firm
+    equity beside it, so ``EquitySeries`` accepts the result and the bundle's
+    rule is the only thing left that can refuse it. The words are
+    ``BacktestOutcome``'s own, so the disagreement reads the same whether it was
+    caught where the series was produced or where it is read back.
+    """
+
+    marked = _bundle_of(_run_command(monkeypatch, tmp_path, marked=True))
+    assert marked.mark_to_market is not None, "the case below is vacuous without a series"
+
+    rebased = json.loads(marked.model_dump_json())
+    rebased["mark_to_market"]["firm_equity"] = str(
+        Decimal(rebased["mark_to_market"]["firm_equity"]) + 1
+    )
+    for point in rebased["mark_to_market"]["observations"]:
+        point["equity"] = str(Decimal(point["equity"]) + 1)
+
+    with pytest.raises(ValidationError, match="the series and the result must share one firm"):
+        EvidenceBundle.model_validate_json(json.dumps(rebased))
+
+
+def test_a_sealed_series_must_hold_one_observation_per_processed_bar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A series that stops early is a series of a shorter run, not of this one.
+
+    The reduction beside it still reconciles -- ``daily_returns`` is not what
+    counts bars, ``result.bars_seen`` is, and the two are checked here rather
+    than inferred. Truncation is the shape a subsampling or partial-write bug
+    takes, and it is the reason the count is compared against the result's own
+    count rather than against a constant.
+    """
+
+    marked = _bundle_of(_run_command(monkeypatch, tmp_path, marked=True))
+    assert marked.mark_to_market is not None, "the case below is vacuous without a series"
+    assert len(marked.mark_to_market.observations) > 1, (
+        "a one-observation series could not disagree with a count above one"
+    )
+
+    truncated = json.loads(marked.model_dump_json())
+    truncated["mark_to_market"]["observations"].pop()
+
+    with pytest.raises(ValidationError, match="one observation per processed bar"):
+        EvidenceBundle.model_validate_json(json.dumps(truncated))
 
 
 def test_without_the_flag_the_payload_is_the_phase7_artifact_and_names_no_bundle(

@@ -595,6 +595,57 @@ def test_a_document_that_is_neither_shape_is_refused_and_writes_nothing(
     }
 
 
+def test_evidence_that_is_not_json_at_all_is_refused_and_writes_nothing(
+    research_env: Path, tmp_path: Path
+) -> None:
+    """The branch before the shape check, and the reason it is not left to escape.
+
+    ``json.JSONDecodeError`` is a ``ValueError``, not a
+    ``pydantic.ValidationError``, so nothing in the validation chain above it
+    would catch it -- without the handler in ``_evidence_bundle`` it would reach
+    ``_execute``'s catch-all and answer an operator who truncated a redirect with
+    a correlation id instead of the exit and message every other wrong document
+    gets. The neighbouring test covers a well-formed document of the wrong shape,
+    which fails later and cannot reach this line.
+
+    Nothing is written and nothing is appended, and the ledger is asked rather
+    than assumed: the bundle is read before the ledger is resolved, so a refusal
+    here never reached the database at all.
+    """
+
+    _register(tmp_path)
+    started = _start()
+    assert started.exit_code == cli.ExitCode.OK, started.stderr
+
+    malformed = tmp_path / "truncated.json"
+    malformed.write_text('{"bundle": ', encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "record",
+            "--trial-id",
+            TRIAL_ID,
+            "--attempt-id",
+            ATTEMPT_ID,
+            "--evidence",
+            str(malformed),
+        ],
+    )
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert not list(research_env.rglob("*.json"))
+    verified = runner.invoke(cli.app, ["research", "trial", "verify"])
+    assert verified.exit_code == cli.ExitCode.OK, verified.stderr
+    assert json.loads(verified.stdout) == {
+        "status": "ok",
+        "valid": True,
+        "checked_events": 2,
+        "reason": None,
+    }
+
+
 def test_without_the_flag_the_payload_is_the_phase7_artifact_unchanged(
     seeded: Fixture, research_env: Path, tmp_path: Path
 ) -> None:

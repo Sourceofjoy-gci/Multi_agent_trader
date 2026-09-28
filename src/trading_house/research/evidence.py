@@ -217,6 +217,29 @@ class EvidenceBundle(CanonicalModel):
             raise ValueError("only a mark-to-market bundle may carry a per-bar equity series")
         return self
 
+    @model_validator(mode="after")
+    def the_sealed_series_is_the_result_it_carries(self) -> Self:
+        """The two equalities ``BacktestOutcome`` asserts, on the same pair of objects.
+
+        A bundle may hold a series that satisfies every rule about itself and
+        still be describing a different run: another run's series, or a truncated
+        one, passes the coupling rule above, and the reduction of an equity path
+        this result did not produce is still a reduction. The pair is checked here
+        rather than left to ``BacktestOutcome`` because the bundle outlives it --
+        the outcome is a command's memory and this is what a later reader is
+        handed. Both refusals are worded as ``research/backtest/mark.py`` words
+        them, so a disagreement is reported the same way whether it was caught at
+        construction or at read time.
+        """
+
+        if self.mark_to_market is None:
+            return self
+        if self.mark_to_market.firm_equity != self.result.firm_equity:
+            raise ValueError("the series and the result must share one firm equity")
+        if len(self.mark_to_market.observations) != self.result.bars_seen:
+            raise ValueError("the series must hold one observation per processed bar")
+        return self
+
 
 class StoredEvidence(CanonicalModel):
     """What a write produced: the digest, the root-relative path, the size.

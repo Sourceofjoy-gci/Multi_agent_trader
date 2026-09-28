@@ -159,7 +159,7 @@ def mark_to_market_bundle(
             ),
         ),
         return_series_basis=ReturnSeriesBasis.MARK_TO_MARKET,
-        # Sealed whole, not only reduced. ``daily_returns`` below is a function of
+        # Sealed whole, not only reduced. ``daily_returns`` above is a function of
         # this series, and a reduction whose input the evidence store does not
         # hold cannot be re-derived, re-audited, or checked against a later
         # ``BacktestOutcome``.
