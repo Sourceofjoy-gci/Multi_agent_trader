@@ -214,21 +214,23 @@ def _register(tmp_path: Path, seeded: Fixture) -> Path:
     return path
 
 
-_COST_OPTIONS = (
+_NOT_ON_THE_ORCHESTRATOR = (
+    # The six cost terms, plus the window and the strategy: eight of
+    # ``backtest run``'s options that ``scenarios`` deliberately does not take,
+    # because ``scenario_report`` compares every one of them against the protocol
+    # and a second copy typed on the command line could only agree or refuse the
+    # whole grid. Subtracted rather than listed because ``_options`` is read out of
+    # ``_args`` precisely so the two commands cannot drift, and a hand-written
+    # replacement is exactly the second copy this file exists to avoid.
     "--commission-per-lot-per-side",
     "--slippage-points-per-side",
     "--swap-long-points-per-day",
     "--swap-short-points-per-day",
     "--triple-swap-weekday",
+    "--strategy",
+    "--start",
+    "--end",
 )
-"""The five cost options ``backtest run`` takes and ``scenarios`` deliberately does not.
-
-They are subtracted rather than listed, because ``_options`` is read out of
-``_args`` precisely so the two commands cannot drift, and a hand-written
-replacement list is exactly the second copy this file exists to avoid. Every term
-is a field of ``CostModel`` and so is a field of the protocol's
-``costs.baseline``, which the orchestrator reads and multiplies per level.
-"""
 
 
 def _scenario_args(
@@ -241,11 +243,12 @@ def _scenario_args(
 ) -> list[str]:
     """One ``research trial scenarios`` invocation, in the shape an operator types it.
 
-    The shared options come from ``_options`` minus the five cost ones, because
-    this command takes no cost at all: the grid and every term in it are read
-    from ``--protocol``. Passing them would be refused as unknown options, which
-    is the point -- there is no second copy of the costs to disagree with the
-    registration and no way to seal a grid the report would then refuse.
+    The shared options come from ``_options`` minus the eight ``scenarios`` does
+    not take, because that command reads its costs, its window and its strategy
+    from ``--protocol``. Passing any of them would be refused as unknown options,
+    which is the point: there is no second copy of a declared value to disagree
+    with the registration, and therefore no way to seal a grid the report would
+    then refuse.
 
     Nothing here is optional either: the command takes no ``--mark-to-market``,
     no ``--stress-multiplier`` and no identity trio, because the grid is the
@@ -253,7 +256,11 @@ def _scenario_args(
     """
 
     options = (
-        {key: value for key, value in _options(seeded).items() if key not in _COST_OPTIONS}
+        {
+            key: value
+            for key, value in _options(seeded).items()
+            if key not in _NOT_ON_THE_ORCHESTRATOR
+        }
         | {
             "--protocol": str(protocol_path),
             "--trial-id": trial_id,

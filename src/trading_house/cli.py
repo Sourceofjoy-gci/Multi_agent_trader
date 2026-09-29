@@ -1825,7 +1825,10 @@ def research_trial_scenarios(
         Path,
         typer.Option(
             "--protocol",
-            help="Frozen TrialProtocol JSON. The grid and every cost in it come from here.",
+            help=(
+                "Frozen TrialProtocol JSON. The grid, its costs, its window and its "
+                "strategy all come from here."
+            ),
         ),
     ],
     trial_id: Annotated[str, typer.Option("--trial-id")],
@@ -1837,10 +1840,7 @@ def research_trial_scenarios(
     occurred_at: Annotated[datetime, typer.Option("--occurred-at")],
     registered_at: Annotated[datetime, typer.Option("--registered-at")],
     agent_run_id: Annotated[str, typer.Option("--agent-run-id")],
-    strategy: Annotated[str, typer.Option("--strategy")],
     exit_policy: Annotated[ExitPolicyName, typer.Option("--exit-policy")],
-    start: Annotated[datetime, typer.Option("--start")],
-    end: Annotated[datetime, typer.Option("--end")],
     firm_equity: Annotated[str, typer.Option("--firm-equity")],
     contract: Annotated[Path, typer.Option("--contract")],
     atr_period: Annotated[int, typer.Option("--atr-period", min=1)],
@@ -1854,40 +1854,43 @@ def research_trial_scenarios(
     candidate examined at three cost levels is three attempts and **one**
     selection, and the selection count is what DSR divides by.
 
-    The grid and every cost in it come from ``--protocol`` and from nowhere
-    else. There is deliberately no ``--commission-per-lot-per-side`` here
-    although ``backtest run`` has one: the protocol already preregistered
-    ``costs.baseline``, ``scenario-report`` checks each level against that same
-    baseline, and a second copy typed on the command line could only ever agree
-    with it or refuse the whole grid. An operator who types the six terms twice
-    and gets one wrong is told their sealed scenarios disagree with a
-    registration they cannot amend. Deriving them costs one multiplication per
-    level and removes the only way a *second copy of the declaration* could
-    disagree with the first.
+    The grid, its costs, its window and its strategy come from ``--protocol``
+    and from nowhere else. There is deliberately no ``--commission-per-lot-per-side``
+    here although ``backtest run`` has one, and no ``--start``/``--end``
+    although that has them too: the protocol preregistered ``costs.baseline``,
+    ``data.start``/``data.end`` and ``strategy_id``, ``scenario-report`` checks
+    every level against those same declarations, and a second copy typed on the
+    command line could only ever agree with them or refuse the whole grid.
 
-    It does not make the grid unconditionally reportable, and the difference is
-    worth being exact about. An ``--protocol`` file edited after registration
-    still can. This command reads the file's multipliers and money terms, and for
-    each level appends an ``EXECUTION_STARTED``, seals a bundle, and appends the
-    ``RESULT_RECORDED`` and ``EVIDENCE_SEALED`` that reference it -- so it
-    writes three documents and nine events before ``scenario-report`` re-derives
-    its grid from the sealed registration and refuses, at 19. On a chain that
-    already held the registration that is ten rows in total. A protocol that is
-    not the one the chain holds produces a report that says so, which is the
-    fail-closed answer and not a silent one -- but it is a refusal at the end of
-    nine writes, not a preflight before them.
+    The rule behind that is one sentence: **this command takes no option for any
+    value the report compares against the protocol.** The remaining options are
+    ones the registration does not state -- ``--exit-policy``, ``--firm-equity``,
+    ``--atr-period``, ``--spread-window``, ``--defective-bar-tolerance``,
+    ``--contract`` -- so a copy of one of those cannot disagree with anything.
 
-    The levels are read here from the file the operator names and, in
-    ``scenario-report``, from the ``PREREGISTERED`` event in the chain. The two
-    must agree, and the report re-derives its own from the sealed registration,
-    so a protocol file edited after the fact cannot widen what will be accepted.
+    It matters more than tidiness, because the mistake is a one-way door. An
+    operator who registered over a year and typed the last week gets three sealed
+    documents and nine appended events before the report refuses at 19; retrying
+    with the right window reuses the same attempt prefix, so the start is
+    recognised as a no-op, the *bundle* now differs, and a second document lands
+    at that level -- which completeness then refuses permanently. The remedy would
+    be surgery on the evidence root and the chain, which the premise forbids. Not
+    having the option is the only version of this that has no such state to reach.
 
-    Every level shares one specification digest, computed from the protocol's
-    own candidate rather than typed three times. Three hand-typed digests is
-    exactly how the machine that verified 8B1 and 8B2a ended up with
-    ``trial-1`` counting two effective specifications: the ledger faithfully
-    recorded what it was told, and nothing checked it. Here there is nothing to
-    mistype.
+    What this cannot prevent is a ``--protocol`` **file** edited after
+    registration, which is the same refusal reached by a different route: the
+    command reads the file, and ``scenario-report`` re-derives its own grid from
+    the sealed registration and refuses. A registration cannot be amended, so a
+    grid that was never declared has to be preregistered as a new one and run
+    against its own candidate.
+
+    Every level shares one specification digest, computed from the protocol's own
+    candidate rather than typed three times. Three hand-typed digests is exactly
+    how the machine that verified 8B1 and 8B2a ended up with ``trial-1`` counting
+    two effective specifications: the ledger faithfully recorded what it was told,
+    and nothing checked it. Here there is nothing to mistype -- and the report
+    now compares each level's declared digest against the registration, so the
+    drift is caught even for a grid sealed entirely outside this command.
     """
 
     def operation() -> dict[str, JsonValue]:
@@ -1913,19 +1916,17 @@ def research_trial_scenarios(
                 execution_started_event(trial_id, attempt_id, spec_sha256, _as_utc(started_at))
             )
             request = _backtest_request(
-                strategy=strategy,
+                # The strategy the registration names, the window it declared, and
+                # the baseline with this level's multiplier on it -- three things
+                # the report checks against that same protocol, so all three are
+                # read from it rather than typed here. What is left of
+                # ``_backtest_request``'s arguments is what a protocol does not
+                # state and therefore cannot contradict.
+                strategy=parsed.strategy_id,
                 exit_policy=exit_policy,
-                start=start,
-                end=end,
+                start=parsed.data.start,
+                end=parsed.data.end,
                 firm_equity=_decimal(firm_equity),
-                # The baseline with this level's multiplier on it, and nothing
-                # else. ``scenario_report``'s baseline and scenario checks
-                # compare each sealed cost model against ``costs.baseline`` the
-                # same way, so this is the one expression both sides share and
-                # there is nothing for an operator to mistype. Every term of
-                # ``CostModel`` -- ``triple_swap_weekday`` included -- comes from
-                # the registration, which is why there is no cost option on this
-                # command at all.
                 cost_model=parsed.costs.baseline.model_copy(
                     update={"stress_multiplier": multiplier}
                 ),
@@ -1977,9 +1978,9 @@ def research_trial_scenario_report(
     The grid is read from the ``PREREGISTERED`` event in the chain, not from a
     file, so what is checked is what was sealed before any result existed.
 
-    Reports; does not judge. There is no verdict here and no pass/fail line: what
-    to do about a candidate's degradation is 8D's question, and 8D fixes its own
-    limits before it looks at any of these numbers.
+    Reports; does not judge. Nothing here says what to do with a candidate's
+    degradation: that is 8D's question, and 8D fixes its own limits before it
+    looks at any of these numbers.
     """
 
     def operation() -> dict[str, JsonValue]:

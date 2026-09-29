@@ -73,19 +73,32 @@ is derived from, and the store's whole value is that a document is its own evide
 ```
 research trial scenarios --protocol P --trial-id T --attempt-prefix A
   --started-at S --agent-run-id R --occurred-at O --registered-at G
-  <the backtest run options, minus --stress-multiplier>
+  --exit-policy E --firm-equity F --contract C --atr-period N --spread-window W
+  [--defective-bar-tolerance D]
 ```
+
+> **Amended during implementation.** This originally read *the backtest run options, minus
+> `--stress-multiplier`*, and took all six cost options plus `--start`/`--end`/`--strategy`. It
+> takes **none of those eight**, on the rule that **the command takes no option for any value the
+> report compares against the protocol.** The protocol preregistered `costs.baseline`,
+> `data.start`/`data.end` and `strategy_id`; the report checks every level against those same
+> declarations; so a second copy typed on the command line could only *agree* or *refuse the whole
+> grid*, and a registration cannot be amended. That refusal is a one-way door — a retry after
+> sealing a wrong window appends a second document at that level, and completeness then refuses the
+> candidate permanently — so not having the option is the only version with no such state to reach.
+> The remaining options are values the registration does not state, so a copy cannot contradict it.
 
 It derives its grid from `P` — `{1.0} ∪ protocol.costs.stress_multipliers` — and for each level
 `m` in ascending order:
 
 1. `attempt_id = f"{A}-{m}"`, and `start`s an attempt at that id with `--started-at S`;
-2. simulates with `stress_multiplier = m`;
+2. simulates with `stress_multiplier = m`, and with the strategy, window and costs `P` declares;
 3. seals the resulting bundle under that attempt.
 
 The three are then reported. `--attempt-prefix` plus the multiplier makes the attempt ids
 deterministic, so re-running the same prefix is idempotent, and the three ids are visibly one
-candidate's.
+candidate's. (The baseline renders as `1`, not `1.0` — `str(Decimal(1))` is `"1"` — so the ids are
+`{A}-1`, `{A}-1.5`, `{A}-2`.)
 
 `--started-at`, `--occurred-at` and `--registered-at` are stated **once** for all three: the three
 runs are one operator action, and a per-level clock would make the grid harder to read for no gain.
@@ -93,19 +106,21 @@ runs are one operator action, and a per-level clock would make the grid harder t
 ### 3.3 `research trial scenario-report --trial-id T` — the standalone read
 
 Reads every sealed bundle for `T`, groups them by the multiplier each one's
-`result.cost_model.stress_multiplier` names, runs the four checks of §5, and reports. A candidate
+`result.cost_model.stress_multiplier` names, runs the six checks of §5, and reports. A candidate
 whose runs were produced by hand, or by a future caller, is checked identically.
 
 ### 3.4 One simulation, two signatures
 
 `src/trading_house/ops/backtest.py` gains a `simulate(...)` carrying the body of `backtest run`'s
-`operation()`, with the stress multiplier as a parameter. `backtest run` passes its own option; the
-orchestrator passes each grid level. `src/trading_house/ops/scenarios.py` gains the grid derivation,
-the four checks, and the report.
+`operation()`. `backtest run` passes its own options; the orchestrator passes each grid level.
+`src/trading_house/ops/scenarios.py` gains the grid derivation, the six checks, and the report.
 
-Sealing is factored the same way: `ops/ledger.py` gains `seal_bundle(bundle, *, trial_id, attempt_id,
-ledger)`, and `research trial record` uses it after loading a bundle from disk while the orchestrator
-uses it on the bundle it just built. One seal path, two callers.
+Sealing is factored the same way: `ops/ledger.py` gains
+`seal_bundle(bundle, *, ledger, store) -> str`, returning the evidence digest, and
+`research trial record` uses it after loading a bundle from disk while the orchestrator uses it on
+the bundle it just built. One seal path, two callers. (The original sketch took `trial_id` and
+`attempt_id`; the bundle already carries both, so passing them again would have been a second
+source for two values that are not the caller's to choose.)
 
 ## 4. The grid
 
@@ -117,27 +132,57 @@ and a report that ignored it would be checking its author's memory rather than t
 The report also states the grid it *expected*, before it states what it found, so a reader sees the
 preregistration and the outcome in one place.
 
-## 5. The four fail-closed evidence checks
+## 5. The fail-closed evidence checks
 
-In order, so an incomplete candidate is refused for the first reason that applies.
+In order, so an incomplete candidate is refused for the first reason that applies. **Six**, not the
+four this section originally listed; the two added during implementation are marked. A seventh
+refusal, on the caller's own inputs rather than the evidence, runs before all of them.
 
-**1 — Completeness.** Every declared multiplier is present exactly once. A baseline-only candidate is
-refused: the point of a preregistered grid is that running less of it is a different claim.
+**0 — Reportable.** A blank `trial_id`, a sealed scenario carrying no digest to name it by, or a
+bundle already found naming another candidate. Without it those two inputs would land in
+`NonEmptyStr` fields and a `strict` model would answer with a `ValidationError`, which echoes the
+offending value and is not the class the CLI maps to exit 19.
 
-**2 — Baseline fidelity.** The `1.0` scenario's `cost_model` equals the protocol's
-`CostSpec.baseline` exactly — every field, not just the stressed ones. A quietly altered baseline is
-refused.
+**1 — Completeness.** Every declared multiplier is present exactly once, and nothing undeclared is
+present. A baseline-only candidate is refused: the point of a preregistered grid is that running less
+of it is a different claim. A level sealed *twice* is refused too, and has no remedy — the second
+document is at that level for good, and only surgery on the evidence root would clear it.
 
-**3 — Scenario fidelity.** Each stressed scenario's `cost_model` equals the baseline with **only**
+**2 — Attribution.** Every scenario carries a `COMPLETE` `CostSummary` and a `cost_attribution`.
+*Added during implementation:* `spread_cost` and `slippage_cost` are `None` on a summary that is not
+`COMPLETE`, and `market_pnl` exists only on the per-trade split, so a report that cannot separate the
+two cannot name four costs or a market move — and reading a `None` as a zero would turn an unmeasured
+term into a flattering one.
+
+**3 — Baseline fidelity.** The `1.0` scenario's `cost_model` equals the protocol's
+`CostSpec.baseline` **at level 1** — every field, not just the stressed ones, with the multiplier
+normalised. A quietly altered baseline is refused. The normalisation is because `CostSpec` pins
+`stress_multipliers` to exactly `{1.5, 2}` and says *nothing* about the baseline's own multiplier, so
+`baseline.stress_multiplier = 1.5` is a registration the models accept; compared verbatim, such a
+registration would be permanently unreportable, and a registration cannot be amended. The cost is a
+diagnostic gap, not a correctness one: the odd multiplier is neither refused nor mentioned.
+
+**4 — Scenario fidelity.** Each stressed scenario's `cost_model` equals the baseline with **only**
 `stress_multiplier` replaced. Commission, slippage, both swap rates, the triple-swap weekday and the
 whole of every other field must be identical, because a "1.5x" run whose commission also changed is
-not the declared scenario and would flatter or libel it arbitrarily.
+not the declared scenario and would flatter or libel it arbitrarily. Written as a
+copy-then-replace rather than a field list, so a cost term added to the model later is compared free.
 
-**4 — Identity.** All three are one candidate: the same `trial_id`, the same `spec_sha256`, the same
-`strategy_id` and `strategy_version`, the same `start` and `end`, the same `bars_seen`, and the same
-ordered `proposal_id`s. This is the check that catches a substituted run.
+**5 — Window fidelity.** Every scenario's `result.start`/`end` equals `protocol.data.start`/`end`.
+*Added during implementation:* three runs sharing one window says they are one replay, while each
+matching the *protocol* says it is the replay that was preregistered — the same distinction check 6
+makes about the candidate.
 
-Check 4's last clause is where 8B2a's documented limit earns its place. The **prices** must differ
+**6 — Identity.** All three are one candidate: the same `bars_seen`, the same ordered `proposal_id`s,
+every bundle naming the reported `trial_id`, and `strategy_id`, `strategy_version` **and
+`spec_sha256`** matching the *protocol's* rather than merely each other's. Three runs agreeing with
+each other is not what makes them this candidate's runs. The digest is cross-checkable rather than
+merely comparable: the report holds the sealed protocol, `canonical_sha256` over a `TrialSpec` is
+deterministic, and the orchestrator computes the same expression — so the check is arithmetic over
+two sealed documents, not a question of anybody's honesty. `attempt_id` is deliberately *not*
+pinned: it names an attempt rather than a candidate.
+
+Check 6's last clause is where 8B2a's documented limit earns its place. The **prices** must differ
 across multipliers — that is the stress, and 8B2a measured 404.4 → 606.6 of spread on the same twelve
 trades. The **sequence** must not. A report that pinned either price or sequence as "must be equal"
 would be wrong in one direction or the other, so it pins the sequence and says why.
@@ -204,7 +249,7 @@ hand-run grid, as this slice's own verification shows, does not.
 - **Orchestrating three runs does not establish that the trade sequence is cost-invariant.** It is on
   today's engine, and 8B2a measured why: triggers test raw bar prices, stops come from the risk
   engine off the entry, and the time deadline is event-time based. 8B3's compounding path makes sizing
-  cost-sensitive. Check 4 will catch a sequence that moves; it must not be read as claiming one
+  cost-sensitive. Check 6 will catch a sequence that moves; it must not be read as claiming one
   cannot.
 - **A report is not a verdict.** `net_pnl` going from +350.48 to −20.22 is a fact about two runs. Whether
   that refutes a candidate is 8D's question, with thresholds fixed in advance.
@@ -218,12 +263,15 @@ hand-run grid, as this slice's own verification shows, does not.
 `CostSpec` before the report sees it, and a report given a candidate whose bundles are missing a
 declared level refuses on completeness. Both are the same test seen from two sides.
 
-**Each of the four checks has a failing case**, and each is proved by removing the check rather than by
-inspecting it. Check 3 in particular: a "1.5x" scenario whose commission also changed must be refused,
+**Each of the six checks has a failing case**, and each is proved by removing the check rather than by
+inspecting it — the unit suite replaces each `_refuse_*` with a no-op and watches the named test
+fail. Check 4 in particular: a "1.5x" scenario whose commission also changed must be refused,
 because that is the substitution that would flatter a candidate arbitrarily.
 
 **The counters.** A test that three `start`s on one trial yield 3/1/1, next to the existing Phase 7
-assertion of 3/3/3 for three candidates. If the two ever converge, one of them is wrong.
+assertion of 3/3/3 for three candidates. If the two ever converge, one of them is wrong. (A *first*
+grid for a never-started trial moves all three, +3/1/1, because that is the trial's first appearance
+in the chain; +3/0/0 is the property of a candidate already in the denominator.)
 
 **The degradation is the difference in `net_pnl`**, computed from two sealed bundles and never
 recomputed from either's inputs. A test that the reported 1.5x degradation equals the two bundles'
@@ -233,7 +281,7 @@ recomputed from either's inputs. A test that the reported 1.5x degradation equal
 signed, so a carry-earning candidate cannot be summarised into a number that hides the credit.
 
 **Identity holds across the real grid.** A test that the three orchestrator-produced bundles pass all
-four checks, and that a bundle from a *different* trial injected into the set is refused by check 4.
+six checks, and that a bundle from a *different* trial injected into the set is refused by check 6.
 
 **The orchestrator and `backtest run` agree.** The orchestrator's `1.0` scenario and a hand-run
 `backtest run --stress-multiplier 1` over identical inputs must produce the same
@@ -262,7 +310,7 @@ commands ever grew separate simulation bodies.
 
 **8B3** — umbrella §6.5's compounding rerun through the real risk engine, and the capacity
 diagnostics with an explicit unavailable state. The compounding path makes sizing cost-sensitive, so
-it is also the first thing that could move a trade sequence across multipliers, which check 4 is
+it is also the first thing that could move a trade sequence across multipliers, which check 6 is
 already watching for.
 
 Then **8C** (statistical validation) and **8D** (promotion and operator workflow), each a separate

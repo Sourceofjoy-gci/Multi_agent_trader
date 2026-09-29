@@ -1347,29 +1347,40 @@ uv run trading-house research trial scenarios \
   --protocol protocol.json --trial-id trial-1 --attempt-prefix grid \
   --started-at 2026-03-01T11:00:00 --occurred-at 2026-03-01T12:00:00 \
   --registered-at 2026-03-01T13:00:00 --agent-run-id run-2026-03-01 \
-  --strategy session_momentum_eurusd --exit-policy none \
-  --start 2026-09-21T00:00:00 --end 2026-09-24T00:00:00 \
-  --firm-equity 100000 --contract contract.json \
+  --exit-policy none --firm-equity 100000 --contract contract.json \
   --atr-period 2 --spread-window 10 --defective-bar-tolerance 0
 
 # Re-read the same report later, from the chain and the evidence store alone.
 uv run trading-house research trial scenario-report --trial-id trial-1
 ```
 
-**`scenarios` takes no cost options, and `backtest run` takes six.** That
-difference is the single most confusing thing about the pair for an operator who
-knows `backtest run`, so it is worth being exact. The protocol already
-preregistered `costs.baseline`, `scenario-report` checks every level against that
-same baseline, and a second copy typed on the command line could only ever *agree*
-with the registration or *refuse the whole grid* — and a registration cannot be
-amended after the fact, so an operator who types the six terms twice and gets one
-wrong is told their sealed scenarios disagree with something they cannot fix.
-Deriving them instead costs one multiplication per level and removes the only way
-a *second copy of the declaration* could disagree with the first. `backtest run`
-keeps its six because it is a Phase 7 command that can run a window **nobody
-preregistered** — the three Phase 7 arms are exactly that, and they are still in
-this repository as legacy evidence — so it has no registration to read a
-declaration from.
+**`scenarios` takes no cost, window or strategy options, and `backtest run` takes
+all of them.** That difference is the single most confusing thing about the pair
+for an operator who knows `backtest run`, so it is worth being exact. The rule is
+one sentence: **`scenarios` takes no option for any value the report compares
+against the protocol.** The protocol preregistered `costs.baseline`,
+`data.start`/`data.end` and `strategy_id`; `scenario-report` checks every level
+against those same declarations; so a second copy typed on the command line could
+only ever *agree* with the registration or *refuse the whole grid* — and a
+registration cannot be amended after the fact, so an operator who types the same
+values twice and gets one wrong is told their sealed scenarios disagree with
+something they cannot fix. The remaining options (`--exit-policy`,
+`--firm-equity`, `--atr-period`, `--spread-window`,
+`--defective-bar-tolerance`, `--contract`) are ones the registration does not
+state, so a copy of one of those cannot disagree with anything.
+
+It matters more than tidiness, because that refusal is a **one-way door**. An
+operator who registered over a year and typed the last week gets three sealed
+documents and nine appended events before the report refuses at exit 19; retrying
+with the right window reuses the same `--attempt-prefix`, so the start is
+recognised as a no-op, the *bundle* now differs, and a second document lands at
+that level — which completeness then refuses permanently. Not having the option
+is the only version of this command with no such state to reach.
+
+`backtest run` keeps all of them because it is a Phase 7 command that can run a
+window **nobody preregistered** — the three Phase 7 arms are exactly that, and
+they are still in this repository as legacy evidence — so it has no registration
+to read a declaration from.
 
 The three timestamps are options rather than clock reads, and that is what makes
 the command re-runnable: every event id the orchestrator appends is derived from
@@ -1424,7 +1435,7 @@ happens to break:
 | **Baseline fidelity** | The 1.0x scenario's `CostModel` is not the protocol's `costs.baseline` — compared field for field, so a drifted `triple_swap_weekday` is caught as well as a drifted rate. Compared against the baseline *at level 1*, so a registration whose baseline is itself stressed is still reportable rather than permanently refused. |
 | **Scenario fidelity** | A stressed scenario differs from the baseline in something other than `stress_multiplier`. Written as a copy-then-replace rather than a list of the fields that must match, so a cost term added to the model later is compared for free. |
 | **Window fidelity** | A scenario's `result.start`/`end` is not the window `protocol.data` declared. Separate from the identity check below: three runs sharing one window says they are one replay, and each matching the *protocol* says it is the replay that was preregistered. |
-| **Identity** | The runs disagree about `spec_sha256`, `bars_seen` or the ordered `proposal_id`s; a bundle names a `trial_id` other than the one reported; or `strategy_id`/`strategy_version` differ from the **protocol's**, not merely from each other's. Three runs agreeing with each other is not what makes them this candidate's runs. |
+| **Identity** | The runs disagree about `bars_seen` or the ordered `proposal_id`s; a bundle names a `trial_id` other than the one reported; or `strategy_id`, `strategy_version` or `spec_sha256` differ from the **protocol's**, not merely from each other's. Three runs agreeing with each other is not what makes them this candidate's runs. `spec_sha256` is cross-checkable rather than merely comparable: the report holds the sealed protocol, `canonical_sha256` over a `TrialSpec` is deterministic, and the orchestrator computes the same expression — so a grid sealed entirely outside `research trial scenarios`, with one level's digest off the wrong candidate, is refused here too. |
 
 Check 6 pins the trade **sequence** and says nothing about prices, because the
 prices must differ: scaling the spread is the stress, and 8B2a sealed it as a
@@ -1439,13 +1450,17 @@ out of that level's own sealed bundle — `market_pnl`, `spread_cost`,
 `slippage_cost`, `commission`, `swap`, `net_pnl`, the trade count, the attempt
 id, and the two digests (the document's address and the result's own) — and then
 one **degradation** row per stressed level: the difference from the baseline, in
-`net_pnl` and in each of the four cost terms. Nothing is recomputed. Every figure
-is a field the bundle sealed and its own validators checked, or a digest the chain
-already holds, because a report that re-derived them would be a second
-implementation of the engine and a disagreement between the two would be
-unresolvable. **A reader can re-add a row and land on the `net_pnl` the chain
-holds**, and the acceptance gate asserts exactly that against the documents read
-back off disk by their own addresses.
+`net_pnl` and in each of the four cost terms. Nothing is recomputed from a price
+or a fill. Every figure is a field the bundle sealed and its own validators
+checked, or a digest the chain already holds, because a report that re-derived
+them would be a second implementation of the engine and a disagreement between the
+two would be unresolvable. The one sum the report does perform is `market_pnl`,
+which has no result-level field at all and exists only on the per-trade split —
+so it is added over that split, whose parallelism to `result.trades` and whose
+per-trade arithmetic are the bundle's own validator's work.
+**A reader can re-add a row and land on the `net_pnl` the chain holds**, and the
+acceptance gate asserts exactly that against the documents read back off disk by
+their own addresses.
 
 So a `net_pnl` of **+350.48 at 1.0x and −20.22 at 1.5x** is a fact about two runs.
 Whether that refutes a candidate is the promotion gate's question, with its
@@ -1509,14 +1524,18 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
   on every row so a reader can get from a number back to the bytes that produced
   it. The scenario identity rides the sealed attribution, where the stress is
   visible.
-- **`spec_sha256` is still unvouched.** The ledger preserves the digest and
-  cannot *vouch* for it — see *What Phase 8A does not implement* above — so the
-  report prints what the evidence says, not what was intended. What the
-  orchestrator *does* guarantee is that the three levels share **one declared
-  specification**: the digest is computed once from the protocol's own candidate,
-  so the failure mode of three mistyped digests cannot arise here. That is a
-  guarantee about the one place this command writes, not a check against a
-  preregistration.
+- **`spec_sha256` is still unvouched *in the ledger*.** The ledger preserves the
+  digest and cannot *vouch* for it — see *What Phase 8A does not implement* above.
+  The report is a different matter: it holds the sealed protocol, and
+  `canonical_sha256` over a `TrialSpec` is deterministic, so the identity check
+  compares each level's declared digest against the registration and refuses a
+  grid that names a specification no candidate has. Two things survive that. A
+  grid whose three levels all declare the *same* wrong digest agrees with itself,
+  so it still gets past this check — though not past the orchestrator, which has
+  no digest option at all. And a run sealed outside the orchestrator, under a
+  trial nobody registered, is refused for want of a registration before its
+  digest is ever compared. What the ledger cannot do is stop the wrong digest
+  being *written*; what 8B2b does is stop it being *read as a report*.
 - **Orchestrating three runs does not establish that the trade sequence is
   cost-invariant on any future engine.** The identity check pins the sequence
   across the three levels *on today's engine*, and that is a real check — a
@@ -1641,7 +1660,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
 | 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series cannot be produced or reduced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, a requested daily range whose first day is after its last, or a day whose prior close is not strictly positive | **Do not record this run as evidence.** Narrow the window, use a coarser timeframe, or check the requested range, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader. A series that violates its own mark identity is *not* this code — that is a pydantic `ValidationError`, which the CLI reports as `configuration invalid`, exit 2 |
-| 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were, or a trial no registration names | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. The remedy depends on which check fired, which is on the error's private cause for a log reader: a level never run or run twice is a new attempt through `research trial scenarios`, and anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
+| 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were or which specification they were pinned to, a trial no registration names, or a trial two registrations name | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. Which check fired is on the error's private cause for a log reader, and the remedy differs: a level never run is a new attempt through `research trial scenarios` at a fresh `--attempt-prefix`. A level run **twice** has no remedy — the second document is at that level and completeness refuses the candidate for good, because the only fix would be surgery on the evidence root and the chain. Anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates

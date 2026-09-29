@@ -28,12 +28,14 @@ from pydantic import NonNegativeInt
 from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
 from trading_house.research.backtest.costs_attribution import CostAttribution
+from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     LedgerEvent,
     PreregisteredPayload,
     TrialProtocol,
+    TrialSpec,
 )
 
 
@@ -88,8 +90,11 @@ class ScenarioDegradation(CanonicalModel):
 class ScenarioReport(CanonicalModel):
     """What the declared grid asked for, and what the sealed evidence says.
 
-    ``declared_multipliers`` is first in the field order and in every rendering,
-    so a reader meets the preregistration before the outcome.
+    ``trial_id`` and ``spec_sha256`` name the candidate first, so a reader knows
+    *whose* grid this is before seeing a figure, and ``declared_multipliers``
+    carries the preregistration before ``scenarios`` carries the outcome. The
+    order is a rendering property and nothing computes it, which is why the
+    acceptance gate holds the prefix rather than depending on it.
     """
 
     trial_id: NonEmptyStr
@@ -128,7 +133,7 @@ def declared_grid(protocol: TrialProtocol) -> tuple[Decimal, ...]:
 
 
 def registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialProtocol:
-    """The protocol this trial was registered against, out of the chain.
+    """The one protocol this trial was registered against, out of the chain.
 
     Recovered from the ``PREREGISTERED`` event's payload rather than from
     anything the caller supplies, so the grid the report checks is the grid that
@@ -143,15 +148,55 @@ def registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialPr
     ``declares_trial`` says the opposite. ``replay()`` is the read that carries
     the registration, and it is what ``counters()`` already uses for the same
     reason.
+
+    **Refuses rather than picks, if the chain names the trial twice.** Not a
+    hypothetical: ``PostgresTrialLedger.register`` derives its event id from the
+    protocol's digest, so a protocol differing in a single byte is a different id
+    and not a conflict, and nothing in Phase 8A stops a second registration from
+    declaring a trial the first one already declared. First-match-wins would then
+    pick silently -- and a grid sealed under the second registration would be
+    reported against the first, which is a clean report describing the wrong
+    experiment. The two registrations differ in fields none of the six checks read
+    (``execution``, ``validation``, ``regimes``, ``holdout``), so nothing
+    downstream would notice. Refusing names both protocol ids and leaves the fix
+    where it belongs: the ledger's own surface, which is 8A's, not this read.
     """
 
+    found: list[TrialProtocol] = []
     for event in events:
         if not isinstance(event.payload, PreregisteredPayload):
             continue
         protocol = event.payload.protocol
         if any(candidate.trial_id == trial_id for candidate in protocol.candidates):
-            return protocol
-    raise ScenarioEvidenceError() from ValueError(f"trial {trial_id} has no preregistered protocol")
+            found.append(protocol)
+    if not found:
+        raise ScenarioEvidenceError() from ValueError(
+            f"trial {trial_id} has no preregistered protocol"
+        )
+    if len({protocol.protocol_id for protocol in found}) > 1:
+        raise ScenarioEvidenceError() from ValueError(
+            f"trial {trial_id} is declared by more than one registration: "
+            f"{sorted(protocol.protocol_id for protocol in found)}"
+        )
+    return found[0]
+
+
+def _candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
+    """The one candidate a protocol declares under this trial id.
+
+    A ``TrialProtocol`` has no lookup for its own candidates and a caller
+    reaching for one would write the comprehension anyway; this is the same
+    expression, named, because ``registered_protocol`` decides *that* a trial was
+    declared and ``_refuse_identity`` needs *which* ``TrialSpec``, and the two
+    must not be able to disagree about it.
+    """
+
+    for candidate in protocol.candidates:
+        if candidate.trial_id == trial_id:
+            return candidate
+    raise ScenarioEvidenceError() from ValueError(
+        f"protocol {protocol.protocol_id} declares no {trial_id}"
+    )
 
 
 def scenario_report(
@@ -175,17 +220,26 @@ def scenario_report(
        ``market_pnl`` are read from them and a ``PARTIAL`` summary has two of
        them as ``None``.
     3. **Baseline fidelity** — the ``1.0`` scenario's ``cost_model`` equals the
-       protocol's ``CostSpec.baseline`` exactly.
+       protocol's ``CostSpec.baseline`` at level 1: every declared term, with
+       the multiplier normalised. ``CostSpec`` pins ``stress_multipliers`` but
+       says nothing about the baseline's own multiplier, so a protocol may declare
+       a baseline of ``1.5``; comparing verbatim would make that registration
+       permanently unreportable, and a registration cannot be amended after the
+       fact. Normalising both sides is a diagnostic gap, not a correctness one —
+       see ``_refuse_baseline_fidelity`` and ``declared_grid``.
     4. **Scenario fidelity** — each stressed scenario differs from the baseline
        in ``stress_multiplier`` and nothing else.
     5. **Window fidelity** — every scenario's ``result.start``/``end`` equals the
        window ``protocol.data`` declared.
-    6. **Identity** — one candidate: same ``spec_sha256``, ``bars_seen``, and the
-       same ordered ``proposal_id``s across the set; every bundle names the
-       ``trial_id`` the report was asked about; and ``strategy_id`` /
-       ``strategy_version`` match the *protocol's*, not merely each other's, since
+    6. **Identity** — one candidate: same ``bars_seen`` and the same ordered
+       ``proposal_id``s across the set; every bundle names the ``trial_id`` the
+       report was asked about; and ``strategy_id``, ``strategy_version`` and
+       ``spec_sha256`` match the *protocol's*, not merely each other's, since
        three runs agreeing with each other is not what makes them this
-       candidate's runs.
+       candidate's runs. The digest is cross-checkable because the report holds
+       the sealed protocol and ``canonical_sha256`` over a ``TrialSpec`` is
+       deterministic — the same expression the orchestrator computes — so this is
+       arithmetic over two sealed documents, not a question of anybody's honesty.
 
     Check 6 pins the trade *sequence* and says nothing about prices, because the
     prices must differ: scaling the spread is the stress, and 8B2a measured
@@ -231,12 +285,12 @@ def scenario_report(
     )
     return ScenarioReport(
         trial_id=trial_id,
-        # Taken from the first bundle because ``_refuse_identity`` has already
-        # established that all three agree; a report that read it from the
-        # protocol instead would be asserting a cross-check the chain does not
-        # make. The candidate's ``TrialSpec`` has no digest in the ledger -- the
-        # ``spec_sha256`` column is the operator's declared value, unvouched by
-        # 8A -- so this reports what the evidence says, not what was intended.
+        # From the first bundle, and that is now a fact rather than a fallback:
+        # ``_refuse_identity`` has established that this digest equals
+        # ``canonical_sha256`` of the protocol's own ``TrialSpec``, so the
+        # evidence and the registration agree and either would print the same
+        # thing. Reading it from the protocol instead would be a second, weaker
+        # source for a field the check has just proven.
         spec_sha256=bundles[0].spec_sha256,
         declared_multipliers=grid,
         scenarios=scenarios,
@@ -426,17 +480,34 @@ def _refuse_identity(
     another candidate's bundle are different defects, and a message printing two
     six-field tuples would leave an operator to find that difference themselves.
 
-    The expected record is seeded from the first bundle and then overridden with
-    the reported ``trial_id``, but ``strategy_id`` and ``strategy_version`` are
-    additionally taken from the *protocol* rather than from that first bundle.
-    Everything else here is internal agreement -- three runs that all read the
-    same data, all pinned the same spec, all traded the same sequence -- and
-    internal agreement is not what makes them *this candidate's* runs. Without
-    the protocol a self-consistent grid from a different strategy version reports
-    clean, while the window right above is checked against ``protocol.data``; the
-    asymmetry would be the odd one out. A registration declares
-    ``strategy_sha256`` too, which nothing binds to either field, so the id and
-    version are what can be compared and no more.
+    The expected record is seeded from the first bundle and then overridden from
+    the *protocol* -- ``trial_id``, ``strategy_id``, ``strategy_version`` and
+    ``spec_sha256`` -- rather than from that first bundle. Everything else here is
+    internal agreement: three runs that all read the same bars, all traded the same
+    sequence. Internal agreement is not what makes them *this candidate's* runs, and
+    a record seeded from the evidence would let a set of three belonging to nobody
+    in particular pass as self-consistent. The window check above is already
+    against ``protocol.data``; this is the same statement about the run's identity.
+
+    ``spec_sha256`` is the one that matters most, and it is cross-checkable here
+    for a reason worth stating because it has been got wrong before. The ledger's
+    ``spec_sha256`` column is the operator's *declared* value and 8A never
+    vouched it -- but this function is not reading the column. It holds the sealed
+    ``TrialProtocol``, ``canonical_sha256`` over a ``TrialSpec`` is deterministic,
+    and ``research trial scenarios`` computes precisely that expression from the
+    same document. So the digest is a fact about two sealed artifacts, not about
+    anybody's honesty, and comparing it is arithmetic rather than trust. The
+    machine that verified 8B1 and 8B2a has a trial in its chain right now counted
+    as two effective specifications because a digest was typed off the wrong
+    candidate; that drift produces a report whose ``spec_sha256`` names no
+    registered candidate at all, which is why it is refused here rather than
+    reported.
+
+    What this cannot do is stop a *consistently* wrong digest from being sealed in
+    the first place -- a run whose declared spec is wrong on all three levels
+    agrees with itself. That is the ledger's unvouched column, 8A's surface, and
+    the README says so in full. What is refused here is a grid whose levels
+    disagree, or which disagrees with the registration this report was given.
 
     ``attempt_id`` is deliberately *not* here. It names an attempt rather than a
     candidate, and the report prints it on every row; pinning it would assert
@@ -449,6 +520,7 @@ def _refuse_identity(
         "trial_id": trial_id,
         "strategy_id": protocol.strategy_id,
         "strategy_version": protocol.strategy_version,
+        "spec_sha256": canonical_sha256(_candidate(protocol, trial_id)),
     }
     for bundle in bundles:
         found = _identity(bundle)

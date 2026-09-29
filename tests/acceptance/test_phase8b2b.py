@@ -123,18 +123,44 @@ absurd value is used to make the substitution obvious in the refusal text."""
 
 # --- the report's own vocabulary ----------------------------------------------
 
-_NO_VERDICT_HELP = ("surviv", "threshold", "promot", "recommend", "approve", "reject")
-"""The vocabulary of a decision, as stems, matched anywhere in the help text.
+_NO_VERDICT_HELP = (
+    "surviv",
+    "threshold",
+    "promot",
+    "recommend",
+    "approve",
+    "reject",
+    "verdict",
+    "accept",
+    "eligib",
+)
+"""The vocabulary of a decision about a candidate, as stems, matched anywhere in the help.
 
 ``promot`` is the spelling that matters: ``promote`` is *not* a substring of
 ``promotion``, so a gate written on the bare word would pass a help screen that
 announced its own promotion gate. The rest are stems for the same reason -- one
 inflection slipping past a gate is the whole failure mode.
 
-``judge`` and ``verdict`` are absent, for the reason
-``tests/unit/ops/test_scenarios.py`` gives for the same omission: both commands
-say in their own docstrings that they do not judge, and a gate that fired on the
-sentence promising restraint would be a gate to disable rather than to satisfy.
+``judge`` is absent, for the reason ``tests/unit/ops/test_scenarios.py`` gives for
+the same omission: both commands say in their own docstrings that they do not
+judge, and a gate that fired on the sentence promising restraint would be a gate
+to disable rather than to satisfy. ``verdict`` *is* matched, and that is the
+correction a previous version of this list needed: the docstring it was written
+against said "There is no survival verdict here" -- promising restraint with the
+word itself -- so the stated rule ("no decision vocabulary at all") and the
+implementation (six stems) disagreed, and the docstring used ``verdict`` and
+``pass/fail`` for free. The docstring no longer does, and ``verdict`` is now in
+the list, so the two agree.
+
+**``pass`` and ``fail`` are deliberately not in the list**, which is a real
+omission rather than an oversight. They name *any* unsuccessful thing, not a
+decision about a candidate, and two texts in this CLI use them legitimately:
+``health``'s own summary promises "a typed failure", and half the command surface
+discusses refusing an operator. A gate carrying those two would fire on the
+surrounding prose and would be relaxed the first time somebody wrote about an
+error -- which is the failure mode a gate exists to prevent. ``verdict``,
+``accept`` and ``eligib`` are the same idea narrower, and appear nowhere in
+either help screen today.
 
 Lowercased before matching, and that is not a detail. A capital at the start of a
 sentence is where a capital goes, and a docstring's first line is the summary Typer
@@ -145,8 +171,7 @@ the single easiest edit that could make this gate a lie.
 ``_NO_VERDICT`` from ``tests/unit/ops/test_scenarios.py`` and carries two words
 this one does not -- ``total`` and ``verdict`` -- because it matches *field names*,
 where those two are forbidden outright, and it spells ``promote`` rather than
-``promot``. This one matches prose, where ``verdict`` is unavoidable in any honest
-sentence about declining to judge, and where ``recommend`` is the stem an operator
+``promot``. This one matches prose, where ``recommend`` is the stem an operator
 document is most likely to reach for. Two surfaces, two rules, one reason each;
 the alternative is one list that is wrong on at least one of them.
 """
@@ -861,6 +886,9 @@ def test_neither_commands_help_text_claims_a_verdict(command: list[str]) -> None
         "We recommend this one.",
         "The candidate is approved for paper trading.",
         "This candidate is rejected at 1.5x.",
+        "Prints a verdict for each level.",  # the word the docstring used to spend
+        "The candidate is acceptable at 1.0x.",
+        "Two levels of eligibility remain.",
         # The loophole this gate used to have: a denial and a claim in one
         # sentence used to license each other.
         "There is no verdict here: a candidate that survives the grid is promoted.",

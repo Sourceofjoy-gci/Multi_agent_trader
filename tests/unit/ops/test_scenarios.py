@@ -120,10 +120,24 @@ first bar at or after the deadline is the 97th. A later close would open a
 second position the range then discards, and the run would end holding it."""
 
 ATTEMPT_PREFIX = "att-scenarios"
-SPEC_SHA256 = "e" * 64
 AGENT_RUN_ID = "run-scenarios"
 OCCURRED_AT = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
 REGISTERED_AT = datetime(2026, 9, 20, 13, 0, tzinfo=UTC)
+
+
+def _spec_sha256(protocol: TrialProtocol, trial_id: str) -> str:
+    """The digest a run under this candidate must declare, computed not typed.
+
+    ``canonical_sha256`` over the protocol's own ``TrialSpec`` -- the exact
+    expression ``research trial scenarios`` computes, because the identity check
+    compares the bundles against it. A fixture that used a synthetic digest here
+    would make that comparison fail for every scenario in the file and the healthy
+    cases would be unreachable, which is precisely what happened when this was
+    still a constant.
+    """
+
+    return canonical_sha256(next(c for c in protocol.candidates if c.trial_id == trial_id))
+
 
 FOREIGN_TRIAL_ID = "trial-somebody-else"
 OTHER_PROPOSAL_ID = "proposal-1a7f3c"
@@ -318,7 +332,7 @@ def _bundle_at(
         outcome,
         trial_id=trial_id,
         attempt_id=f"{ATTEMPT_PREFIX}-{multiplier}",
-        spec_sha256=SPEC_SHA256,
+        spec_sha256=_spec_sha256(protocol, trial_id),
         agent_run_id=AGENT_RUN_ID,
         occurred_at=OCCURRED_AT,
         registered_at=REGISTERED_AT,
@@ -537,6 +551,85 @@ def test_a_registration_that_names_no_such_trial_is_refused() -> None:
     # unreportable rather than merely empty.
     with pytest.raises(ScenarioEvidenceError):
         registered_protocol([_preregistered_event(_protocol())], "trial-nobody-declared")
+
+
+def test_a_trial_declared_by_two_registrations_is_refused_rather_than_picked() -> None:
+    """Phase 8A permits registering one trial twice, so this is reachable.
+
+    ``PostgresTrialLedger.register`` derives its event id from the protocol's
+    digest, so a protocol differing in one byte is a different id rather than a
+    conflict, and nothing refuses it. Two registrations can therefore both
+    declare ``trial-1`` -- and they differ in ``execution``, ``validation``,
+    ``regimes`` and ``holdout``, none of which any of the six checks reads.
+
+    First-match-wins would pick the older one silently, and a grid sealed under
+    the newer registration would be reported against the older: a clean report
+    describing the wrong experiment, with nothing downstream to notice.
+    """
+
+    original = _protocol()
+    amended = _protocol()
+    amended = TrialProtocol(
+        **{
+            **amended.model_dump(),
+            "protocol_id": "protocol-amended",
+            # A field no check reads, which is exactly why first-match-wins would
+            # go unnoticed.
+            "execution": amended.execution.model_copy(update={"seed": "other"}),
+        }
+    )
+
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        registered_protocol(
+            [_preregistered_event(original), _preregistered_event(amended)],
+            _trial_id(original),
+        )
+    cause = str(refusal.value.__cause__)
+    assert "more than one registration" in cause
+    assert "protocol-amended" in cause
+
+
+def test_the_report_refuses_a_grid_whose_specification_is_not_the_registration_s() -> None:
+    """The digest is a fact about two sealed documents, so it is compared.
+
+    The ledger's ``spec_sha256`` column is the operator's declared value and 8A
+    never vouched it -- but the report holds the sealed protocol and
+    ``canonical_sha256`` over a ``TrialSpec`` is deterministic, which is the same
+    expression ``research trial scenarios`` computes. So a grid whose three levels
+    all declare a digest belonging to no registered candidate is refused, rather
+    than reported under a ``spec_sha256`` that names nothing.
+
+    The real machine that verified 8B1 and 8B2a has exactly this drift in its
+    chain right now, counted as two effective specifications for one trial.
+    """
+
+    protocol = _protocol()
+    sealed = _sealed(
+        protocol, moved_at=Decimal("1.5"), moved_field="spec_sha256", moved_value="f" * 64
+    )
+
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+    assert "spec_sha256" in str(refusal.value.__cause__)
+
+
+def test_a_consistently_declared_wrong_specification_is_refused_too() -> None:
+    """The harder half: all three levels agreeing on a digest nobody registered.
+
+    Internal agreement is not authority, which is the whole point of comparing
+    against the protocol rather than against the first bundle. Moving one level
+    is caught by agreement; moving all three is caught only by the registration.
+    """
+
+    protocol = _protocol()
+    sealed = tuple(
+        (digest, _rebuild(bundle, _moving("spec_sha256", "f" * 64)))
+        for digest, bundle in _sealed(protocol)
+    )
+
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+    assert "spec_sha256" in str(refusal.value.__cause__)
 
 
 def test_a_grid_is_recovered_from_a_registration_several_candidates_share() -> None:
