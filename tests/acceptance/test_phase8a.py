@@ -91,9 +91,11 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-# The seven, in the order `research trial --help` prints them. Named here rather
-# than derived, so an eighth command fails this file instead of quietly widening
-# the operator table the README carries.
+# The trial command table, in the order `research trial --help` prints it. Named
+# here rather than derived, so a new command fails this file instead of quietly
+# widening the operator table the README carries. Phase 8B2b added the last two:
+# `scenarios` runs and seals a candidate's declared cost grid, and
+# `scenario-report` reads one back.
 TRIAL_COMMANDS = (
     "register",
     "start",
@@ -101,6 +103,8 @@ TRIAL_COMMANDS = (
     "import-legacy",
     "show",
     "count",
+    "scenarios",
+    "scenario-report",
     "verify",
 )
 
@@ -321,14 +325,14 @@ def test_every_trial_command_is_reachable_from_its_help(command: str) -> None:
     assert command in result.stdout
 
 
-def test_research_trial_has_exactly_the_seven_documented_commands() -> None:
+def test_research_trial_has_exactly_the_documented_commands() -> None:
     result = runner.invoke(cli.app, ["research", "trial", "--help"])
 
     assert result.exit_code == cli.ExitCode.OK
     # Counted from the app rather than the help text, because ``--help`` proves a
     # command is *documented* and this proves none is undocumented-but-present --
-    # an eighth command wired up and left out of the README is the failure this
-    # catches, and no amount of reading the help would show it.
+    # a command wired up and left out of the README is the failure this catches,
+    # and no amount of reading the help would show it.
     registered = {command.name for command in cli.trial_app.registered_commands}
     assert set(TRIAL_COMMANDS) == registered
 

@@ -30,6 +30,7 @@ from trading_house.core.errors import (
     EvidenceIntegrityError,
     InsufficientHistoryError,
     MigrationMismatchError,
+    ScenarioEvidenceError,
     SchemaValidationError,
     SignatureVerificationError,
     TradingHouseError,
@@ -366,6 +367,20 @@ def test_equity_evidence_error_maps_to_its_own_exit_code() -> None:
 
     assert cli.EXIT_CODES[EquityEvidenceError] is cli.ExitCode.EQUITY_EVIDENCE
     assert int(cli.ExitCode.EQUITY_EVIDENCE) == 18
+
+
+def test_scenario_evidence_error_maps_to_its_own_exit_code() -> None:
+    """The 19 a wrong cost grid earns, pinned as a number.
+
+    Distinct from 17 because every document verified: ``EvidenceIntegrityError``
+    says a bundle is missing, altered, or not the canonical bytes its digest
+    names, and a candidate whose three scenarios are all intact but are not the
+    three its registration declared is a different operator problem with a
+    different remedy.
+    """
+
+    assert cli.EXIT_CODES[ScenarioEvidenceError] is cli.ExitCode.SCENARIO_EVIDENCE
+    assert int(cli.ExitCode.SCENARIO_EVIDENCE) == 19
 
 
 def test_insufficient_history_is_distinguishable_from_missing_coverage() -> None:

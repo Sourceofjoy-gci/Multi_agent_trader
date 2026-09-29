@@ -111,6 +111,12 @@ from trading_house.ops.ledger import (
     research_ledger_dsn,
     seal_bundle,
 )
+from trading_house.ops.scenarios import (
+    ScenarioReport,
+    declared_grid,
+    registered_protocol,
+    scenario_report,
+)
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
 from trading_house.research.canonical import canonical_sha256
@@ -119,9 +125,11 @@ from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.legacy_import import import_phase7_artifact
 from trading_house.research.trial_ledger import (
     EvidenceSealedPayload,
+    LedgerEventType,
     LedgerRecord,
     LegacyImportedPayload,
     TrialProtocol,
+    TrialSpec,
 )
 from trading_house.settings import RuntimeSettings
 
@@ -1269,51 +1277,26 @@ def backtest_run(
             # operator who left a flag off has made a mistake, not produced
             # evidence that cannot be trusted.
             raise ConfigurationError()
-        policy = _exit_policy(exit_policy)
         settings = _settings()
-        cost_model = CostModel(
-            commission_per_lot_per_side=_decimal(commission_per_lot_per_side),
-            slippage_points_per_side=_decimal(slippage_points_per_side),
-            swap_long_points_per_day=_decimal(swap_long_points_per_day),
-            swap_short_points_per_day=_decimal(swap_short_points_per_day),
-            triple_swap_weekday=triple_swap_weekday,
-            stress_multiplier=_decimal(stress_multiplier),
+        instrument_contract = _instrument_contract(contract)
+        request = _backtest_request(
+            strategy=strategy,
+            exit_policy=exit_policy,
+            start=start,
+            end=end,
+            firm_equity=_decimal(firm_equity),
+            cost_model=CostModel(
+                commission_per_lot_per_side=_decimal(commission_per_lot_per_side),
+                slippage_points_per_side=_decimal(slippage_points_per_side),
+                swap_long_points_per_day=_decimal(swap_long_points_per_day),
+                swap_short_points_per_day=_decimal(swap_short_points_per_day),
+                triple_swap_weekday=triple_swap_weekday,
+                stress_multiplier=_decimal(stress_multiplier),
+            ),
+            atr_period=atr_period,
+            spread_window=spread_window,
+            defective_bar_tolerance=_unit_interval_decimal(defective_bar_tolerance),
         )
-        try:
-            instrument_contract = InstrumentContract.model_validate(
-                json.loads(contract.read_text(encoding="utf-8")), strict=False
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            # Typed here rather than left to the catch-all: a contract file the
-            # operator cannot read, cannot decode, or mistyped is input, not an
-            # internal failure, and the catch-all would answer it with a
-            # correlation id. ``--contract`` has no producer anywhere in this
-            # repo -- every operator hand-writes that file -- so a trailing
-            # comma in it is the likeliest mistake this command sees, and
-            # ``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
-            raise ConfigurationError() from error
-        if instrument_contract.instrument_id != _BACKTEST_INSTRUMENT:
-            raise ConfigurationError()
-        try:
-            # BacktestRequest validates firm_equity in __post_init__ and raises
-            # a bare ValueError, while a bad range raises BacktestRefused from
-            # run() further down. Two shapes out of one boundary: wrapping only
-            # the second would let a mistyped equity escape as "unexpected
-            # failure".
-            request = BacktestRequest(
-                strategy=build_strategy(strategy, exit_policy=policy),
-                instrument_id=_BACKTEST_INSTRUMENT,
-                timeframe=_BACKTEST_TIMEFRAME,
-                start=_as_utc(start),
-                end=_as_utc(end),
-                firm_equity=_decimal(firm_equity),
-                cost_model=cost_model,
-                atr_period=atr_period,
-                spread_window=spread_window,
-                defective_bar_tolerance=_unit_interval_decimal(defective_bar_tolerance),
-            )
-        except ValueError as error:
-            raise ConfigurationError() from error
         loaded_constitution = load_constitution(
             settings.constitution_path,
             settings.constitution_signature_path,
@@ -1362,6 +1345,94 @@ def backtest_run(
         }
 
     _run(operation)
+
+
+def _candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
+    """The one candidate a trial names, or a refusal naming what was asked for.
+
+    ``StopIteration`` would be the natural failure of a bare ``next(...)`` and
+    the wrong one here: it is not an error the catch-all may report as an
+    internal fault, and the remedy is the operator passing the ``--trial-id``
+    the protocol actually declares.
+    """
+
+    for candidate in protocol.candidates:
+        if candidate.trial_id == trial_id:
+            return candidate
+    raise ConfigurationError()
+
+
+def _instrument_contract(contract: Path) -> InstrumentContract:
+    """The contract file, decoded and checked against the one instrument.
+
+    The ``try``/``except`` and the ``_BACKTEST_INSTRUMENT`` comparison move out
+    of ``backtest run`` unchanged, comment and all. ``--contract`` has no
+    producer in this repo, so a hand-written trailing comma is the likeliest
+    mistake either command will see and both must answer it at exit 2.
+    """
+
+    try:
+        instrument_contract = InstrumentContract.model_validate(
+            json.loads(contract.read_text(encoding="utf-8")), strict=False
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        # Typed here rather than left to the catch-all: a contract file the
+        # operator cannot read, cannot decode, or mistyped is input, not an
+        # internal failure, and the catch-all would answer it with a
+        # correlation id. ``--contract`` has no producer anywhere in this
+        # repo -- every operator hand-writes that file -- so a trailing
+        # comma in it is the likeliest mistake this command sees, and
+        # ``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
+        raise ConfigurationError() from error
+    if instrument_contract.instrument_id != _BACKTEST_INSTRUMENT:
+        raise ConfigurationError()
+    return instrument_contract
+
+
+def _backtest_request(
+    *,
+    strategy: str,
+    exit_policy: ExitPolicyName,
+    start: datetime,
+    end: datetime,
+    firm_equity: Decimal,
+    cost_model: CostModel,
+    atr_period: int,
+    spread_window: int,
+    defective_bar_tolerance: Decimal,
+) -> BacktestRequest:
+    """The run's declared inputs, with every cost already in ``cost_model``.
+
+    Takes a built ``CostModel`` rather than the six cost options, because the
+    orchestrator's only difference from ``backtest run`` is where the multiplier
+    came from -- its grid rather than a typed ``--stress-multiplier``. Taking the
+    model makes that the single difference and keeps the rest of the request
+    construction out of the loop.
+
+    The ``try``/``except ValueError`` moves out of ``backtest run`` unchanged:
+    ``BacktestRequest`` validates ``firm_equity`` in ``__post_init__`` and
+    raises a bare ``ValueError``, so without it a mistyped equity escapes as
+    "unexpected failure".
+    """
+
+    try:
+        return BacktestRequest(
+            strategy=build_strategy(strategy, exit_policy=_exit_policy(exit_policy)),
+            instrument_id=_BACKTEST_INSTRUMENT,
+            timeframe=_BACKTEST_TIMEFRAME,
+            start=_as_utc(start),
+            end=_as_utc(end),
+            firm_equity=firm_equity,
+            cost_model=cost_model,
+            atr_period=atr_period,
+            spread_window=spread_window,
+            defective_bar_tolerance=defective_bar_tolerance,
+        )
+    except ValueError as error:
+        # ``firm_equity`` above; a bad range raises ``BacktestRefused`` from
+        # ``run()`` further down. Two shapes out of one boundary: wrapping only
+        # the second would let a mistyped equity escape as "unexpected failure".
+        raise ConfigurationError() from error
 
 
 def _load_json_model[T: CanonicalModel](path: Path, model: type[T]) -> T:
@@ -1701,6 +1772,197 @@ def research_trial_count() -> None:
         }
 
     _run(operation)
+
+
+def _scenario_report_for(
+    trial_id: str, ledger: PostgresTrialLedger, store: EvidenceStore
+) -> ScenarioReport:
+    """One candidate's report, from the chain and the evidence store alone.
+
+    Two different reads, and the difference is the whole point. The bundles come
+    from ``events_for(trial_id)``, which is right for them: an
+    ``EVIDENCE_SEALED`` row does carry the trial's id, so one trial's sealed
+    documents are exactly the rows that query returns. The protocol does not:
+    a ``PREREGISTERED`` row's ``trial_id`` is null, because one event seals a
+    whole candidate family, so ``_TRIAL_EVENTS_SQL`` -- ``WHERE trial_id = %s``
+    -- never returns it. ``replay()`` is the read that carries the registration.
+
+    Both are used here rather than choosing one, because getting it wrong fails
+    quietly in the direction that matters: from ``events_for`` alone every
+    registered candidate would be reported as never registered, and the operator
+    would be told to go preregister a trial they already preregistered.
+
+    Each digest is read through ``store.read``, which re-serialises what it
+    decoded and refuses any document whose bytes are not today's canonical
+    encoding. A report is therefore a read of bytes that were verified on the way
+    in, not of objects a caller assembled.
+
+    ``record.event_json`` is the chain's stored *event* -- the whole
+    ``LedgerEvent``, projected into jsonb -- so the payload is reached at
+    ``["payload"]`` and read through ``EvidenceSealedPayload`` rather than out of
+    a dict: a malformed row is a ``ValidationError`` from the ledger's own schema
+    rather than a ``KeyError`` from here.
+    """
+
+    sealed: list[tuple[str, EvidenceBundle]] = []
+    for record in ledger.events_for(trial_id):
+        if record.event_type is not LedgerEventType.EVIDENCE_SEALED:
+            continue
+        evidence_sha256 = EvidenceSealedPayload.model_validate(
+            record.event_json["payload"]
+        ).evidence_sha256
+        sealed.append((evidence_sha256, store.read(evidence_sha256)))
+    return scenario_report(
+        trial_id=trial_id,
+        protocol=registered_protocol(ledger.replay(), trial_id),
+        sealed=sealed,
+    )
+
+
+@trial_app.command("scenarios")
+def research_trial_scenarios(
+    protocol: Annotated[
+        Path, typer.Option("--protocol", help="Frozen TrialProtocol JSON, the grid source.")
+    ],
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+    attempt_prefix: Annotated[
+        str,
+        typer.Option("--attempt-prefix", help="Attempt ids are this prefix plus the multiplier."),
+    ],
+    started_at: Annotated[datetime, typer.Option("--started-at")],
+    occurred_at: Annotated[datetime, typer.Option("--occurred-at")],
+    registered_at: Annotated[datetime, typer.Option("--registered-at")],
+    agent_run_id: Annotated[str, typer.Option("--agent-run-id")],
+    strategy: Annotated[str, typer.Option("--strategy")],
+    exit_policy: Annotated[ExitPolicyName, typer.Option("--exit-policy")],
+    start: Annotated[datetime, typer.Option("--start")],
+    end: Annotated[datetime, typer.Option("--end")],
+    firm_equity: Annotated[str, typer.Option("--firm-equity")],
+    contract: Annotated[Path, typer.Option("--contract")],
+    atr_period: Annotated[int, typer.Option("--atr-period", min=1)],
+    spread_window: Annotated[int, typer.Option("--spread-window", min=1)],
+    commission_per_lot_per_side: Annotated[str, typer.Option("--commission-per-lot-per-side")],
+    slippage_points_per_side: Annotated[str, typer.Option("--slippage-points-per-side")],
+    swap_long_points_per_day: Annotated[str, typer.Option("--swap-long-points-per-day")],
+    swap_short_points_per_day: Annotated[str, typer.Option("--swap-short-points-per-day")],
+    triple_swap_weekday: Annotated[int, typer.Option("--triple-swap-weekday")],
+    defective_bar_tolerance: Annotated[str, typer.Option("--defective-bar-tolerance")] = "0",
+) -> None:
+    """Run, seal and compare the cost grid this protocol preregistered.
+
+    Every level is one attempt, because §5.6 counts a distinct ``attempt_id``
+    as an audit attempt and a distinct ``trial_id`` as a selection lottery: one
+    candidate examined at three cost levels is three attempts and **one**
+    selection, and the selection count is what DSR divides by.
+
+    The grid comes from ``--protocol`` here and from the chain in
+    ``scenario-report``. The two must agree, and ``scenario-report`` re-derives
+    it from the sealed registration, so a protocol file edited after the fact
+    cannot widen what the report will accept.
+
+    Every level shares one ``--spec-sha256``-free specification digest, computed
+    from the protocol's own candidate rather than typed three times. Three
+    hand-typed digests is exactly how the machine that verified 8B1 and 8B2a
+    ended up with ``trial-1`` counting two effective specifications: the ledger
+    faithfully recorded what it was told, and nothing checked it. Here there is
+    nothing to mistype.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        parsed = _load_json_model(protocol, TrialProtocol)
+        # No ``candidate_for``: ``TrialProtocol`` has no such method, and its
+        # candidates are a tuple of ``TrialSpec`` reached by comprehension. An
+        # unknown ``--trial-id`` is a ``ConfigurationError``, not a bare
+        # ``StopIteration`` the catch-all would answer with a correlation id.
+        spec_sha256 = canonical_sha256(_candidate(parsed, trial_id))
+        settings = _settings()
+        ledger = _trial_ledger()
+        store = _evidence_store()
+        constitution = load_constitution(
+            settings.constitution_path,
+            settings.constitution_signature_path,
+            settings.constitution_public_key_path,
+        )
+        instrument_contract = _instrument_contract(contract)
+        scenarios: list[JsonValue] = []
+        for multiplier in declared_grid(parsed):
+            attempt_id = f"{attempt_prefix}-{multiplier}"
+            ledger.append(
+                execution_started_event(trial_id, attempt_id, spec_sha256, _as_utc(started_at))
+            )
+            request = _backtest_request(
+                strategy=strategy,
+                exit_policy=exit_policy,
+                start=start,
+                end=end,
+                firm_equity=_decimal(firm_equity),
+                cost_model=CostModel(
+                    commission_per_lot_per_side=_decimal(commission_per_lot_per_side),
+                    slippage_points_per_side=_decimal(slippage_points_per_side),
+                    swap_long_points_per_day=_decimal(swap_long_points_per_day),
+                    swap_short_points_per_day=_decimal(swap_short_points_per_day),
+                    triple_swap_weekday=triple_swap_weekday,
+                    stress_multiplier=multiplier,
+                ),
+                atr_period=atr_period,
+                spread_window=spread_window,
+                defective_bar_tolerance=_unit_interval_decimal(defective_bar_tolerance),
+            )
+            outcome = simulate(
+                request,
+                bars=_bar_store(),
+                contract=instrument_contract,
+                constitution=constitution,
+            )
+            bundle = mark_to_market_bundle(
+                outcome,
+                trial_id=trial_id,
+                attempt_id=attempt_id,
+                spec_sha256=spec_sha256,
+                agent_run_id=agent_run_id,
+                occurred_at=_as_utc(occurred_at),
+                registered_at=_as_utc(registered_at),
+            )
+            digest = seal_bundle(bundle, ledger=ledger, store=store)
+            scenarios.append(
+                {
+                    "multiplier": str(multiplier),
+                    "attempt_id": attempt_id,
+                    "evidence_sha256": digest,
+                }
+            )
+        return {
+            "trial_id": trial_id,
+            "scenarios": scenarios,
+            "report": cast(
+                JsonValue,
+                json.loads(_scenario_report_for(trial_id, ledger, store).model_dump_json()),
+            ),
+        }
+
+    _run(operation)
+
+
+@trial_app.command("scenario-report")
+def research_trial_scenario_report(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Check one candidate's sealed scenarios against its declared grid, and report.
+
+    The grid is read from the ``PREREGISTERED`` event in the chain, not from a
+    file, so what is checked is what was sealed before any result existed.
+
+    Reports; does not judge. There is no survival verdict here and no
+    threshold: whether a candidate's degradation is acceptable is 8D's
+    promotion gate, with its thresholds fixed in advance.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        report = _scenario_report_for(trial_id, _trial_ledger(), _evidence_store())
+        return cast(dict[str, JsonValue], json.loads(report.model_dump_json()))
+
+    payload = _execute(operation)
+    _emit(payload)
 
 
 @trial_app.command("verify")
