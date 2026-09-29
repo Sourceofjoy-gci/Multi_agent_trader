@@ -630,6 +630,31 @@ def test_a_scenario_from_another_trial_is_refused() -> None:
         scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
 
 
+def test_a_grid_run_against_a_different_strategy_than_the_protocol_declares_is_refused() -> None:
+    """Three runs agreeing with each other is not what makes them this candidate's.
+
+    Every other field check 6 makes is internal agreement: the same spec, the
+    same bar count, the same trade sequence. A grid of three runs from strategy
+    version 2 satisfies all of them while the registration declares version 1 --
+    and the window above is checked against ``protocol.data``, so comparing the
+    strategy only between the runs would leave it the one cross-check the
+    report skips.
+
+    The tamper moves all three runs together, so nothing internal disagrees and
+    the refusal can only come from the comparison against the protocol.
+    """
+
+    protocol = _protocol()
+    sealed = tuple(
+        (digest, _rebuild(bundle, _moving("result.strategy_version", "99")))
+        for digest, bundle in _sealed(protocol)
+    )
+
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+    assert "strategy_version" in str(refusal.value.__cause__)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

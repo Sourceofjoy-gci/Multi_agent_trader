@@ -180,9 +180,12 @@ def scenario_report(
        in ``stress_multiplier`` and nothing else.
     5. **Window fidelity** — every scenario's ``result.start``/``end`` equals the
        window ``protocol.data`` declared.
-    6. **Identity** — one candidate: same ``trial_id``, ``spec_sha256``,
-       ``strategy_id``/``strategy_version``, ``bars_seen``, and the same ordered
-       ``proposal_id``s.
+    6. **Identity** — one candidate: same ``spec_sha256``, ``bars_seen``, and the
+       same ordered ``proposal_id``s across the set; every bundle names the
+       ``trial_id`` the report was asked about; and ``strategy_id`` /
+       ``strategy_version`` match the *protocol's*, not merely each other's, since
+       three runs agreeing with each other is not what makes them this
+       candidate's runs.
 
     Check 6 pins the trade *sequence* and says nothing about prices, because the
     prices must differ: scaling the spread is the stress, and 8B2a measured
@@ -207,7 +210,7 @@ def scenario_report(
     _refuse_baseline_fidelity(protocol, bundles)
     _refuse_scenario_fidelity(protocol, bundles)
     _refuse_window_fidelity(protocol, bundles)
-    _refuse_identity(trial_id, bundles)
+    _refuse_identity(trial_id, protocol, bundles)
 
     scenarios = tuple(
         _totals(m, bundle, evidence_sha256)
@@ -406,7 +409,9 @@ def _refuse_window_fidelity(protocol: TrialProtocol, bundles: Sequence[EvidenceB
             )
 
 
-def _refuse_identity(trial_id: str, bundles: Sequence[EvidenceBundle]) -> None:
+def _refuse_identity(
+    trial_id: str, protocol: TrialProtocol, bundles: Sequence[EvidenceBundle]
+) -> None:
     """Every scenario in the grid is the reported candidate, run the reported way.
 
     One comparison against one record rather than a field-by-field ladder, and
@@ -420,9 +425,31 @@ def _refuse_identity(trial_id: str, bundles: Sequence[EvidenceBundle]) -> None:
     differs: a grid whose runs disagree about ``bars_seen`` and a grid carrying
     another candidate's bundle are different defects, and a message printing two
     six-field tuples would leave an operator to find that difference themselves.
+
+    The expected record is seeded from the first bundle and then overridden with
+    the reported ``trial_id``, but ``strategy_id`` and ``strategy_version`` are
+    additionally taken from the *protocol* rather than from that first bundle.
+    Everything else here is internal agreement -- three runs that all read the
+    same data, all pinned the same spec, all traded the same sequence -- and
+    internal agreement is not what makes them *this candidate's* runs. Without
+    the protocol a self-consistent grid from a different strategy version reports
+    clean, while the window right above is checked against ``protocol.data``; the
+    asymmetry would be the odd one out. A registration declares
+    ``strategy_sha256`` too, which nothing binds to either field, so the id and
+    version are what can be compared and no more.
+
+    ``attempt_id`` is deliberately *not* here. It names an attempt rather than a
+    candidate, and the report prints it on every row; pinning it would assert
+    that one attempt ran at three cost levels, which is a claim about the
+    ledger's counting rather than about whether these three runs belong together.
     """
 
-    expected = {**_identity(bundles[0]), "trial_id": trial_id}
+    expected = {
+        **_identity(bundles[0]),
+        "trial_id": trial_id,
+        "strategy_id": protocol.strategy_id,
+        "strategy_version": protocol.strategy_version,
+    }
     for bundle in bundles:
         found = _identity(bundle)
         differing = sorted(field for field, value in found.items() if value != expected[field])
