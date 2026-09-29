@@ -1822,7 +1822,11 @@ def _scenario_report_for(
 @trial_app.command("scenarios")
 def research_trial_scenarios(
     protocol: Annotated[
-        Path, typer.Option("--protocol", help="Frozen TrialProtocol JSON, the grid source.")
+        Path,
+        typer.Option(
+            "--protocol",
+            help="Frozen TrialProtocol JSON. The grid and every cost in it come from here.",
+        ),
     ],
     trial_id: Annotated[str, typer.Option("--trial-id")],
     attempt_prefix: Annotated[
@@ -1858,8 +1862,17 @@ def research_trial_scenarios(
     with it or refuse the whole grid. An operator who types the six terms twice
     and gets one wrong is told their sealed scenarios disagree with a
     registration they cannot amend. Deriving them costs one multiplication per
-    level and removes the only way this command could produce an unreportable
-    grid.
+    level and removes the only way a *second copy of the declaration* could
+    disagree with the first.
+
+    It does not make the grid unconditionally reportable, and the difference is
+    worth being exact about. An ``--protocol`` file edited after registration
+    still can: this command reads the file's multipliers and money terms, seals
+    three bundles and six rows, and only then refuses, at 19, because
+    ``scenario-report`` re-derived its own grid from the sealed registration. A
+    protocol that is not the one the chain holds produces a report that says so,
+    which is the fail-closed answer and not a silent one -- but it is a refusal
+    after nine writes, not before them.
 
     The levels are read here from the file the operator names and, in
     ``scenario-report``, from the ``PREREGISTERED`` event in the chain. The two

@@ -51,7 +51,7 @@ from tests.integration.research.test_backtest_evidence import (  # noqa: F401
     _write,
     seeded,
 )
-from tests.integration.research.test_trial_cli import _ledger, _store
+from tests.integration.research.test_trial_cli import _ledger, _start, _store
 from trading_house import cli
 from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.marketdata.models import Timeframe
@@ -416,7 +416,7 @@ def test_a_trial_the_protocol_never_declared_is_refused_before_anything_is_seale
 def test_rerunning_the_same_prefix_seals_nothing_and_reports_the_same_three(
     seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
 ) -> None:
-    """Twelve required options instead of a clock read, and this is what they buy.
+    """Every timestamp an option rather than a clock read, and this is what they buy.
 
     Every event id the orchestrator appends is derived from content -- the
     attempt from the trial and the attempt id, the evidence seal from the digest
@@ -593,6 +593,63 @@ def test_a_complete_but_wrong_set_is_refused_at_the_scenario_code(
     with pytest.raises(ScenarioEvidenceError) as refusal:
         cli._scenario_report_for(TRIAL_ID, _ledger(research_ledger_dsn), _store(research_env))
     assert "sealed more than once" in str(refusal.value.__cause__)
+
+
+def test_a_grid_whose_runs_disagree_about_the_specification_is_refused_on_identity(
+    seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    """The identity check's clause, reached through the command rather than only in a unit test.
+
+    The case above lands on *completeness*, because a repeated level trips it
+    first and the report is refused for the first reason that applies. That leaves
+    the identity check's own clause unexercised end to end, and it is reachable
+    with a complete grid: all three levels present exactly once, every summary
+    COMPLETE, the baseline and both stressed levels matching the protocol, and
+    the window the declared one. Only the specification the runs were pinned to
+    disagrees, and nothing above check 6 can see that.
+
+    All three levels are sealed by hand rather than by the orchestrator, because
+    the orchestrator cannot produce this shape: it derives one digest for all
+    three, which is the whole point of it, so a fourth document at an occupied
+    level is the only way to introduce a second one and that is a completeness
+    defect instead. The specification digest is operator-declared and unvouched
+    since Phase 8A -- the ledger records what it is told and counts the distinct
+    values -- so this is what an operator produces by starting one attempt from
+    the wrong candidate's digest, not a hand-built contrivance.
+    """
+
+    protocol = _protocol(seeded)
+    _register(tmp_path, seeded)
+    honest = canonical_sha256(protocol.candidates[0])
+    drifted = canonical_sha256(protocol.candidates[1])
+    for multiplier, spec_sha256 in (("1", honest), ("1.5", drifted), ("2", honest)):
+        attempt_id = f"grid-{multiplier}"
+        assert (
+            _start(trial_id=TRIAL_ID, attempt_id=attempt_id, spec_sha256=spec_sha256).exit_code
+            == cli.ExitCode.OK
+        )
+        _record(
+            _write(
+                tmp_path / f"{attempt_id}.json",
+                _run(
+                    seeded,
+                    marked=True,
+                    trial_id=TRIAL_ID,
+                    attempt_id=attempt_id,
+                    **{"--stress-multiplier": multiplier, "--spec-sha256": spec_sha256},
+                ),
+            ),
+            attempt_id=attempt_id,
+        )
+
+    result = _scenario_report()
+
+    assert result.exit_code == cli.ExitCode.SCENARIO_EVIDENCE
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        cli._scenario_report_for(TRIAL_ID, _ledger(research_ledger_dsn), _store(research_env))
+    cause = str(refusal.value.__cause__)
+    assert "spec_sha256" in cause
+    assert "sealed more than once" not in cause
 
 
 def test_a_candidate_the_chain_never_registered_is_refused_by_name(
