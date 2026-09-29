@@ -1396,15 +1396,16 @@ This is the one place an operator is surprised, so it is stated rather than left
 to be discovered. `scenarios` reads the multipliers and the money terms from the
 file it is given and seals from those; `scenario-report` then re-derives its own
 grid from the sealed registration and refuses at **exit 19** when they disagree.
-The runs have already happened: three attempts started, three documents sealed
-and three rows appended per level, so the refusal arrives after nine writes
-rather than before them. That is fail-closed and it is not silent, but it is late.
-There is no edit that fixes it, because a registration cannot be amended: the
-sealed documents stay where they are, evidence of a run against a declaration
-the chain does not hold, and a grid that was never declared has to be
-preregistered as a new one and run against its own candidate. The multipliers
-themselves cannot be edited even in the file: `CostSpec` pins the stressed levels
-to exactly `{1.5, 2}`, so what can disagree is the baseline they are multiples of.
+The runs have already happened: per level, an `EXECUTION_STARTED` row, a sealed
+document, and the `RESULT_RECORDED` and `EVIDENCE_SEALED` rows that reference it
+— so three documents and nine events before the refusal, on a chain that already
+held the registration. It is late, and there is no edit that fixes it, because a
+registration cannot be amended: the sealed documents stay where they are, evidence
+of a run against a declaration the chain does not hold, and a grid that was never
+declared has to be preregistered as a new one and run against its own candidate.
+The multipliers themselves cannot disagree even in the file: `CostSpec` pins the
+stressed levels to exactly `{1.5, 2}`, so what can disagree is the baseline they
+are multiples of.
 
 ### The six checks, and what each one names
 

@@ -1867,12 +1867,15 @@ def research_trial_scenarios(
 
     It does not make the grid unconditionally reportable, and the difference is
     worth being exact about. An ``--protocol`` file edited after registration
-    still can: this command reads the file's multipliers and money terms, seals
-    three bundles and six rows, and only then refuses, at 19, because
-    ``scenario-report`` re-derived its own grid from the sealed registration. A
-    protocol that is not the one the chain holds produces a report that says so,
-    which is the fail-closed answer and not a silent one -- but it is a refusal
-    after nine writes, not before them.
+    still can. This command reads the file's multipliers and money terms, and for
+    each level appends an ``EXECUTION_STARTED``, seals a bundle, and appends the
+    ``RESULT_RECORDED`` and ``EVIDENCE_SEALED`` that reference it -- so it
+    writes three documents and nine events before ``scenario-report`` re-derives
+    its grid from the sealed registration and refuses, at 19. On a chain that
+    already held the registration that is ten rows in total. A protocol that is
+    not the one the chain holds produces a report that says so, which is the
+    fail-closed answer and not a silent one -- but it is a refusal at the end of
+    nine writes, not a preflight before them.
 
     The levels are read here from the file the operator names and, in
     ``scenario-report``, from the ``PREREGISTERED`` event in the chain. The two
