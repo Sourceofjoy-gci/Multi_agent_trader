@@ -98,12 +98,17 @@ MULTIPLIERS = ["1", "1.5", "2"]
 
 
 def _options(seeded: Fixture) -> dict[str, str]:
-    """The fourteen options ``backtest run`` and ``research trial scenarios`` share.
+    """The options ``backtest run`` and ``research trial scenarios`` share.
 
     Read out of ``_args`` rather than written out again, which is the whole
     reason this helper exists: the S-4 assertion below is only a comparison of
     two cost levels if both sides were handed the same declared inputs, and a
-    second list of the fourteen is a list that can quietly stop being that.
+    second list is a list that can quietly stop being that.
+
+    This is the *full* ``backtest run`` option set including its five cost
+    terms. ``_scenario_args`` subtracts the cost ones, because the orchestrator
+    reads its costs from the protocol; ``_baseline`` reads them from here, which
+    is what makes the preregistration and the hand-run agree.
     """
 
     argv = _args(seeded, start=seeded.first_bar, end=seeded.last_bar, identity=False)
@@ -111,13 +116,14 @@ def _options(seeded: Fixture) -> dict[str, str]:
 
 
 def _baseline(options: dict[str, str]) -> CostModel:
-    """The protocol's declared baseline, read from the same options the grid runs with.
+    """The protocol's declared baseline, read from the hand-run's own cost options.
 
-    Check 3 compares the level-1 scenario to this field for field, so a
-    preregistration whose baseline was written by hand from a *different* set of
-    cost options would refuse the very grid it declared -- and the refusal would
-    be correct. Building it from the invocation's own options is what makes the
-    healthy cases here healthy.
+    The orchestrator takes no cost options at all -- it reads this field and
+    multiplies it per level -- so the only thing that has to agree with it is the
+    hand-run ``backtest run`` that the S-4 assertion compares against. Building
+    it from that invocation's own options is what makes the two the same
+    experiment, and a protocol declaring different costs would correctly refuse
+    the grid rather than quietly report on a different one.
     """
 
     return CostModel(
@@ -208,6 +214,23 @@ def _register(tmp_path: Path, seeded: Fixture) -> Path:
     return path
 
 
+_COST_OPTIONS = (
+    "--commission-per-lot-per-side",
+    "--slippage-points-per-side",
+    "--swap-long-points-per-day",
+    "--swap-short-points-per-day",
+    "--triple-swap-weekday",
+)
+"""The five cost options ``backtest run`` takes and ``scenarios`` deliberately does not.
+
+They are subtracted rather than listed, because ``_options`` is read out of
+``_args`` precisely so the two commands cannot drift, and a hand-written
+replacement list is exactly the second copy this file exists to avoid. Every term
+is a field of ``CostModel`` and so is a field of the protocol's
+``costs.baseline``, which the orchestrator reads and multiplies per level.
+"""
+
+
 def _scenario_args(
     seeded: Fixture,
     protocol_path: Path,
@@ -218,14 +241,19 @@ def _scenario_args(
 ) -> list[str]:
     """One ``research trial scenarios`` invocation, in the shape an operator types it.
 
-    The fourteen shared options come from ``_options``; the seven the orchestrator
-    adds are its own. Nothing here is optional: the command takes no
-    ``--mark-to-market``, no ``--stress-multiplier`` and no identity trio, because
-    the grid is the only way through it that can widen the declared set.
+    The shared options come from ``_options`` minus the five cost ones, because
+    this command takes no cost at all: the grid and every term in it are read
+    from ``--protocol``. Passing them would be refused as unknown options, which
+    is the point -- there is no second copy of the costs to disagree with the
+    registration and no way to seal a grid the report would then refuse.
+
+    Nothing here is optional either: the command takes no ``--mark-to-market``,
+    no ``--stress-multiplier`` and no identity trio, because the grid is the
+    only way through it that can widen the declared set.
     """
 
     options = (
-        _options(seeded)
+        {key: value for key, value in _options(seeded).items() if key not in _COST_OPTIONS}
         | {
             "--protocol": str(protocol_path),
             "--trial-id": trial_id,

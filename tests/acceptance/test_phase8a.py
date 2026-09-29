@@ -93,7 +93,7 @@ runner = CliRunner()
 
 # The trial command table, in the order `research trial --help` prints it. Named
 # here rather than derived, so a new command fails this file instead of quietly
-# widening the operator table the README carries. Phase 8B2b added the last two:
+# widening the operator table the README carries. Phase 8B2b added two:
 # `scenarios` runs and seals a candidate's declared cost grid, and
 # `scenario-report` reads one back.
 TRIAL_COMMANDS = (

@@ -1841,11 +1841,6 @@ def research_trial_scenarios(
     contract: Annotated[Path, typer.Option("--contract")],
     atr_period: Annotated[int, typer.Option("--atr-period", min=1)],
     spread_window: Annotated[int, typer.Option("--spread-window", min=1)],
-    commission_per_lot_per_side: Annotated[str, typer.Option("--commission-per-lot-per-side")],
-    slippage_points_per_side: Annotated[str, typer.Option("--slippage-points-per-side")],
-    swap_long_points_per_day: Annotated[str, typer.Option("--swap-long-points-per-day")],
-    swap_short_points_per_day: Annotated[str, typer.Option("--swap-short-points-per-day")],
-    triple_swap_weekday: Annotated[int, typer.Option("--triple-swap-weekday")],
     defective_bar_tolerance: Annotated[str, typer.Option("--defective-bar-tolerance")] = "0",
 ) -> None:
     """Run, seal and compare the cost grid this protocol preregistered.
@@ -1855,17 +1850,28 @@ def research_trial_scenarios(
     candidate examined at three cost levels is three attempts and **one**
     selection, and the selection count is what DSR divides by.
 
-    The grid comes from ``--protocol`` here and from the chain in
-    ``scenario-report``. The two must agree, and ``scenario-report`` re-derives
-    it from the sealed registration, so a protocol file edited after the fact
-    cannot widen what the report will accept.
+    The grid and every cost in it come from ``--protocol`` and from nowhere
+    else. There is deliberately no ``--commission-per-lot-per-side`` here
+    although ``backtest run`` has one: the protocol already preregistered
+    ``costs.baseline``, ``scenario-report`` checks each level against that same
+    baseline, and a second copy typed on the command line could only ever agree
+    with it or refuse the whole grid. An operator who types the six terms twice
+    and gets one wrong is told their sealed scenarios disagree with a
+    registration they cannot amend. Deriving them costs one multiplication per
+    level and removes the only way this command could produce an unreportable
+    grid.
 
-    Every level shares one ``--spec-sha256``-free specification digest, computed
-    from the protocol's own candidate rather than typed three times. Three
-    hand-typed digests is exactly how the machine that verified 8B1 and 8B2a
-    ended up with ``trial-1`` counting two effective specifications: the ledger
-    faithfully recorded what it was told, and nothing checked it. Here there is
-    nothing to mistype.
+    The levels are read here from the file the operator names and, in
+    ``scenario-report``, from the ``PREREGISTERED`` event in the chain. The two
+    must agree, and the report re-derives its own from the sealed registration,
+    so a protocol file edited after the fact cannot widen what will be accepted.
+
+    Every level shares one specification digest, computed from the protocol's
+    own candidate rather than typed three times. Three hand-typed digests is
+    exactly how the machine that verified 8B1 and 8B2a ended up with
+    ``trial-1`` counting two effective specifications: the ledger faithfully
+    recorded what it was told, and nothing checked it. Here there is nothing to
+    mistype.
     """
 
     def operation() -> dict[str, JsonValue]:
@@ -1896,13 +1902,16 @@ def research_trial_scenarios(
                 start=start,
                 end=end,
                 firm_equity=_decimal(firm_equity),
-                cost_model=CostModel(
-                    commission_per_lot_per_side=_decimal(commission_per_lot_per_side),
-                    slippage_points_per_side=_decimal(slippage_points_per_side),
-                    swap_long_points_per_day=_decimal(swap_long_points_per_day),
-                    swap_short_points_per_day=_decimal(swap_short_points_per_day),
-                    triple_swap_weekday=triple_swap_weekday,
-                    stress_multiplier=multiplier,
+                # The baseline with this level's multiplier on it, and nothing
+                # else. ``scenario_report``'s baseline and scenario checks
+                # compare each sealed cost model against ``costs.baseline`` the
+                # same way, so this is the one expression both sides share and
+                # there is nothing for an operator to mistype. Every term of
+                # ``CostModel`` -- ``triple_swap_weekday`` included -- comes from
+                # the registration, which is why there is no cost option on this
+                # command at all.
+                cost_model=parsed.costs.baseline.model_copy(
+                    update={"stress_multiplier": multiplier}
                 ),
                 atr_period=atr_period,
                 spread_window=spread_window,
