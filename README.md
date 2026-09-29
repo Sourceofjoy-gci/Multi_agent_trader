@@ -1364,10 +1364,13 @@ against those same declarations; so a second copy typed on the command line coul
 only ever *agree* with the registration or *refuse the whole grid* — and a
 registration cannot be amended after the fact, so an operator who types the same
 values twice and gets one wrong is told their sealed scenarios disagree with
-something they cannot fix. The remaining options (`--exit-policy`,
-`--firm-equity`, `--atr-period`, `--spread-window`,
-`--defective-bar-tolerance`, `--contract`) are ones the registration does not
-state, so a copy of one of those cannot disagree with anything.
+something they cannot fix. The options that remain beyond the identity and
+provenance ones — `--exit-policy`, `--firm-equity`, `--atr-period`,
+`--spread-window`, `--defective-bar-tolerance`, `--contract` — are ones the
+registration does not state, so a copy of one of those cannot disagree with
+anything. (`--trial-id` does name something the registration states, but a wrong
+one selects a different candidate rather than a different grid, so it fails loudly
+and immediately instead of sealing anything.)
 
 It matters more than tidiness, because that refusal is a **one-way door**. An
 operator who registered over a year and typed the last week gets three sealed
@@ -1529,13 +1532,19 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
   The report is a different matter: it holds the sealed protocol, and
   `canonical_sha256` over a `TrialSpec` is deterministic, so the identity check
   compares each level's declared digest against the registration and refuses a
-  grid that names a specification no candidate has. Two things survive that. A
-  grid whose three levels all declare the *same* wrong digest agrees with itself,
-  so it still gets past this check — though not past the orchestrator, which has
-  no digest option at all. And a run sealed outside the orchestrator, under a
-  trial nobody registered, is refused for want of a registration before its
-  digest is ever compared. What the ledger cannot do is stop the wrong digest
-  being *written*; what 8B2b does is stop it being *read as a report*.
+  grid that names a specification no candidate has. That includes a grid whose
+  three levels all declare the *same* wrong digest — it agrees with itself, and
+  agreement is not authority. A grid sealed for a trial nobody registered is
+  refused a step earlier still, for want of a registration. So the only thing that
+  survives is upstream of the report entirely: the ledger cannot stop the wrong
+  digest being **written**. What 8B2b does is stop it being **read as a report**.
+- **8B3 inherits a live false-refusal trap here.** `spec_sha256` equality is now a
+  hard gate on reportability, so any change to *how a run's declared specification
+  is derived* — not to the strategy or the sizing — makes correctly sealed grids
+  fail at exit 19 with three documents already in the chain. If 8B3 introduces a
+  second legitimate `TrialSpec` for one trial, the fix belongs in
+  `ops.scenarios.declared_candidate`, which both the orchestrator and the check
+  already call, and not in a widened comparison.
 - **Orchestrating three runs does not establish that the trade sequence is
   cost-invariant on any future engine.** The identity check pins the sequence
   across the three levels *on today's engine*, and that is a real check — a
@@ -1565,7 +1574,7 @@ uv run trading-house --help
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
-| `trading-house research trial scenarios` | Run, seal and report the cost grid a protocol preregistered, one attempt and one sealed bundle per level. Takes no cost options: the grid and every cost in it come from `--protocol` |
+| `trading-house research trial scenarios` | Run, seal and report the cost grid a protocol preregistered, one attempt and one sealed bundle per level. Takes no cost, window or strategy options: the grid, its costs, its window and its strategy all come from `--protocol`, because the report checks every level against those same declarations |
 | `trading-house research trial scenario-report` | Check a candidate's sealed scenarios against the grid recovered from the chain's `PREREGISTERED` event, and report. States no verdict |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |

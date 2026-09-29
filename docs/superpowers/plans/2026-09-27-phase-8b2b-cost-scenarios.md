@@ -1260,16 +1260,17 @@ research trial register --protocol protocol.json
 research trial scenarios --protocol protocol.json --trial-id trial-1 `
     --attempt-prefix grid-1 --started-at 2026-09-27T12:00:00 `
     --occurred-at 2026-09-27T12:30:00 --registered-at 2026-09-27T12:00:00 `
-    --agent-run-id run-1 --strategy session_momentum_eurusd --exit-policy none `
-    --start 2024-01-01T00:00:00 --end 2024-06-01T00:00:00 --firm-equity 100000 `
+    --agent-run-id run-1 --exit-policy none --firm-equity 100000 `
     --contract eurusd-contract.json --atr-period 2 --spread-window 10 `
-    --commission-per-lot-per-side 3.50 --slippage-points-per-side 0 `
-    --swap-long-points-per-day -0.80 --swap-short-points-per-day 0.30 `
-    --triple-swap-weekday 2 --defective-bar-tolerance 0
+    --defective-bar-tolerance 0
 research trial scenario-report --trial-id trial-1
 research trial count
 research trial verify
 ```
+
+> **Amended during implementation.** This invocation originally carried
+> `--strategy`, `--start`, `--end` and all five money terms. The command takes none of them — see
+> the amendment note on §3.2 of the design — so this block is the shape an operator actually types.
 
 The command is invoked as `research trial scenarios`, not `research trial scenario-report ...` for
 the second — two separate invocations, and the report is worth running on its own rather than

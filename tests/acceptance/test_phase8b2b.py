@@ -131,6 +131,8 @@ _NO_VERDICT_HELP = (
     "approve",
     "reject",
     "verdict",
+    "pass",
+    "fail",
     "accept",
     "eligib",
 )
@@ -144,23 +146,17 @@ inflection slipping past a gate is the whole failure mode.
 ``judge`` is absent, for the reason ``tests/unit/ops/test_scenarios.py`` gives for
 the same omission: both commands say in their own docstrings that they do not
 judge, and a gate that fired on the sentence promising restraint would be a gate
-to disable rather than to satisfy. ``verdict`` *is* matched, and that is the
-correction a previous version of this list needed: the docstring it was written
-against said "There is no survival verdict here" -- promising restraint with the
-word itself -- so the stated rule ("no decision vocabulary at all") and the
-implementation (six stems) disagreed, and the docstring used ``verdict`` and
-``pass/fail`` for free. The docstring no longer does, and ``verdict`` is now in
-the list, so the two agree.
+to disable rather than to satisfy.
 
-**``pass`` and ``fail`` are deliberately not in the list**, which is a real
-omission rather than an oversight. They name *any* unsuccessful thing, not a
-decision about a candidate, and two texts in this CLI use them legitimately:
-``health``'s own summary promises "a typed failure", and half the command surface
-discusses refusing an operator. A gate carrying those two would fire on the
-surrounding prose and would be relaxed the first time somebody wrote about an
-error -- which is the failure mode a gate exists to prevent. ``verdict``,
-``accept`` and ``eligib`` are the same idea narrower, and appear nowhere in
-either help screen today.
+``pass`` and ``fail`` are in the list, and an earlier version left them out on the
+argument that they name any unsuccessful thing rather than a decision about a
+candidate. That argument does not survive the gate's actual scope: it reads two
+help screens, and *neither* contains either word. The one place in this CLI that
+does — ``health``'s summary promising "a typed failure" — is not a screen this
+gate reads, so the exclusion bought nothing and cost the two likeliest phrasings
+of the thing the binding constraint forbids: "the candidate passes the declared
+grid". If a future sentence genuinely needs one, the remedy is the reword this
+slice already applied to ``verdict``.
 
 Lowercased before matching, and that is not a detail. A capital at the start of a
 sentence is where a capital goes, and a docstring's first line is the summary Typer
@@ -171,9 +167,9 @@ the single easiest edit that could make this gate a lie.
 ``_NO_VERDICT`` from ``tests/unit/ops/test_scenarios.py`` and carries two words
 this one does not -- ``total`` and ``verdict`` -- because it matches *field names*,
 where those two are forbidden outright, and it spells ``promote`` rather than
-``promot``. This one matches prose, where ``recommend`` is the stem an operator
-document is most likely to reach for. Two surfaces, two rules, one reason each;
-the alternative is one list that is wrong on at least one of them.
+``promot``. This one matches prose, where ``total`` is a word an operator uses
+freely about their own P&L. Two surfaces, two rules, one reason each; the
+alternative is one list that is wrong on at least one of them.
 """
 
 
@@ -887,6 +883,8 @@ def test_neither_commands_help_text_claims_a_verdict(command: list[str]) -> None
         "The candidate is approved for paper trading.",
         "This candidate is rejected at 1.5x.",
         "Prints a verdict for each level.",  # the word the docstring used to spend
+        "The candidate passes the declared grid.",  # the likeliest phrasing of all
+        "This candidate fails at 1.5x.",
         "The candidate is acceptable at 1.0x.",
         "Two levels of eligibility remain.",
         # The loophole this gate used to have: a denial and a claim in one

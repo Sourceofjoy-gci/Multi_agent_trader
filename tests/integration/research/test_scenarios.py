@@ -319,6 +319,33 @@ def _foreign_baseline_bundle(seeded: Fixture, spec_sha256: str, tmp_path: Path) 
 # --- the orchestrator ---------------------------------------------------------
 
 
+@pytest.mark.parametrize("option", _NOT_ON_THE_ORCHESTRATOR)
+def test_the_orchestrator_refuses_an_option_it_reads_from_the_protocol(
+    seeded: Fixture, tmp_path: Path, option: str
+) -> None:
+    """The eight are absent, not merely optional — and a refusal is the test.
+
+    ``_scenario_args`` subtracting them proves they are not *required*. It does
+    not prove they are *refused*, and re-adding one to the signature is the
+    natural edit for somebody who thinks the protocol's window or strategy might
+    be wrong — the very doubt the command's docstring argues is unanswerable,
+    because disagreeing with a registration is a refusal with no remedy. So each
+    of the eight is passed and the command is asked to reject it.
+
+    No protocol is registered and no database is touched: the refusal is Typer's
+    own, before the operation runs, which is also why the ``--protocol`` path
+    here need not exist. ``--strategy`` and the two window options carry values;
+    the money terms carry a number. Only the option's presence matters, and that
+    is what the exit code reports.
+    """
+
+    argv = [*_scenario_args(seeded, tmp_path / "never-read.json"), option, "1"]
+
+    result = runner.invoke(cli.app, argv)
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION, result.stderr
+
+
 def test_the_orchestrator_seals_every_declared_level_and_reports_them(
     seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
 ) -> None:

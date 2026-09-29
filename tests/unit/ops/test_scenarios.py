@@ -557,27 +557,18 @@ def test_a_trial_declared_by_two_registrations_is_refused_rather_than_picked() -
     """Phase 8A permits registering one trial twice, so this is reachable.
 
     ``PostgresTrialLedger.register`` derives its event id from the protocol's
-    digest, so a protocol differing in one byte is a different id rather than a
-    conflict, and nothing refuses it. Two registrations can therefore both
+    content digest, so a protocol differing in one byte is a different id rather
+    than a conflict, and nothing refuses it. Two registrations can therefore both
     declare ``trial-1`` -- and they differ in ``execution``, ``validation``,
     ``regimes`` and ``holdout``, none of which any of the six checks reads.
 
-    First-match-wins would pick the older one silently, and a grid sealed under
-    the newer registration would be reported against the older: a clean report
+    First-match-wins would pick the older one silently, and a grid sealed under the
+    newer registration would be reported against the older: a clean report
     describing the wrong experiment, with nothing downstream to notice.
     """
 
     original = _protocol()
-    amended = _protocol()
-    amended = TrialProtocol(
-        **{
-            **amended.model_dump(),
-            "protocol_id": "protocol-amended",
-            # A field no check reads, which is exactly why first-match-wins would
-            # go unnoticed.
-            "execution": amended.execution.model_copy(update={"seed": "other"}),
-        }
-    )
+    amended = _amended_registration(original)
 
     with pytest.raises(ScenarioEvidenceError) as refusal:
         registered_protocol(
@@ -585,8 +576,44 @@ def test_a_trial_declared_by_two_registrations_is_refused_rather_than_picked() -
             _trial_id(original),
         )
     cause = str(refusal.value.__cause__)
-    assert "more than one registration" in cause
-    assert "protocol-amended" in cause
+    assert "not the same protocol" in cause
+    assert canonical_sha256(original)[:16] in cause
+    assert canonical_sha256(amended)[:16] in cause
+
+
+def test_a_re_registration_under_the_same_protocol_id_is_refused_too() -> None:
+    """The harder case, and the one an id-keyed comparison would pass.
+
+    ``protocol_id`` is a bare ``NonEmptyStr`` that nothing binds to what the
+    protocol says, and re-registering an amended protocol under the same id is the
+    natural way to amend -- that is what an id is for. Two such registrations
+    carry identical ids, so refusing only on the ids would let the first-match
+    defect straight back in for a case as reachable as the one it catches.
+
+    ``execution.seed`` is the field varied, and it is one none of the six checks
+    reads, so a report built against the wrong one would be clean.
+    """
+
+    original = _protocol()
+    amended = _amended_registration(original)
+    assert amended.protocol_id == original.protocol_id, "the ids must match for this to be the case"
+
+    with pytest.raises(ScenarioEvidenceError):
+        registered_protocol(
+            [_preregistered_event(original), _preregistered_event(amended)],
+            _trial_id(original),
+        )
+
+
+def _amended_registration(protocol: TrialProtocol) -> TrialProtocol:
+    """The same protocol with one field none of the six checks reads changed."""
+
+    return TrialProtocol(
+        **{
+            **protocol.model_dump(),
+            "execution": protocol.execution.model_copy(update={"seed": "other"}),
+        }
+    )
 
 
 def test_the_report_refuses_a_grid_whose_specification_is_not_the_registration_s() -> None:

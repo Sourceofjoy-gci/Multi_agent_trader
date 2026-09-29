@@ -132,6 +132,30 @@ def declared_grid(protocol: TrialProtocol) -> tuple[Decimal, ...]:
     return tuple(sorted({Decimal(1), *protocol.costs.stress_multipliers}))
 
 
+def declared_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec | None:
+    """The one candidate a protocol declares under this trial id, or ``None``.
+
+    Exported rather than written twice, and that is the whole reason. Two
+    callers need this expression and the second of them is the *identity check*:
+    the orchestrator seals ``canonical_sha256`` of this candidate, and the report
+    compares each bundle's declared digest against ``canonical_sha256`` of the
+    same candidate. A future edit to one copy and not the other would make a
+    correctly sealed grid fail at exit 19 — after three documents and nine events
+    are already in the chain, which is the one-way door the orchestrator's option
+    list exists to close. The soundness of the check is the claim that these agree,
+    so there is one of them.
+
+    Returns ``None`` rather than raising, because the two callers want different
+    errors: the report is refusing evidence and the CLI boundary is refusing an
+    operator's argument. Each raises its own.
+    """
+
+    for candidate in protocol.candidates:
+        if candidate.trial_id == trial_id:
+            return candidate
+    return None
+
+
 def registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialProtocol:
     """The one protocol this trial was registered against, out of the chain.
 
@@ -150,16 +174,28 @@ def registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialPr
     reason.
 
     **Refuses rather than picks, if the chain names the trial twice.** Not a
-    hypothetical: ``PostgresTrialLedger.register`` derives its event id from the
-    protocol's digest, so a protocol differing in a single byte is a different id
-    and not a conflict, and nothing in Phase 8A stops a second registration from
-    declaring a trial the first one already declared. First-match-wins would then
-    pick silently -- and a grid sealed under the second registration would be
-    reported against the first, which is a clean report describing the wrong
-    experiment. The two registrations differ in fields none of the six checks read
-    (``execution``, ``validation``, ``regimes``, ``holdout``), so nothing
-    downstream would notice. Refusing names both protocol ids and leaves the fix
-    where it belongs: the ledger's own surface, which is 8A's, not this read.
+    hypothetical: ``PostgresTrialLedger.register`` derives its event id from
+    ``canonical_sha256`` of the protocol, so a protocol differing in a single byte
+    is a different id and not a conflict, and nothing in Phase 8A stops a second
+    registration from declaring a trial the first one already declared.
+    First-match-wins would then pick silently -- and a grid sealed under the
+    second registration would be reported against the first, which is a clean
+    report describing the wrong experiment. The two registrations differ in
+    fields none of the six checks read (``execution``, ``validation``,
+    ``regimes``, ``holdout``), so nothing downstream would notice.
+
+    Keyed on the **content digest, not on ``protocol_id``**, and that is the load
+    bearing detail: ``protocol_id`` is a bare ``NonEmptyStr`` that nothing binds to
+    what the protocol says, and re-registering an amended protocol under the same
+    id is the natural way to amend, since that is what an id is for. Two such
+    registrations carry the same ``protocol_id`` and would pass an id-keyed
+    comparison -- the first-match defect again, for a case as reachable as the one
+    a digest key catches. Since an identical protocol collapses to a single event
+    on the way in, a content key cannot false-positive. The message names the
+    digests rather than the ids for the same reason: the ids carry no authority.
+
+    Refusing here leaves the fix where it belongs: the ledger's own surface, which
+    is 8A's, not this read.
     """
 
     found: list[TrialProtocol] = []
@@ -167,36 +203,36 @@ def registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialPr
         if not isinstance(event.payload, PreregisteredPayload):
             continue
         protocol = event.payload.protocol
-        if any(candidate.trial_id == trial_id for candidate in protocol.candidates):
+        if declared_candidate(protocol, trial_id) is not None:
             found.append(protocol)
     if not found:
         raise ScenarioEvidenceError() from ValueError(
             f"trial {trial_id} has no preregistered protocol"
         )
-    if len({protocol.protocol_id for protocol in found}) > 1:
+    digests = {canonical_sha256(protocol) for protocol in found}
+    if len(digests) > 1:
         raise ScenarioEvidenceError() from ValueError(
-            f"trial {trial_id} is declared by more than one registration: "
-            f"{sorted(protocol.protocol_id for protocol in found)}"
+            f"trial {trial_id} is declared by {len(found)} registrations that are not "
+            f"the same protocol: {sorted(digests)}"
         )
     return found[0]
 
 
 def _candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
-    """The one candidate a protocol declares under this trial id.
+    """The one candidate a protocol declares, or a refusal naming the protocol.
 
-    A ``TrialProtocol`` has no lookup for its own candidates and a caller
-    reaching for one would write the comprehension anyway; this is the same
-    expression, named, because ``registered_protocol`` decides *that* a trial was
-    declared and ``_refuse_identity`` needs *which* ``TrialSpec``, and the two
-    must not be able to disagree about it.
+    ``declared_candidate`` returns ``None`` because its two callers want
+    different errors; this is the report's half. ``_refuse_identity`` cannot fall
+    back to the first candidate or to the bundle's own, since "which candidate was
+    this grid registered as" is precisely the question the check answers.
     """
 
-    for candidate in protocol.candidates:
-        if candidate.trial_id == trial_id:
-            return candidate
-    raise ScenarioEvidenceError() from ValueError(
-        f"protocol {protocol.protocol_id} declares no {trial_id}"
-    )
+    candidate = declared_candidate(protocol, trial_id)
+    if candidate is None:
+        raise ScenarioEvidenceError() from ValueError(
+            f"protocol {protocol.protocol_id} declares no {trial_id}"
+        )
+    return candidate
 
 
 def scenario_report(
@@ -495,19 +531,19 @@ def _refuse_identity(
     vouched it -- but this function is not reading the column. It holds the sealed
     ``TrialProtocol``, ``canonical_sha256`` over a ``TrialSpec`` is deterministic,
     and ``research trial scenarios`` computes precisely that expression from the
-    same document. So the digest is a fact about two sealed artifacts, not about
-    anybody's honesty, and comparing it is arithmetic rather than trust. The
-    machine that verified 8B1 and 8B2a has a trial in its chain right now counted
-    as two effective specifications because a digest was typed off the wrong
-    candidate; that drift produces a report whose ``spec_sha256`` names no
-    registered candidate at all, which is why it is refused here rather than
-    reported.
+    same document through the same ``declared_candidate`` lookup. So the digest is
+    a fact about two sealed artifacts, not about anybody's honesty, and comparing
+    it is arithmetic rather than trust. The machine that verified 8B1 and 8B2a has
+    a trial in its chain right now counted as two effective specifications because
+    a digest was typed off the wrong candidate; that drift produces a report whose
+    ``spec_sha256`` names no registered candidate at all, which is why it is
+    refused here rather than reported.
 
-    What this cannot do is stop a *consistently* wrong digest from being sealed in
-    the first place -- a run whose declared spec is wrong on all three levels
-    agrees with itself. That is the ledger's unvouched column, 8A's surface, and
-    the README says so in full. What is refused here is a grid whose levels
-    disagree, or which disagrees with the registration this report was given.
+    A grid whose three levels all declare the *same* wrong digest is refused too:
+    it agrees with itself, and agreement is not authority. What none of this can do
+    is stop a wrong digest being *written* in the first place -- the ledger's
+    unvouched column is 8A's surface, and the README says so in full. What 8B2b
+    does is stop one being *read as a report*.
 
     ``attempt_id`` is deliberately *not* here. It names an attempt rather than a
     candidate, and the report prints it on every row; pinning it would assert

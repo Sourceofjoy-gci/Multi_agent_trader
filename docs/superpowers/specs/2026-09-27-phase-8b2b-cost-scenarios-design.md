@@ -78,7 +78,7 @@ research trial scenarios --protocol P --trial-id T --attempt-prefix A
 ```
 
 > **Amended during implementation.** This originally read *the backtest run options, minus
-> `--stress-multiplier`*, and took all six cost options plus `--start`/`--end`/`--strategy`. It
+> `--stress-multiplier`*, and took all five money terms plus `--start`/`--end`/`--strategy`. It
 > takes **none of those eight**, on the rule that **the command takes no option for any value the
 > report compares against the protocol.** The protocol preregistered `costs.baseline`,
 > `data.start`/`data.end` and `strategy_id`; the report checks every level against those same
@@ -86,7 +86,9 @@ research trial scenarios --protocol P --trial-id T --attempt-prefix A
 > grid*, and a registration cannot be amended. That refusal is a one-way door — a retry after
 > sealing a wrong window appends a second document at that level, and completeness then refuses the
 > candidate permanently — so not having the option is the only version with no such state to reach.
-> The remaining options are values the registration does not state, so a copy cannot contradict it.
+> The options that remain beyond the identity and provenance ones — `--exit-policy`,
+> `--firm-equity`, `--atr-period`, `--spread-window`, `--defective-bar-tolerance`, `--contract` —
+> are values the registration does not state, so a copy of one cannot contradict it.
 
 It derives its grid from `P` — `{1.0} ∪ protocol.costs.stress_multipliers` — and for each level
 `m` in ascending order:
@@ -134,12 +136,14 @@ preregistration and the outcome in one place.
 
 ## 5. The fail-closed evidence checks
 
-In order, so an incomplete candidate is refused for the first reason that applies. **Six**, not the
-four this section originally listed; the two added during implementation are marked. A seventh
-refusal, on the caller's own inputs rather than the evidence, runs before all of them.
+**Six**, not the four this section originally listed. **Three** were added during implementation —
+checks **2**, **5** and the boundary refusal **0** — and each is marked. They run in the order
+below, so an incomplete candidate is refused for the first reason that applies.
 
-**0 — Reportable.** A blank `trial_id`, a sealed scenario carrying no digest to name it by, or a
-bundle already found naming another candidate. Without it those two inputs would land in
+**0 — Reportable.** *Added during implementation.* A blank `trial_id`, a sealed scenario carrying no
+digest to name it by, or a bundle already found naming another candidate — the last of which checks
+the evidence even though the first two check the caller's own arguments. Without it those inputs
+would land in
 `NonEmptyStr` fields and a `strict` model would answer with a `ValidationError`, which echoes the
 offending value and is not the class the CLI maps to exit 19.
 

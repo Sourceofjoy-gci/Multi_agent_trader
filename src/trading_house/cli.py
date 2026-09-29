@@ -113,6 +113,7 @@ from trading_house.ops.ledger import (
 )
 from trading_house.ops.scenarios import (
     ScenarioReport,
+    declared_candidate,
     declared_grid,
     registered_protocol,
     scenario_report,
@@ -1347,19 +1348,26 @@ def backtest_run(
     _run(operation)
 
 
-def _candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
+def _declared_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
     """The one candidate a trial names, or a refusal naming what was asked for.
 
     ``StopIteration`` would be the natural failure of a bare ``next(...)`` and
     the wrong one here: it is not an error the catch-all may report as an
     internal fault, and the remedy is the operator passing the ``--trial-id``
     the protocol actually declares.
+
+    The lookup itself is ``ops.scenarios.declared_candidate`` and not a second
+    copy of it, because this command and the report's identity check must agree
+    about which candidate a grid was registered as -- the orchestrator seals this
+    candidate's digest and the report compares against it, so a divergence here
+    would refuse a correctly sealed grid at exit 19, after three documents and
+    nine events were already in the chain. Only the error class is this layer's.
     """
 
-    for candidate in protocol.candidates:
-        if candidate.trial_id == trial_id:
-            return candidate
-    raise ConfigurationError()
+    candidate = declared_candidate(protocol, trial_id)
+    if candidate is None:
+        raise ConfigurationError()
+    return candidate
 
 
 def _instrument_contract(contract: Path) -> InstrumentContract:
@@ -1899,7 +1907,7 @@ def research_trial_scenarios(
         # candidates are a tuple of ``TrialSpec`` reached by comprehension. An
         # unknown ``--trial-id`` is a ``ConfigurationError``, not a bare
         # ``StopIteration`` the catch-all would answer with a correlation id.
-        spec_sha256 = canonical_sha256(_candidate(parsed, trial_id))
+        spec_sha256 = canonical_sha256(_declared_candidate(parsed, trial_id))
         settings = _settings()
         ledger = _trial_ledger()
         store = _evidence_store()
