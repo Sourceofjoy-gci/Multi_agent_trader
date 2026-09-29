@@ -1601,15 +1601,8 @@ def research_trial_record(
         # they cannot act on.
         if not ledger.declares_trial(trial_id):
             raise TrialLedgerAppendError()
-        # ponytail: two appends, two transactions. A crash between them commits
-        # RESULT_RECORDED without EVIDENCE_SEALED, and ``verify()`` still reports
-        # a valid chain -- the bytes it holds are intact, only the reference to
-        # the file is absent, and a verifier is asked whether the ledger lies,
-        # not whether it is complete. Re-running ``record`` with the same bundle
-        # closes the pair, because both event ids are content-derived. The fix is
-        # one store transaction appending both events; it changes
-        # ``PostgresTrialLedger``'s public surface, so add ``append_all(events)``
-        # when an operator is bitten, not before.
+        # The two appends and the store write behind this call are two separate
+        # transactions, and the deferral note for that is on ``seal_bundle``.
         evidence_sha256 = seal_bundle(bundle, ledger=ledger, store=_evidence_store())
         return {"trial_id": trial_id, "evidence_sha256": evidence_sha256}
 

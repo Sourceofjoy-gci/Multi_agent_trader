@@ -235,6 +235,17 @@ def seal_bundle(
     The order is write-then-append, so a failed append leaves a document nothing
     references rather than a row whose document is missing. The unreferenced side
     of that pair is the recoverable one.
+
+    ponytail: two appends, two transactions. A crash between them commits
+    RESULT_RECORDED without EVIDENCE_SEALED, and ``verify()`` still reports a
+    valid chain -- the bytes it holds are intact, only the reference to the file
+    is absent, and a verifier is asked whether the ledger lies, not whether it is
+    complete. Re-running the command with the same bundle closes the pair, because
+    both event ids are content-derived. The fix is one store transaction appending
+    both events; it changes ``PostgresTrialLedger``'s public surface, so add
+    ``append_all(events)`` when an operator is bitten, not before. It lived in
+    ``cli.py`` beside the appends until Task 2 moved them here, and a deferral
+    note that stays behind stops describing the code it defers.
     """
 
     stored = store.write(bundle)
