@@ -1479,6 +1479,18 @@ specifications; that is worth having precisely because the third counter is a
 implement* above says in full. Read the numbers with `research trial count`, which
 counts from the chain rather than from anything the orchestrator believes.
 
+One qualification on the "+1 lottery", because it is the number a reader will
+check first. A grid for a candidate that has **never been started** moves all
+three counters: +3 attempts, +1 lottery, +1 specification, since this is the
+trial's first appearance anywhere in the chain. A *second* grid for a candidate
+already started moves only the attempts, +3 and nothing else. So "+3 attempts and
++0 lotteries" is the property of a candidate that is already in the denominator,
+not of the grid command, and a chain that has never seen the trial before will
+show one lottery appearing exactly as it should — once, for the one candidate
+those three runs are probing. Measured on two fresh candidates: `8/5/4` →
+`11/6/5` → `14/6/6` for `audit_attempts`/`selection_lotteries`/
+`effective_specifications`.
+
 ### What 8B2b does not establish
 
 - **A deleted sealed bundle exits 17, and a wrong-but-present set exits 19.**
