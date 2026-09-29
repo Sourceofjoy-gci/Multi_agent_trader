@@ -61,7 +61,6 @@ claim and the only one this framework makes before 8D does.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -125,52 +124,48 @@ absurd value is used to make the substitution obvious in the refusal text."""
 # --- the report's own vocabulary ----------------------------------------------
 
 _NO_VERDICT_HELP = ("surviv", "threshold", "promot", "recommend", "approve", "reject")
-"""Stems, not words, and ``promot`` is the one that matters.
+"""The vocabulary of a decision, as stems, matched anywhere in the help text.
 
-``promote`` is the obvious spelling and is *not* a substring of ``promotion`` --
-the noun both commands' help actually uses. A gate written on the bare word would
-pass on a help screen that said "promotion" ten times, so the stem is what is
-matched.
+``promot`` is the spelling that matters: ``promote`` is *not* a substring of
+``promotion``, so a gate written on the bare word would pass a help screen that
+announced its own promotion gate. The rest are stems for the same reason -- one
+inflection slipping past a gate is the whole failure mode.
 
-``judge`` and ``verdict`` are deliberately absent, for the reason
+``judge`` and ``verdict`` are absent, for the reason
 ``tests/unit/ops/test_scenarios.py`` gives for the same omission: both commands
-say in their own docstrings that they do *not* judge, and a gate that fired on
-the sentence promising restraint would be a gate to disable rather than to
-satisfy. What is matched here is vocabulary that can only appear in a field or a
-claim *making* a judgment, with the one exception ``_DENIALS`` below."""
+say in their own docstrings that they do not judge, and a gate that fired on the
+sentence promising restraint would be a gate to disable rather than to satisfy.
 
-_DENIALS = ("no ", "not ", "never", "without", "rather than", "cannot")
-"""What makes a sentence a promise of restraint rather than a verdict.
+Lowercased before matching, and that is not a detail. A capital at the start of a
+sentence is where a capital goes, and a docstring's first line is the summary Typer
+renders -- so ``Survives the grid; 8D decides.`` would otherwise pass, and it is
+the single easiest edit that could make this gate a lie.
 
-``scenario-report``'s own help says "There is no survival verdict here and no
-threshold: whether a candidate's degradation is acceptable is 8D's promotion
-gate, with its thresholds fixed in advance." Three of the six stems occur in
-that one sentence and all three are the report *declining* to judge. A gate that
-matched them would have to be relaxed the first time somebody reworded a
-docstring, which is what a gate is not for. So the rule is not "the word never
-appears" but "the word appears in a sentence that also denies it", and a
-sentence that uses the vocabulary to *claim* something has no denial in it and
-is refused. The help text is read as the operator reads it, from
-``runner.invoke(..., ["--help"])`` and ``result.stdout`` -- the operator-facing
-surface is the point, not the model behind it."""
+The same six stems, from the same reasoning, are pinned over the *report* below
+rather than a second list, because two lists of the vocabulary of a decision is
+two lists that will drift.
+"""
 
 
 def _verdict_claims(help_text: str) -> list[str]:
-    """Sentences in a help screen that use verdict vocabulary to *make* a claim.
+    """Every line of a help screen that uses the vocabulary of a decision.
 
-    Lines are joined before the split because Click reflows the docstring at the
-    terminal width and a sentence routinely spans two of them; the split is on
-    ``.``, ``;`` and ``?`` and deliberately not on ``:``, because the promise
-    above puts its colon mid-sentence and splitting there would strand the half
-    that carries the words with none of the denial that licenses them.
+    There is no denial rule and no exception. An earlier draft allowed a stem in
+    any sentence that also contained ``no`` or ``not``, which is what let
+    ``There is no verdict here: a candidate that survives the grid is promoted``
+    through -- the denial and the claim in one sentence, licensing each other.
+
+    That exception existed only because ``scenario-report``'s docstring said "There
+    is no survival verdict here and no threshold ... 8D's promotion gate, with its
+    thresholds fixed in advance", which uses three of these words to promise
+    restraint. The docstring now says the same thing in words that are not the
+    decision's own, so the exception is not needed and the rule is total: this
+    help text may not contain a word of decision vocabulary at all, however it is
+    spelled, cased, or surrounded by a promise not to decide.
     """
 
-    return [
-        sentence
-        for sentence in re.split(r"(?<=[.;?])\s+", " ".join(help_text.split()))
-        if any(word in sentence for word in _NO_VERDICT_HELP)
-        and not any(denial in sentence for denial in _DENIALS)
-    ]
+    text = " ".join(help_text.split()).lower()
+    return [word for word in _NO_VERDICT_HELP if word in text]
 
 
 def _names_and_text(value: object) -> set[str]:
@@ -477,6 +472,14 @@ def test_the_report_re_prints_what_two_sealed_bundles_already_say(
         assert row.spread_cost > baseline.spread_cost
         assert row.market_pnl == baseline.market_pnl
 
+    # Non-vacuous: the market move is the one figure that must NOT move, and a
+    # fixture that traded nothing would make the equality above true by having
+    # nothing to compare. Stressed spreads raise the cost; they do not reach back
+    # into the signal, and a difference here would mean the cost leaked into the
+    # trade decision -- the one thing a cost grid must not do.
+    assert baseline.market_pnl != 0
+    assert baseline.trades > 0
+
     # ``swap`` is reported verbatim from the summary -- signed, never passed
     # through ``abs`` and never folded into a total -- and this fixture's runs
     # cross no rollover, so it is a *measured* zero rather than an absent term.
@@ -636,7 +639,7 @@ def test_each_of_the_six_checks_refuses_a_grid_of_real_sealed_bundles(
 
 @pytest.mark.integration
 @pytest.mark.usefixtures("isolated_research_ledger")
-def test_the_orchestrators_baseline_is_the_run_an_operator_would_type_by_hand(
+def test_at_acceptance_the_orchestrators_baseline_is_the_run_an_operator_would_type(
     seeded: Fixture, research_env: Path, tmp_path: Path
 ) -> None:
     """Two simulators, one run, compared on the result rather than on success.
@@ -819,28 +822,54 @@ def test_neither_commands_help_text_claims_a_verdict(command: list[str]) -> None
     """The gate the framework's premise actually needs.
 
     No slice fixes a threshold after seeing results. A test that greps the
-    operator-facing text for a verdict is the only thing that keeps 8B2b from
-    quietly becoming a promotion gate, because nothing else here would notice: a
-    report that grew a ``passes`` field would be caught by the key test, and a
-    command whose *documentation* started saying "a candidate survives the grid
-    at 1.5x if…" would be caught by nothing.
+    operator-facing text for the vocabulary of a decision is the only thing that
+    keeps 8B2b from quietly becoming one, because nothing else here would notice:
+    a report that grew a ``passes`` field would be caught by the key test, and a
+    command whose *documentation* started saying "a candidate survives the grid at
+    1.5x if…" would be caught by nothing.
 
-    What is matched, and why, is in ``_NO_VERDICT_HELP`` and ``_DENIALS`` above:
-    the six verdict stems, allowed only in a sentence that also denies the
-    verdict. ``scenario-report``'s own help uses three of them in exactly that
-    way, and a gate that fired on the sentence promising not to judge would be a
-    gate to disable rather than to satisfy. ``judge`` and ``verdict`` are not
-    matched at all, for the same reason.
+    The rule is total and has no exception: no word of decision vocabulary may
+    appear in the help text at all, however it is spelled or cased. The rationale,
+    and the docstring wording in ``cli.py`` that makes that possible, are in
+    ``_NO_VERDICT_HELP`` and ``_verdict_claims`` above.
 
-    The second half of the test is the guard on the guard: the detector has to
-    fire on a claim, or "no verdict words" would be a statement about a regex
-    rather than about the help text.
+    The rest of the test is the guard on the guard, and it is parametrised over
+    **every** stem rather than over a convenient two. A gate that only ever
+    demonstrated itself on ``surviv`` and ``threshold`` would stay green with
+    ``promot``, ``recommend``, ``approve`` and ``reject`` deleted from it, and
+    those four are exactly the ones a later slice would reach for -- so each is
+    shown firing, and each is shown firing through a denial too, since that was
+    the loophole this gate used to have.
     """
 
     result = runner.invoke(cli.app, ["research", "trial", *command, "--help"])
 
     assert result.exit_code == 0, result.stderr
     assert _verdict_claims(result.stdout) == []
-    assert _verdict_claims("The candidate survives the declared grid.") != []
-    assert _verdict_claims("A promotion gate applies at a 2.0x threshold.") != []
-    assert _verdict_claims("There is no survival verdict here and no threshold.") == []
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The candidate survives the declared grid.",
+        "A promotion gate applies at a 2.0x threshold.",
+        "Survives the grid; 8D decides.",  # a capital, where a capital goes
+        "We recommend this one.",
+        "The candidate is approved for paper trading.",
+        "This candidate is rejected at 1.5x.",
+        # The loophole this gate used to have: a denial and a claim in one
+        # sentence used to license each other.
+        "There is no verdict here: a candidate that survives the grid is promoted.",
+        "This is not the same as backtest run, and a candidate that survives the grid is promoted.",
+    ],
+)
+def test_the_verdict_gate_fires_on_a_claim_however_it_is_worded(claim: str) -> None:
+    """The detector has to fire, or "no verdict words" is a statement about a regex.
+
+    A gate with no demonstration of its own sensitivity is a gate nobody knows is
+    armed. Every stem gets one here, plus the two shapes that defeated the
+    previous version of it: a leading capital, which the matcher lowercases for,
+    and a denial wrapped around a claim, which it no longer excuses.
+    """
+
+    assert _verdict_claims(claim) != []
