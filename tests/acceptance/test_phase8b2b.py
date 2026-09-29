@@ -141,14 +141,19 @@ sentence is where a capital goes, and a docstring's first line is the summary Ty
 renders -- so ``Survives the grid; 8D decides.`` would otherwise pass, and it is
 the single easiest edit that could make this gate a lie.
 
-The same six stems, from the same reasoning, are pinned over the *report* below
-rather than a second list, because two lists of the vocabulary of a decision is
-two lists that will drift.
+**This is not the same list as the report gate's, on purpose.** That one reads
+``_NO_VERDICT`` from ``tests/unit/ops/test_scenarios.py`` and carries two words
+this one does not -- ``total`` and ``verdict`` -- because it matches *field names*,
+where those two are forbidden outright, and it spells ``promote`` rather than
+``promot``. This one matches prose, where ``verdict`` is unavoidable in any honest
+sentence about declining to judge, and where ``recommend`` is the stem an operator
+document is most likely to reach for. Two surfaces, two rules, one reason each;
+the alternative is one list that is wrong on at least one of them.
 """
 
 
 def _verdict_claims(help_text: str) -> list[str]:
-    """Every line of a help screen that uses the vocabulary of a decision.
+    """Every stem of decision vocabulary found anywhere in a help screen.
 
     There is no denial rule and no exception. An earlier draft allowed a stem in
     any sentence that also contained ``no`` or ``not``, which is what let
@@ -162,6 +167,11 @@ def _verdict_claims(help_text: str) -> list[str]:
     decision's own, so the exception is not needed and the rule is total: this
     help text may not contain a word of decision vocabulary at all, however it is
     spelled, cased, or surrounded by a promise not to decide.
+
+    The rationale for the docstring's wording lives here rather than in the
+    docstring for the same reason the rule is total: a paragraph in the help
+    screen *explaining* the gate is a paragraph that can trip it, so the first
+    draft of that explanation failed its own gate and was cut down to this one.
     """
 
     text = " ".join(help_text.split()).lower()
@@ -528,10 +538,11 @@ def test_the_report_carries_no_key_or_value_naming_a_total_or_a_verdict(
         text for text in _names_and_text(document) for word in _NO_VERDICT if word in text.lower()
     )
     assert offending == []
-    # The declared grid comes first in the field order, so a reader meets the
-    # preregistration before the outcome. Ordering is not a claim anything
-    # computes, and it is the one property of this model a test can hold without
-    # a verdict vocabulary anywhere near it.
+    # The declared grid is named *before* the scenarios in the field order, so a
+    # reader meets the preregistration before the outcome. That is a rendering
+    # property and nothing computes it, so this holds the prefix rather than
+    # claiming an ordering any code depends on -- and it is the one property of
+    # this model worth a test that needs no verdict vocabulary near it.
     assert list(ScenarioReport.model_fields)[:3] == [
         "trial_id",
         "spec_sha256",
@@ -830,16 +841,9 @@ def test_neither_commands_help_text_claims_a_verdict(command: list[str]) -> None
 
     The rule is total and has no exception: no word of decision vocabulary may
     appear in the help text at all, however it is spelled or cased. The rationale,
-    and the docstring wording in ``cli.py`` that makes that possible, are in
-    ``_NO_VERDICT_HELP`` and ``_verdict_claims`` above.
-
-    The rest of the test is the guard on the guard, and it is parametrised over
-    **every** stem rather than over a convenient two. A gate that only ever
-    demonstrated itself on ``surviv`` and ``threshold`` would stay green with
-    ``promot``, ``recommend``, ``approve`` and ``reject`` deleted from it, and
-    those four are exactly the ones a later slice would reach for -- so each is
-    shown firing, and each is shown firing through a denial too, since that was
-    the loophole this gate used to have.
+    the list, and the ``scenario-report`` docstring wording in ``cli.py`` that makes
+    a rule this strict possible are all above; the guard on the guard is
+    ``test_the_verdict_gate_fires_on_a_claim_however_it_is_worded`` below.
     """
 
     result = runner.invoke(cli.app, ["research", "trial", *command, "--help"])
@@ -867,9 +871,16 @@ def test_the_verdict_gate_fires_on_a_claim_however_it_is_worded(claim: str) -> N
     """The detector has to fire, or "no verdict words" is a statement about a regex.
 
     A gate with no demonstration of its own sensitivity is a gate nobody knows is
-    armed. Every stem gets one here, plus the two shapes that defeated the
+    armed, and a gate demonstrated only on its two most obvious stems would stay
+    green with the other four deleted from it -- which are exactly the ones a
+    later slice would reach for. So this is parametrised over **every** stem
+    rather than a convenient sample, plus the two shapes that defeated the
     previous version of it: a leading capital, which the matcher lowercases for,
     and a denial wrapped around a claim, which it no longer excuses.
+
+    Each case fails if one specific thing is removed: ``.lower()`` drops takes
+    three of them down, restoring the denial exception takes the last two, and
+    deleting any one stem from ``_NO_VERDICT_HELP`` takes down the case naming it.
     """
 
     assert _verdict_claims(claim) != []

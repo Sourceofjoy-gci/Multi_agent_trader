@@ -1978,19 +1978,8 @@ def research_trial_scenario_report(
     file, so what is checked is what was sealed before any result existed.
 
     Reports; does not judge. There is no verdict here and no pass/fail line: what
-    to do about a candidate's degradation is a later phase's question, and that
-    phase fixes its own limits before it looks at any of these numbers.
-
-    The last paragraph is worded the way it is on purpose. The acceptance gate
-    reads this help screen for the vocabulary of a decision and refuses any
-    command whose documentation uses it, because the framework's premise is that
-    no slice sets its own limits after seeing results. An earlier draft
-    promised the same restraint *while using that vocabulary to do it*, which
-    forced the gate to carry an exception for denials -- and an exception for
-    denials is a hole: a help screen promising not to decide and then deciding
-    would have passed it. ``tests/acceptance/test_phase8b2b.py`` says which
-    words and why, and this paragraph is what lets that gate have no exception
-    in it at all.
+    to do about a candidate's degradation is 8D's question, and 8D fixes its own
+    limits before it looks at any of these numbers.
     """
 
     def operation() -> dict[str, JsonValue]:
