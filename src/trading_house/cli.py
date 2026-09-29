@@ -102,15 +102,14 @@ from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
-from trading_house.ops.backtest import build_backtester, build_strategy, mark_to_market_bundle
+from trading_house.ops.backtest import build_strategy, mark_to_market_bundle, simulate
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.ops.ledger import (
     build_evidence_store,
-    evidence_sealed_event,
     execution_started_event,
     research_ledger_dsn,
-    result_recorded_event,
+    seal_bundle,
 )
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
@@ -1320,11 +1319,12 @@ def backtest_run(
             settings.constitution_signature_path,
             settings.constitution_public_key_path,
         )
-        outcome = build_backtester(
+        outcome = simulate(
+            request,
             bars=_bar_store(),
             contract=instrument_contract,
             constitution=loaded_constitution,
-        ).run(request)
+        )
         if not mark_to_market:
             # The result is re-parsed rather than embedded as a string so the whole
             # payload is one key-sorted JSON document, like every other command's.
@@ -1601,7 +1601,6 @@ def research_trial_record(
         # they cannot act on.
         if not ledger.declares_trial(trial_id):
             raise TrialLedgerAppendError()
-        stored = _evidence_store().write(bundle)
         # ponytail: two appends, two transactions. A crash between them commits
         # RESULT_RECORDED without EVIDENCE_SEALED, and ``verify()`` still reports
         # a valid chain -- the bytes it holds are intact, only the reference to
@@ -1611,9 +1610,8 @@ def research_trial_record(
         # one store transaction appending both events; it changes
         # ``PostgresTrialLedger``'s public surface, so add ``append_all(events)``
         # when an operator is bitten, not before.
-        ledger.append(result_recorded_event(bundle))
-        ledger.append(evidence_sealed_event(bundle, stored.sha256))
-        return {"trial_id": trial_id, "evidence_sha256": stored.sha256}
+        evidence_sha256 = seal_bundle(bundle, ledger=ledger, store=_evidence_store())
+        return {"trial_id": trial_id, "evidence_sha256": evidence_sha256}
 
     _run(operation)
 

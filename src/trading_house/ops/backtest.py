@@ -35,7 +35,7 @@ from trading_house.core.exits import ExitPolicy, Strategy
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import Side
 from trading_house.features.engine import BarReader
-from trading_house.research.backtest.engine import Backtester, ReplayClock
+from trading_house.research.backtest.engine import Backtester, BacktestRequest, ReplayClock
 from trading_house.research.backtest.mark import BacktestOutcome, derive_daily_returns
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import CostSummary, EvidenceBundle, EvidenceProvenance
@@ -102,6 +102,34 @@ def build_backtester(
         clock=clock,
         constitution_sha256=constitution.constitution_sha256,
     )
+
+
+def simulate(
+    request: BacktestRequest,
+    *,
+    bars: BarReader,
+    contract: InstrumentContract,
+    constitution: LoadedConstitution,
+) -> BacktestOutcome:
+    """One run, with the cost stress already carried by ``request``.
+
+    ``BacktestRequest.cost_model.stress_multiplier`` is the only thing that
+    distinguishes a baseline run from a stressed one, so the scenario level is
+    not a parameter of this function. It is inside the request, which is where
+    the rest of the run's declared costs live and where ``digest()`` can see it.
+
+    ``backtest run`` and ``research trial scenarios`` both call this, which is
+    the point: two entry points that computed a run their own way would produce
+    two different results for one declared input, and the comparison between
+    them would be comparing two simulators rather than two cost levels.
+
+    The body is ``build_backtester(...).run(request)`` and nothing else --
+    ``build_backtester`` is already here, and already the single construction
+    point for the engine. This function exists so that the *call* is shared, not
+    so the engine is re-wrapped.
+    """
+
+    return build_backtester(bars=bars, contract=contract, constitution=constitution).run(request)
 
 
 def mark_to_market_bundle(

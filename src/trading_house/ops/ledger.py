@@ -44,6 +44,7 @@ from trading_house.research.trial_ledger import (
     LedgerEventType,
     ResultRecordedPayload,
     ScopeKind,
+    TrialLedger,
 )
 from trading_house.settings import RuntimeSettings
 
@@ -213,3 +214,30 @@ def evidence_sealed_event(bundle: EvidenceBundle, evidence_sha256: str) -> Ledge
             evidence_sha256=evidence_sha256,
         ),
     )
+
+
+def seal_bundle(
+    bundle: EvidenceBundle,
+    *,
+    ledger: TrialLedger,
+    store: EvidenceStore,
+) -> str:
+    """Write one bundle and append the two events that reference it.
+
+    Returns the evidence digest, which is the address the bundle now has.
+
+    ``research trial record`` and ``research trial scenarios`` both call this.
+    An orchestrator that sealed by a second route would be able to produce a
+    bundle the chain does not point at, or an event whose digest is not the one
+    on disk -- and neither would be noticed, because both sides would look
+    complete on their own.
+
+    The order is write-then-append, so a failed append leaves a document nothing
+    references rather than a row whose document is missing. The unreferenced side
+    of that pair is the recoverable one.
+    """
+
+    stored = store.write(bundle)
+    ledger.append(result_recorded_event(bundle))
+    ledger.append(evidence_sealed_event(bundle, stored.sha256))
+    return stored.sha256
