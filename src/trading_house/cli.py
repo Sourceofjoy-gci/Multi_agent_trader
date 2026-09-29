@@ -1601,8 +1601,8 @@ def research_trial_record(
         # they cannot act on.
         if not ledger.declares_trial(trial_id):
             raise TrialLedgerAppendError()
-        # The two appends and the store write behind this call are two separate
-        # transactions, and the deferral note for that is on ``seal_bundle``.
+        # The store write and the two ledger appends behind this call are three
+        # operations, and the deferral note for that is on ``seal_bundle``.
         evidence_sha256 = seal_bundle(bundle, ledger=ledger, store=_evidence_store())
         return {"trial_id": trial_id, "evidence_sha256": evidence_sha256}
 
