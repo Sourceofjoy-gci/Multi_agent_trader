@@ -52,9 +52,14 @@ from trading_house.ops.scenarios import (
     ScenarioDegradation,
     ScenarioReport,
     ScenarioTotals,
+    baseline_at,
     declared_grid,
+    refuse_other_attempts,
+    refuse_reused_attempts,
     registered_protocol,
     scenario_report,
+    sealed_levels,
+    started_attempts,
 )
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRequest
@@ -71,6 +76,7 @@ from trading_house.research.trial_ledger import (
     HoldoutState,
     LedgerEvent,
     LedgerEventType,
+    LedgerRecord,
     PreregisteredPayload,
     RegimeSpec,
     RegistrationState,
@@ -1114,3 +1120,102 @@ def test_a_trial_with_only_a_compounding_bundle_is_still_an_incomplete_grid() ->
             trial_id=_trial_id(protocol), protocol=protocol, sealed=(_compounding(protocol),)
         )
     assert "missing" in str(refused.value.__cause__)
+
+
+# --- the pre-flight's pure halves (8B3 fix wave) --------------------------------
+
+
+def _mine(prefix: str = ATTEMPT_PREFIX) -> Callable[[Decimal], str | None]:
+    return lambda multiplier: f"{prefix}-{multiplier}"
+
+
+def test_the_declared_baseline_at_a_level_is_the_baseline_with_only_that_multiplier() -> None:
+    protocol = _protocol(baseline_multiplier="1.5")
+
+    at_two = baseline_at(protocol, Decimal(2))
+
+    assert at_two.stress_multiplier == Decimal(2)
+    assert at_two == protocol.costs.baseline.model_copy(update={"stress_multiplier": Decimal(2)})
+    assert baseline_at(protocol, Decimal(1)).stress_multiplier == Decimal(1)
+
+
+def test_a_level_sealed_under_the_runs_own_attempt_id_is_named_for_skipping() -> None:
+    protocol = _protocol()
+    sealed = _sealed(protocol)
+
+    done = sealed_levels(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine())
+
+    assert done == {bundle.result.cost_model.stress_multiplier: d for d, bundle in sealed}
+    assert len(done) == 3
+
+
+def test_a_level_sealed_under_another_attempt_id_is_not_skipped_and_is_refused() -> None:
+    sealed = _sealed(_protocol())
+
+    assert sealed_levels(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine("other")) == {}
+    with pytest.raises(ScenarioEvidenceError) as refused:
+        refuse_other_attempts(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine("other"))
+    assert "already sealed as constant_notional under attempt att-scenarios-1" in str(
+        refused.value.__cause__
+    )
+
+
+def test_a_level_of_another_sizing_is_neither_skipped_nor_refused() -> None:
+    protocol = _protocol()
+    sealed = (_compounding(protocol),)
+
+    assert sealed_levels(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine("x")) == {}
+    refuse_other_attempts(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine("x"))
+
+
+def test_a_level_the_run_does_not_seal_is_not_refused() -> None:
+    sealed = _sealed(_protocol())
+
+    refuse_other_attempts(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=lambda _: None)
+
+
+def test_the_started_attempts_are_the_start_events_attempt_ids_only() -> None:
+    def record(event_type: LedgerEventType, attempt_id: str | None) -> Any:
+        return LedgerRecord.model_construct(event_type=event_type, attempt_id=attempt_id)
+
+    records = [
+        record(LedgerEventType.EXECUTION_STARTED, "a-1"),
+        record(LedgerEventType.RESULT_RECORDED, "a-2"),
+        record(LedgerEventType.EVIDENCE_SEALED, "a-3"),
+        record(LedgerEventType.EXECUTION_STARTED, None),
+    ]
+
+    assert started_attempts(records) == {"a-1"}
+
+
+def test_an_attempt_id_already_started_is_refused_in_either_mode_when_sealed_elsewhere() -> None:
+    sealed = _sealed(_protocol())
+    running = {Decimal(2): "att-scenarios-1.5"}  # sealed, but as the 1.5x level
+
+    for lenient in (True, False):
+        with pytest.raises(ScenarioEvidenceError) as refused:
+            refuse_reused_attempts(
+                {"att-scenarios-1.5"}, sealed, running=running, unsealed_retry=lenient
+            )
+        assert "already started for this trial" in str(refused.value.__cause__)
+
+
+def test_an_orphaned_attempt_id_is_allowed_only_when_an_unsealed_retry_is() -> None:
+    sealed = _sealed(_protocol())
+    running = {Decimal(2): "orphan"}
+
+    refuse_reused_attempts({"orphan"}, sealed, running=running, unsealed_retry=True)
+    with pytest.raises(ScenarioEvidenceError):
+        refuse_reused_attempts({"orphan"}, sealed, running=running, unsealed_retry=False)
+
+
+def test_a_fresh_attempt_id_is_never_refused() -> None:
+    sealed = _sealed(_protocol())
+
+    for lenient in (True, False):
+        refuse_reused_attempts(
+            {"att-scenarios-1"},
+            sealed,
+            running={Decimal(2): "fresh"},
+            unsealed_retry=lenient,
+        )

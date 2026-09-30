@@ -14,16 +14,19 @@ because unlike the trade sequence those cannot legitimately differ.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
+from fractions import Fraction
 from typing import cast
 
 from pydantic import NonNegativeInt
 
 from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
-from trading_house.ops.scenarios import _candidate, _refuse_reportable
+from trading_house.ops.scenarios import baseline_at, refuse_reportable, required_candidate
+from trading_house.research.backtest.engine import BacktestRequest
 from trading_house.research.backtest.mark import EquitySeries
+from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
@@ -39,7 +42,11 @@ class CompoundingRun(CanonicalModel):
     trades: NonNegativeInt
     net_pnl: Decimal
     final_equity: Decimal
-    """Equity at the last observation of the bundle's mark-to-market series."""
+    """Equity at the last observation of the bundle's mark-to-market series. It
+    includes an unrealized mark when ``ends_flat`` is false."""
+    ends_flat: bool
+    """Whether the run ended with nothing open. False means ``final_equity`` carries
+    an open position's unrealized mark and ``net_pnl`` does not."""
 
 
 class CompoundingReport(CanonicalModel):
@@ -54,6 +61,10 @@ class CompoundingReport(CanonicalModel):
     constant_notional: CompoundingRun
     compounding: CompoundingRun
     same_trade_sequence: bool
+    """Whether the two runs closed trades with the same ordered ``proposal_id``s.
+    It compares closed trades' proposal ids only: it says nothing about lots,
+    fills or exits, nor about a position still open (and so discarded from the
+    trade list) when a run ended."""
     final_equity_difference: Decimal
 
 
@@ -71,19 +82,17 @@ def compounding_report(
     digest, a bundle of another trial, sizing modes that are not the two named,
     a missing equity series, costs other than the protocol's baseline at level 1,
     a window other than the protocol's, another strategy, a spec digest that is
-    not the protocol candidate's, a different starting equity or a different
-    number of bars read. The trade sequence and trade count may differ.
+    not the protocol candidate's, a replay input that differs between the two runs
+    (``REPLAY_FIELDS``) or a different number of bars read. The trade sequence and
+    trade count may differ.
     """
 
-    _refuse_reportable(trial_id, (constant, compounding))
+    refuse_reportable(trial_id, (constant, compounding))
     a, b = constant[1], compounding[1]
     _refuse_sizing(a, b)
     for bundle in (a, b):
         _refuse_unfaithful(trial_id, protocol, bundle)
-    if a.result.firm_equity != b.result.firm_equity:
-        raise ScenarioEvidenceError() from ValueError(
-            f"the runs started from {a.result.firm_equity} and {b.result.firm_equity}"
-        )
+    refuse_other_replay(replay_inputs(a.result), b.result, what="the compounding run")
     if a.result.bars_seen != b.result.bars_seen:
         raise ScenarioEvidenceError() from ValueError(
             f"the runs read {a.result.bars_seen} and {b.result.bars_seen} bars"
@@ -98,6 +107,71 @@ def compounding_report(
         same_trade_sequence=_sequence(a) == _sequence(b),
         final_equity_difference=comp.final_equity - base.final_equity,
     )
+
+
+REPLAY_FIELDS = (
+    "firm_equity",
+    "exit_policy",
+    "atr_period",
+    "spread_window",
+    "defective_bar_tolerance",
+    "contract_sha256",
+    "constitution_sha256",
+    "instrument_id",
+    "timeframe",
+)
+"""The ``BacktestResult`` fields a protocol does not own and a candidate's runs must
+share, for them to be one candidate on one replay. Everything the protocol does own
+(costs, window, strategy, specification) is checked against the protocol instead."""
+
+
+def replay_inputs(result: BacktestResult) -> dict[str, object]:
+    """What a sealed run says its replay inputs were, by ``REPLAY_FIELDS``."""
+
+    return {field: getattr(result, field) for field in REPLAY_FIELDS}
+
+
+def request_replay_inputs(
+    request: BacktestRequest, *, contract_sha256: str, constitution_sha256: str
+) -> dict[str, object]:
+    """What a run built from ``request`` would record as its replay inputs.
+
+    The same keys and the same values ``BacktestResult`` would hold for that run
+    (the engine derives each one from the request, the loaded contract and the
+    loaded constitution), so a pre-flight can compare a run that has not happened
+    to one that has.
+    """
+
+    return {
+        "firm_equity": request.firm_equity,
+        "exit_policy": request.strategy.exit_policy(),
+        "atr_period": request.atr_period,
+        "spread_window": request.spread_window,
+        "defective_bar_tolerance": Fraction(request.defective_bar_tolerance),
+        "contract_sha256": contract_sha256,
+        "constitution_sha256": constitution_sha256,
+        "instrument_id": request.instrument_id,
+        "timeframe": request.timeframe,
+    }
+
+
+def refuse_other_replay(
+    expected: Mapping[str, object], result: BacktestResult, *, what: str
+) -> None:
+    """Refuse a run whose replay inputs differ from ``expected``, naming each field.
+
+    The one predicate behind the report's "one candidate on one replay" and the
+    commands' pre-flight, which is why they cannot drift: both compare exactly
+    ``REPLAY_FIELDS``.
+    """
+
+    found = replay_inputs(result)
+    differing = [f for f in REPLAY_FIELDS if found[f] != expected[f]]
+    if differing:
+        raise ScenarioEvidenceError() from ValueError(
+            f"{what} differs in its replay inputs: "
+            + ", ".join(f"{f} {found[f]!r} against {expected[f]!r}" for f in differing)
+        )
 
 
 def _only(
@@ -154,7 +228,7 @@ def _refuse_sizing(constant: EvidenceBundle, compounding: EvidenceBundle) -> Non
 
 def _refuse_unfaithful(trial_id: str, protocol: TrialProtocol, bundle: EvidenceBundle) -> None:
     result = bundle.result
-    declared = protocol.costs.baseline.model_copy(update={"stress_multiplier": Decimal(1)})
+    declared = baseline_at(protocol, Decimal(1))
     if result.cost_model != declared:
         raise ScenarioEvidenceError() from ValueError(
             f"the {bundle.sizing.value} run declares {result.cost_model}; "
@@ -175,7 +249,7 @@ def _refuse_unfaithful(trial_id: str, protocol: TrialProtocol, bundle: EvidenceB
             f"{result.strategy_version}; the protocol declares {protocol.strategy_id} "
             f"{protocol.strategy_version}"
         )
-    expected = canonical_sha256(_candidate(protocol, trial_id))
+    expected = canonical_sha256(required_candidate(protocol, trial_id))
     if bundle.spec_sha256 != expected:
         raise ScenarioEvidenceError() from ValueError(
             f"the {bundle.sizing.value} run declares spec {bundle.spec_sha256}; "
@@ -196,4 +270,5 @@ def _run(evidence_sha256: str, bundle: EvidenceBundle) -> CompoundingRun:
         trades=len(bundle.result.trades),
         net_pnl=bundle.result.net_pnl,
         final_equity=series.observations[-1].equity,
+        ends_flat=series.is_flat,
     )

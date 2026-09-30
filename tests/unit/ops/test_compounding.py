@@ -28,7 +28,13 @@ from tests.unit.ops.test_scenarios import (
     _trial_id,
 )
 from trading_house.core.errors import ScenarioEvidenceError
-from trading_house.ops.compounding import CompoundingReport, compounding_report
+from trading_house.ops.compounding import (
+    REPLAY_FIELDS,
+    CompoundingReport,
+    CompoundingRun,
+    compounding_report,
+    replay_inputs,
+)
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
@@ -238,8 +244,125 @@ def test_a_different_starting_equity_is_refused() -> None:
                 + Decimal(o["unrealized_pnl"])
             )
 
-    assert "the runs started from" in _cause(compounding=other_equity)
+    cause = _cause(compounding=other_equity)
+    assert "replay inputs" in cause
+    assert "firm_equity" in cause
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("exit_policy", {"kind": "fixed_target", "r_multiple": "1.0"}),
+        ("atr_period", 3),
+        ("spread_window", 11),
+        ("defective_bar_tolerance", "1/10"),
+        ("contract_sha256", "c" * 64),
+        ("constitution_sha256", "d" * 64),
+        ("instrument_id", "fx.gbpusd"),
+        ("timeframe", "H1"),
+    ],
+)
+@pytest.mark.parametrize("side", ["constant", "compounding"])
+def test_each_replay_input_that_differs_between_the_runs_is_refused_by_name(
+    field: str, value: object, side: str
+) -> None:
+    """Either run may be the odd one out; the refusal names the field that moved, and
+    only that one, so a field dropped from ``REPLAY_FIELDS`` leaves a case failing."""
+
+    cause = _cause(**{side: _moving(f"result.{field}", value)})
+
+    assert "replay inputs" in cause
+    assert cause.split("replay inputs: ")[1].startswith(field)
+    assert [f for f in REPLAY_FIELDS if f in cause.split("replay inputs: ")[1]] == [field]
+
+
+def test_the_replay_predicate_lists_exactly_the_fields_a_protocol_does_not_own() -> None:
+    assert REPLAY_FIELDS == (
+        "firm_equity",
+        "exit_policy",
+        "atr_period",
+        "spread_window",
+        "defective_bar_tolerance",
+        "contract_sha256",
+        "constitution_sha256",
+        "instrument_id",
+        "timeframe",
+    )
+    assert set(replay_inputs(_pair(_protocol(), SizingMode.COMPOUNDING, None)[1].result)) == set(
+        REPLAY_FIELDS
+    )
+
+
+def test_a_run_that_ends_holding_a_position_says_so() -> None:
+    flat = _report()
+    open_ = _report(compounding=_final_equity_moved_by("250"))
+
+    assert flat.constant_notional.ends_flat is True
+    assert flat.compounding.ends_flat is True
+    assert open_.constant_notional.ends_flat is True
+    assert open_.compounding.ends_flat is False
 
 
 def test_a_different_number_of_bars_is_refused() -> None:
     assert "the runs read" in _cause(compounding=_moving("result.bars_seen", 1))
+
+
+def test_a_request_declares_the_replay_inputs_its_run_then_records() -> None:
+    """``request_replay_inputs`` is what the pre-flight expects and ``replay_inputs`` is what
+    the sealed run holds; a real run is the only honest proof that all nine agree, since
+    the engine derives each from a different source (request, contract, constitution)."""
+
+    from tests.unit.ops.test_scenarios import (
+        ATR_PERIOD,
+        HOLDING_SECONDS,
+        SPREAD_WINDOW,
+        STRATEGY_HORIZON_SECONDS,
+        FakeBarReader,
+        ToyStrategy,
+        _contract,
+        _loaded_constitution,
+    )
+    from trading_house.marketdata.models import Timeframe
+    from trading_house.ops.backtest import build_backtester
+    from trading_house.ops.compounding import request_replay_inputs
+    from trading_house.research.backtest.engine import BacktestRequest
+
+    protocol = _protocol()
+    contract, constitution = _contract(), _loaded_constitution()
+    request = BacktestRequest(
+        strategy=ToyStrategy(
+            horizon_seconds=STRATEGY_HORIZON_SECONDS, max_holding_seconds=HOLDING_SECONDS
+        ),
+        instrument_id="fx.eurusd",
+        timeframe=Timeframe.M15,
+        start=BARS[0].event_time,
+        end=BARS[-1].event_time,
+        firm_equity=Decimal("90000"),
+        cost_model=protocol.costs.baseline,
+        atr_period=ATR_PERIOD,
+        spread_window=SPREAD_WINDOW,
+        defective_bar_tolerance=Decimal("0.1"),
+    )
+
+    outcome = build_backtester(
+        bars=FakeBarReader(BARS), contract=contract, constitution=constitution
+    ).run(request)
+
+    assert request_replay_inputs(
+        request,
+        contract_sha256=contract.digest(),
+        constitution_sha256=constitution.constitution_sha256,
+    ) == replay_inputs(outcome.result)
+    assert replay_inputs(outcome.result)["firm_equity"] == Decimal("90000")
+
+
+def test_a_compounding_run_holds_exactly_these_fields() -> None:
+    assert set(CompoundingRun.model_fields) == {
+        "attempt_id",
+        "evidence_sha256",
+        "source_result_sha256",
+        "trades",
+        "net_pnl",
+        "final_equity",
+        "ends_flat",
+    }

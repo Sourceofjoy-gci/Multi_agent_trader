@@ -84,7 +84,7 @@ class EquityObservation(CanonicalModel):
 
 
 class EquitySeries(CanonicalModel):
-    """Every processed bar's observation, over a fixed capital base.
+    """Every processed bar's observation, over one initial capital.
 
     Validated against itself alone: the three assertions that need the trades
     live on ``BacktestOutcome`` and, for a sealed document, on
@@ -132,10 +132,12 @@ class BacktestOutcome(CanonicalModel):
     """What one backtest run produced: its reconciled result, the equity path
     that produced it, and the per-trade cost split that decomposes it.
 
-    ``result.py`` refuses to carry an equity curve because, under D-4, the curve
-    was exactly the running sum of ``net_pnl`` and storing it "would duplicate
-    state that can disagree with the trades it was derived from". The first half
-    of that stopped being true once an open position is marked. The second half
+    ``result.py`` refuses to carry an equity curve because, under D-4 (the default
+    ``CONSTANT_NOTIONAL`` sizing), the curve was exactly the running sum of
+    ``net_pnl`` and storing it "would duplicate state that can disagree with the
+    trades it was derived from". The first half of that stopped being true once an
+    open position is marked, and under ``COMPOUNDING`` sizing the path also
+    depends on how positions were sized. The second half
     is answered here rather than dismissed: the assertions below are
     exactly the disagreement checks, and they fail closed.
     """

@@ -90,8 +90,10 @@ class BacktestResult(CanonicalModel):
     """What one backtest run produced.
 
     Deliberately carries no equity-curve field, though section 4 of the spec
-    lists one. Under D-4 equity is constant, so the curve is exactly the
-    running sum of ``net_pnl`` over ``trades`` -- a caller that wants it
+    lists one. Under D-4 (the default constant-notional sizing) equity is
+    constant, so the curve is exactly the running sum of ``net_pnl`` over
+    ``trades`` -- under ``COMPOUNDING`` sizing it is not, and the sealed
+    ``EquitySeries`` carries it -- a caller that wants it
     accumulates it. Storing it here would duplicate state that can disagree
     with the trades it was derived from, which is exactly the class of
     defect ``net_pnl_reconciles_with_trades`` and

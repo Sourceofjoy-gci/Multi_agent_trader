@@ -19,7 +19,7 @@ it here would fix a threshold after seeing how the numbers came out.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from decimal import Decimal
 from typing import cast
 
@@ -27,6 +27,7 @@ from pydantic import NonNegativeInt
 
 from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
+from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.costs_attribution import CostAttribution
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
@@ -139,6 +140,19 @@ def declared_grid(protocol: TrialProtocol) -> tuple[Decimal, ...]:
     """
 
     return tuple(sorted({Decimal(1), *protocol.costs.stress_multipliers}))
+
+
+def baseline_at(protocol: TrialProtocol, multiplier: Decimal) -> CostModel:
+    """The protocol's declared baseline costs at one stress level.
+
+    The one statement of "the declared baseline at level *m*": the run commands
+    build their cost models from it and every fidelity check compares against it,
+    so a level a command ran and a level a report checks cannot disagree about
+    what the declaration was. Level ``1`` is the reference level; see
+    ``declared_grid`` for why the baseline's own ``stress_multiplier`` is not used.
+    """
+
+    return protocol.costs.baseline.model_copy(update={"stress_multiplier": multiplier})
 
 
 def declared_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec | None:
@@ -270,9 +284,13 @@ def refuse_other_attempts(
     """No level this run would seal is already sealed under a different attempt id.
 
     ``allowed`` maps a bundle's cost multiplier to the one attempt id this run
-    would use there, or ``None`` for a level it does not seal. The same attempt id
-    is an identical retry and stays a no-op; any other is a second document at a
-    level the report would then refuse for good, so it is refused before a write.
+    would use there, or ``None`` for a level it does not seal. A level already
+    sealed under *that* attempt id is not refused here: ``sealed_levels`` names it
+    and the caller skips it, because re-running it would derive a different bundle
+    (8B3 moved the stressed levels' ``run_id`` and provenance options are part of
+    the bytes) and seal a second document at a level the report refuses for good.
+    A level sealed under any other attempt id is refused before a write for the
+    same reason.
     """
 
     for _, bundle in sealed:
@@ -287,7 +305,69 @@ def refuse_other_attempts(
             )
 
 
-def _candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
+def sealed_levels(
+    sealed: Sequence[tuple[str, EvidenceBundle]],
+    *,
+    sizing: SizingMode,
+    allowed: Callable[[Decimal], str | None],
+) -> dict[Decimal, str]:
+    """The levels this run has nothing to do at: sealed already, under its own attempt id.
+
+    Maps each such level's multiplier to the evidence digest the chain names for
+    it. The caller runs nothing at these levels -- no start event, no simulation,
+    no seal -- and reports the existing digest, which is what makes a retry a true
+    no-op. Call ``refuse_other_attempts`` first: it refuses the levels this skips
+    would otherwise have to disagree about.
+    """
+
+    return {
+        bundle.result.cost_model.stress_multiplier: digest
+        for digest, bundle in sealed
+        if bundle.sizing is sizing
+        and allowed(bundle.result.cost_model.stress_multiplier) == bundle.attempt_id
+    }
+
+
+def started_attempts(records: Sequence[LedgerRecord]) -> set[str]:
+    """Every attempt id the chain holds a start event for, under one trial."""
+
+    return {
+        record.attempt_id
+        for record in records
+        if record.event_type is LedgerEventType.EXECUTION_STARTED and record.attempt_id is not None
+    }
+
+
+def refuse_reused_attempts(
+    started: Collection[str],
+    sealed: Sequence[tuple[str, EvidenceBundle]],
+    *,
+    running: Mapping[Decimal, str],
+    unsealed_retry: bool,
+) -> None:
+    """No attempt id this run starts is one the trial has already started.
+
+    ``running`` is the level-to-attempt map of what this run will actually start
+    (``sealed_levels`` already removed). A start event is content-derived from the
+    trial and the attempt id alone, so reusing an id appends nothing and the audit
+    count does not rise for a run that really happened -- the count is what the
+    deflation denominator divides by.
+
+    ``unsealed_retry`` allows an id that was started but never sealed anywhere: the
+    orphan a failed run leaves, which a retry under the same id legitimately
+    completes. With it off, any started id is refused.
+    """
+
+    sealed_ids = {bundle.attempt_id for _, bundle in sealed}
+    for multiplier, attempt_id in running.items():
+        if attempt_id in started and (not unsealed_retry or attempt_id in sealed_ids):
+            raise ScenarioEvidenceError() from ValueError(
+                f"attempt {attempt_id} is already started for this trial; "
+                f"the {multiplier}x run would not add an audit attempt under it"
+            )
+
+
+def required_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
     """The one candidate a protocol declares, or a refusal naming the protocol.
 
     ``declared_candidate`` returns ``None`` because its two callers want
@@ -335,8 +415,9 @@ def scenario_report(
        says nothing about the baseline's own multiplier, so a protocol may declare
        a baseline of ``1.5``; comparing verbatim would make that registration
        permanently unreportable, and a registration cannot be amended after the
-       fact. Normalising both sides is a diagnostic gap, not a correctness one —
-       see ``_refuse_baseline_fidelity`` and ``declared_grid``.
+       fact. The declaration is not hidden by the normalisation: the report names
+       it as ``declared_baseline_multiplier`` — see ``_refuse_baseline_fidelity``
+       and ``declared_grid``.
     4. **Scenario fidelity** — each stressed scenario differs from the baseline
        in ``stress_multiplier`` and nothing else.
     5. **Window fidelity** — every scenario's ``result.start``/``end`` equals the
@@ -363,7 +444,7 @@ def scenario_report(
     # as a level sealed twice; it is ignored here, and ``compounding_report`` is
     # the read that consumes it.
     sealed = [(d, b) for d, b in sealed if b.sizing is SizingMode.CONSTANT_NOTIONAL]
-    _refuse_reportable(trial_id, sealed)
+    refuse_reportable(trial_id, sealed)
 
     grid = declared_grid(protocol)
     by_multiplier: dict[Decimal, list[tuple[str, EvidenceBundle]]] = {}
@@ -414,7 +495,7 @@ def scenario_report(
     )
 
 
-def _refuse_reportable(trial_id: str, sealed: Sequence[tuple[str, EvidenceBundle]]) -> None:
+def refuse_reportable(trial_id: str, sealed: Sequence[tuple[str, EvidenceBundle]]) -> None:
     """The two caller's inputs are things a report may name.
 
     Every other refusal in this module is a check on the *evidence*; this one is
@@ -529,7 +610,7 @@ def _refuse_baseline_fidelity(protocol: TrialProtocol, bundles: Sequence[Evidenc
     own multiplier.
     """
 
-    declared = protocol.costs.baseline.model_copy(update={"stress_multiplier": Decimal(1)})
+    declared = baseline_at(protocol, Decimal(1))
     sealed = bundles[0].result.cost_model
     if sealed != declared:
         raise ScenarioEvidenceError() from ValueError(
@@ -547,10 +628,9 @@ def _refuse_scenario_fidelity(protocol: TrialProtocol, bundles: Sequence[Evidenc
     added. A new term is then compared here for free.
     """
 
-    baseline = protocol.costs.baseline
     for bundle in bundles[1:]:
         multiplier = bundle.result.cost_model.stress_multiplier
-        expected = baseline.model_copy(update={"stress_multiplier": multiplier})
+        expected = baseline_at(protocol, multiplier)
         if bundle.result.cost_model != expected:
             raise ScenarioEvidenceError() from ValueError(
                 f"scenario {multiplier} declares {bundle.result.cost_model}; "
@@ -636,7 +716,7 @@ def _refuse_identity(
         "trial_id": trial_id,
         "strategy_id": protocol.strategy_id,
         "strategy_version": protocol.strategy_version,
-        "spec_sha256": canonical_sha256(_candidate(protocol, trial_id)),
+        "spec_sha256": canonical_sha256(required_candidate(protocol, trial_id)),
     }
     for bundle in bundles:
         found = _identity(bundle)

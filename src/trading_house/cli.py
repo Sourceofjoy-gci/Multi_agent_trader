@@ -106,6 +106,8 @@ from trading_house.ops.backtest import build_strategy, mark_to_market_bundle, si
 from trading_house.ops.compounding import (
     CompoundingReport,
     compounding_report,
+    refuse_other_replay,
+    request_replay_inputs,
     sealed_baseline,
     sealed_rerun,
 )
@@ -119,13 +121,17 @@ from trading_house.ops.ledger import (
 )
 from trading_house.ops.scenarios import (
     ScenarioReport,
+    baseline_at,
     declared_candidate,
     declared_grid,
     refuse_edited_protocol,
     refuse_other_attempts,
+    refuse_reused_attempts,
     registered_protocol,
     scenario_report,
     sealed_bundles,
+    sealed_levels,
+    started_attempts,
 )
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
@@ -1863,36 +1869,10 @@ def _constitution() -> LoadedConstitution:
     )
 
 
-def _preflight(
-    parsed: TrialProtocol,
-    trial_id: str,
-    ledger: PostgresTrialLedger,
-    store: EvidenceStore,
-    sizing: SizingMode,
-    allowed: Callable[[Decimal], str | None],
-) -> list[tuple[str, EvidenceBundle]]:
-    """The refusals that need only the chain, taken before anything is written.
+def _request_for(run: _RunInputs, cost_model: CostModel, sizing: SizingMode) -> BacktestRequest:
+    """One level's request, built from the protocol and the options, and nothing else."""
 
-    The file must be the registered protocol, and no level this run seals may
-    already be sealed under another attempt id. Returns what the chain holds so a
-    caller can make its own check without a second read.
-    """
-
-    refuse_edited_protocol(registered_protocol(ledger.replay(), trial_id), parsed)
-    sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
-    refuse_other_attempts(sealed, sizing=sizing, allowed=allowed)
-    return sealed
-
-
-def _run_and_seal(
-    run: _RunInputs, *, attempt_id: str, cost_model: CostModel, sizing: SizingMode
-) -> str:
-    """One attempt: start it, simulate it, seal its bundle. Returns the evidence digest."""
-
-    run.ledger.append(
-        execution_started_event(run.trial_id, attempt_id, run.spec_sha256, _as_utc(run.started_at))
-    )
-    request = _backtest_request(
+    return _backtest_request(
         # The strategy the registration names, the window it declared, and the
         # costs built from its baseline -- things the reports check against that
         # same protocol, so they are read from it rather than typed here. What is
@@ -1908,6 +1888,72 @@ def _run_and_seal(
         spread_window=run.spread_window,
         defective_bar_tolerance=_unit_interval_decimal(run.defective_bar_tolerance),
         sizing=sizing,
+    )
+
+
+def _seal_levels(
+    run: _RunInputs,
+    *,
+    sizing: SizingMode,
+    attempts: Mapping[Decimal, str],
+    unsealed_retry: bool,
+) -> dict[Decimal, str]:
+    """Pre-flight every refusal, then run the levels not already sealed.
+
+    Returns each level's evidence digest, for a level skipped as much as for one
+    run. Everything that needs no simulation is taken before the first append, in
+    this order: the ``--protocol`` file must be the registered protocol; every
+    level's request is built and validated (a mistyped option leaves no orphan
+    start row); no level is sealed under another attempt id; no attempt id this
+    run would start is already started; and the run's replay inputs must equal
+    those of the constant-notional baseline the chain holds -- for ``compounding``
+    the one 1.0x baseline (required), for ``scenarios`` every constant level
+    already sealed, if any.
+
+    A level already sealed under this run's own attempt id is skipped entirely:
+    no start event, no simulation, no seal. Re-running would derive a different
+    bundle and seal a second document at that level.
+
+    The reads above and the writes below are not one transaction. The slice
+    assumes a single operator: two concurrent runs could both pass the pre-flight.
+    Take a ledger lock if that assumption stops holding.
+    """
+
+    refuse_edited_protocol(registered_protocol(run.ledger.replay(), run.trial_id), run.parsed)
+    requests = {m: _request_for(run, baseline_at(run.parsed, m), sizing) for m in attempts}
+    records = run.ledger.events_for(run.trial_id)
+    sealed = sealed_bundles(records, run.store.read)
+    refuse_other_attempts(sealed, sizing=sizing, allowed=attempts.get)
+    done = sealed_levels(sealed, sizing=sizing, allowed=attempts.get)
+    running = {m: a for m, a in attempts.items() if m not in done}
+    refuse_reused_attempts(
+        started_attempts(records), sealed, running=running, unsealed_retry=unsealed_retry
+    )
+    if sizing is SizingMode.COMPOUNDING:
+        baselines = [sealed_baseline(sealed, run.trial_id)[1]]
+    else:
+        baselines = [b for _, b in sealed if b.sizing is SizingMode.CONSTANT_NOTIONAL]
+    expected = request_replay_inputs(
+        next(iter(requests.values())),
+        contract_sha256=run.instrument_contract.digest(),
+        constitution_sha256=run.constitution.constitution_sha256,
+    )
+    for baseline in baselines:
+        refuse_other_replay(expected, baseline.result, what="this run")
+    digests = dict(done)
+    for multiplier, request in requests.items():
+        if multiplier not in done:
+            digests[multiplier] = _run_and_seal(
+                run, attempt_id=attempts[multiplier], request=request
+            )
+    return digests
+
+
+def _run_and_seal(run: _RunInputs, *, attempt_id: str, request: BacktestRequest) -> str:
+    """One attempt: start it, simulate it, seal its bundle. Returns the evidence digest."""
+
+    run.ledger.append(
+        execution_started_event(run.trial_id, attempt_id, run.spec_sha256, _as_utc(run.started_at))
     )
     outcome = simulate(
         request,
@@ -1977,20 +2023,28 @@ def research_trial_scenarios(
     ``--contract`` -- so a copy of one of those cannot disagree with anything.
 
     It matters more than tidiness, because the mistake is a one-way door. An
-    operator who registered over a year and typed the last week gets three sealed
-    documents and nine appended events before the report refuses at 19; retrying
-    with the right window reuses the same attempt prefix, so the start is
-    recognised as a no-op, the *bundle* now differs, and a second document lands
-    at that level -- which completeness then refuses permanently. The remedy would
-    be surgery on the evidence root and the chain, which the premise forbids. Not
-    having the option is the only version of this that has no such state to reach.
+    operator who registered over a year and typed the last week would get three
+    sealed documents and nine appended events before the report refused at 19, and
+    nothing in a retry could undo them. Not having the option is the only version
+    of this that has no such state to reach.
 
-    A ``--protocol`` **file** edited after registration is refused before
-    anything is written: the command compares the file's canonical digest with
-    the registered protocol's first, and does the same for a level already sealed
-    under another attempt id. A registration cannot be amended, so a grid that
-    was never declared has to be preregistered as a new one and run against its
-    own candidate.
+    Everything that needs no simulation is refused before anything is written. A
+    ``--protocol`` **file** edited after registration is refused: the command
+    compares the file's canonical digest with the registered protocol's. So is a
+    level already sealed under another attempt id, an attempt id the trial has
+    already started for another level, and a run whose replay inputs
+    (``--firm-equity``, ``--exit-policy``, ``--atr-period``, ``--spread-window``,
+    ``--defective-bar-tolerance``, the contract and the constitution) differ from
+    those of a constant-notional level already sealed. The options are built and
+    validated first, so a mistyped one leaves nothing behind. A registration cannot
+    be amended, so a grid that was never declared has to be preregistered as a new
+    one and run against its own candidate.
+
+    A level already sealed under this run's own attempt id is skipped entirely:
+    nothing is started, simulated or sealed there, and the existing digest is
+    reported. That is what makes a retry a true no-op, including after a change to
+    a provenance option, which would otherwise derive a different bundle and seal a
+    second document at that level.
 
     Every level shares one specification digest, computed from the protocol's own
     candidate rather than typed three times. Three hand-typed digests is exactly
@@ -2012,8 +2066,6 @@ def research_trial_scenarios(
         store = _evidence_store()
         grid = declared_grid(parsed)
         attempts = {m: f"{attempt_prefix}-{m}" for m in grid}
-        # Every refusal that needs no simulation comes before the first append.
-        _preflight(parsed, trial_id, ledger, store, SizingMode.CONSTANT_NOTIONAL, attempts.get)
         run = _RunInputs(
             parsed=parsed,
             trial_id=trial_id,
@@ -2032,23 +2084,17 @@ def research_trial_scenarios(
             spread_window=spread_window,
             defective_bar_tolerance=defective_bar_tolerance,
         )
-        scenarios: list[JsonValue] = []
-        for multiplier in grid:
-            digest = _run_and_seal(
-                run,
-                attempt_id=attempts[multiplier],
-                cost_model=parsed.costs.baseline.model_copy(
-                    update={"stress_multiplier": multiplier}
-                ),
-                sizing=SizingMode.CONSTANT_NOTIONAL,
-            )
-            scenarios.append(
-                {
-                    "multiplier": str(multiplier),
-                    "attempt_id": attempts[multiplier],
-                    "evidence_sha256": digest,
-                }
-            )
+        digests = _seal_levels(
+            run, sizing=SizingMode.CONSTANT_NOTIONAL, attempts=attempts, unsealed_retry=True
+        )
+        scenarios: list[JsonValue] = [
+            {
+                "multiplier": str(multiplier),
+                "attempt_id": attempts[multiplier],
+                "evidence_sha256": digests[multiplier],
+            }
+            for multiplier in grid
+        ]
         return {
             "trial_id": trial_id,
             "scenarios": scenarios,
@@ -2101,6 +2147,12 @@ def research_trial_compounding(
 
     Runs at the protocol's baseline costs as one attempt, then prints the sealed
     constant-notional baseline beside it, with the capacity state.
+
+    Like ``scenarios`` it checks before the first write: the ``--protocol`` file is
+    the registered one, the options are valid, a 1.0x constant-notional baseline is
+    sealed, the run's replay inputs equal that baseline's, and ``--attempt-id`` is
+    not one the trial has already started. The same attempt id over an already
+    sealed rerun is a no-op that reports the existing digest.
     """
 
     # Like ``scenarios``: no option for any value the report compares against the
@@ -2111,10 +2163,6 @@ def research_trial_compounding(
         spec_sha256 = canonical_sha256(_declared_candidate(parsed, trial_id))
         ledger = _trial_ledger()
         store = _evidence_store()
-        sealed = _preflight(
-            parsed, trial_id, ledger, store, SizingMode.COMPOUNDING, lambda _: attempt_id
-        )
-        sealed_baseline(sealed, trial_id)  # nothing to compare against without it
         run = _RunInputs(
             parsed=parsed,
             trial_id=trial_id,
@@ -2133,12 +2181,12 @@ def research_trial_compounding(
             spread_window=spread_window,
             defective_bar_tolerance=defective_bar_tolerance,
         )
-        digest = _run_and_seal(
+        digest = _seal_levels(
             run,
-            attempt_id=attempt_id,
-            cost_model=parsed.costs.baseline.model_copy(update={"stress_multiplier": Decimal(1)}),
             sizing=SizingMode.COMPOUNDING,
-        )
+            attempts={Decimal(1): attempt_id},
+            unsealed_retry=False,
+        )[Decimal(1)]
         return {
             "trial_id": trial_id,
             "attempt_id": attempt_id,

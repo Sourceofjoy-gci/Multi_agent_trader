@@ -336,6 +336,10 @@ def test_the_readme_documents_each_new_command_in_the_table_and_the_section() ->
     assert "declared_baseline_multiplier" in section
 
 
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
 def test_the_readme_no_longer_states_the_closed_limits_as_open() -> None:
     assert "Known limit: a run at 1.5x and the same run at 1.0x share" not in README
     assert "The shared-`run_id` limit still holds" not in README
@@ -345,9 +349,52 @@ def test_the_readme_no_longer_states_the_closed_limits_as_open() -> None:
     assert "before any write" in README
 
 
+def test_the_readme_states_what_8b3_changed_and_does_not_overclaim_it() -> None:
+    """Each corrected sentence is asserted present, so restoring an overclaim fails here
+    even if the old wording is never searched for."""
+
+    text, section = _flat(README), _flat(_section("## Phase 8B3"))
+
+    # The retry claim: a sealed level is skipped, and the migration hazard is named.
+    assert "is skipped outright" in text
+    assert "A level already sealed under the run's own attempt id is skipped" in section
+    assert "true no-op" in section
+    assert "Warning: a chain sealed before 8B3" in section
+    assert "skips the levels already sealed" in section
+    # Identity: only the 1.0x level is byte-identical; stressed run ids moved by design.
+    assert "No **1.0x** constant-notional run id, result digest or bundle digest moves" in section
+    assert "The stressed levels' `run_id`s **do** change, by design" in section
+    assert "and no constant-notional run id, result digest or bundle digest moves." not in section
+    # Sizing: the old constant-equity sentence is scoped to the default sizing.
+    assert "Compounding does not happen under the default sizing" in text
+    assert "**Compounding does not happen.** `--firm-equity` is constant" not in text
+    # Compounding reports and their limits.
+    assert "cannot reach a sealed bundle" in section
+    assert "counts as an audit attempt" in section
+    assert "`ends_flat`" in section
+    assert "closed trades' `proposal_id`s only" in section
+    assert "the same replay inputs the protocol does not own" in section
+    assert "not one transaction" in section
+    assert "refuses any `--attempt-id` the trial has already started" in section
+
+
 def test_the_scenarios_help_text_does_not_claim_the_late_refusal() -> None:
     result = runner.invoke(cli.app, ["research", "trial", "scenarios", "--help"])
     text = " ".join(result.stdout.split())
 
     assert "What this cannot prevent" not in text
     assert "before anything is written" in text
+    # The retry claim as it is now true, and as it was not.
+    assert "skipped entirely" in text
+    assert "a true no-op" in text
+    assert "second document lands" not in text
+    assert "recognised as a no-op" not in text
+
+
+def test_the_compounding_help_text_states_its_pre_flight_and_its_retry() -> None:
+    result = runner.invoke(cli.app, ["research", "trial", "compounding", "--help"])
+    text = " ".join(result.stdout.split())
+
+    assert "checks before the first write" in text
+    assert "not one the trial has already started" in text
+    assert "is a no-op that reports the existing digest" in text

@@ -96,8 +96,8 @@ class LegacyImportResult(CanonicalModel):
 def derive_realized_daily_returns(result: BacktestResult) -> tuple[DailyReturnPoint, ...]:
     """Realized closed-trade returns, one point per UTC calendar day.
 
-    Under D-4 equity is constant, so the running equity *is* the running sum of
-    ``net_pnl`` and a day's return is that day's closed P&L over the equity it
+    Phase 7 artifacts are constant-notional (D-4), so the running equity *is* the
+    running sum of ``net_pnl`` and a day's return is that day's closed P&L over the equity it
     started from. A day with no closed trade carries its own pnl of zero, which
     is a real zero return rather than a missing one -- the reason the series can
     be a run of calendar days instead of a run of trade exits.

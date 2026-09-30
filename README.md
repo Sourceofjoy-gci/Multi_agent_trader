@@ -523,9 +523,10 @@ no snapshot trails nothing.
   emitted payload says so rather than leaving it to this paragraph: it carries
   `"margin_modelled": false` beside the digest, so a reader of the JSON — Phase
   8's trial ledger included — sees the assumption without reading the README.
-- **Compounding does not happen.** `--firm-equity` is constant for the whole run
-  (D-4), so a measured edge cannot be an artefact of position sizes growing with
-  the strategy's own luck.
+- **Compounding does not happen under the default sizing.** `--firm-equity` is
+  constant for the whole run (D-4), so a measured edge cannot be an artefact of
+  position sizes growing with the strategy's own luck. The separate compounding
+  rerun of Phase 8B3 sizes from current equity instead; see *Phase 8B3*.
 - **The cost breakdown in the result is partial.** Section 7.1 lists five
   modelled terms; `SimulatedTrade` names only two of them — `commission` and
   `swap`. Spread and slippage are charged inside the fill prices, so they are
@@ -1370,11 +1371,13 @@ and immediately instead of sealing anything.)
 
 It matters more than tidiness, because that refusal is a **one-way door**. An
 operator who registered over a year and typed the last week gets three sealed
-documents and nine appended events before the report refuses at exit 19; retrying
-with the right window reuses the same `--attempt-prefix`, so the start is
-recognised as a no-op, the *bundle* now differs, and a second document lands at
-that level — which completeness then refuses permanently. Not having the option
-is the only version of this command with no such state to reach.
+documents and nine appended events before the report refuses at exit 19, and
+nothing in a retry could undo them: before 8B3 a retry under the same
+`--attempt-prefix` derived a different bundle and sealed a second document at
+that level, which completeness refuses permanently, and since 8B3 a sealed level
+is skipped, so the wrong-window document stays the only one there and the report
+keeps refusing it. Not having the option is the only version of this command with
+no such state to reach.
 
 `backtest run` keeps all of them because it is a Phase 7 command that can run a
 window **nobody preregistered** — the three Phase 7 arms are exactly that, and
@@ -1386,7 +1389,9 @@ the command re-runnable: every event id the orchestrator appends is derived from
 content, and every timestamp in those bytes is one of these. Re-running with the
 same values is recognised as a retry and appends nothing; a clock read anywhere
 in the loop would make each run's bytes differ and the retry would be refused as
-a conflict, every time, forever.
+a conflict, every time, forever. Since 8B3 this no longer rests on the bytes alone:
+a level already sealed under the run's own attempt id is skipped outright (see
+*Phase 8B3*), so a retry that changes a provenance option still seals nothing.
 
 ### The grid is read from the chain, not from the file
 
@@ -1553,8 +1558,11 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
 the same replay at its declared baseline costs, sized from **current** equity
 instead of initial capital. It also types the capacity diagnostic and closes three
 recorded 8B2 defects. It adds **no verdict, no threshold, no statistic, no
-migration, no new event type and no dependency**, and no constant-notional run id,
-result digest or bundle digest moves.
+migration, no new event type and no dependency**. No **1.0x** constant-notional run
+id, result digest or bundle digest moves. The stressed levels' `run_id`s **do**
+change, by design: a 1.5x and a 2.0x run now carry their multiplier in the id (see
+*Identity*), so a stressed bundle sealed before 8B3 differs from the one a re-run
+would derive.
 
 ### The sizing semantic
 
@@ -1569,6 +1577,13 @@ The rerun is constant-notional evidence's sibling, not its replacement. It is
 sealed as an ordinary bundle whose bytes carry `sizing: compounding` (constant
 bundles carry no `sizing` key at all, which is why their digests are unchanged)
 and which must carry a mark-to-market series.
+
+`equity_exhausted` is visible on an in-memory outcome but cannot reach a sealed
+bundle: a run whose equity goes non-positive is refused when its daily returns are
+derived (`derive_daily_returns` refuses non-positive equity), before anything is
+sealed. Such a run still leaves its `EXECUTION_STARTED` row in the chain, and that
+row counts as an audit attempt. That is fail-closed on purpose: the attempt
+happened, and it is counted.
 
 ### Commands
 
@@ -1608,11 +1623,19 @@ then `final_equity_difference` (compounding minus constant, a delta and never a
 ratio). It **refuses** at exit 19, with the specifics on the private cause, unless
 the pair is one candidate on one replay: same trial, specification, strategy,
 window equal to the protocol's, cost model equal to the baseline at level 1, same
-starting equity, same bars read, and an equity series on both.
+bars read, an equity series on both, and the same replay inputs the protocol does
+not own: starting equity, exit policy, ATR period, spread window, defective-bar
+tolerance, contract digest, constitution digest, instrument and timeframe. One
+predicate lists exactly those nine fields, and both the report and the commands'
+pre-flight use it. Each run also reports `ends_flat`: when it is false,
+`final_equity` includes the unrealized mark of a position still open at the end
+and `net_pnl` does not.
 
 **`same_trade_sequence` is reported, not checked.** With re-based equity the same
 costs can change a size and therefore a trade, and refusing on it would forbid the
-very difference the rerun exists to show.
+very difference the rerun exists to show. It compares the **closed trades'
+`proposal_id`s only**: it says nothing about lots, fills or exits, nor about a
+position that was still open (and so is not among the trades) when a run ended.
 
 ### Capacity: `UNAVAILABLE`, and why there is no proxy
 
@@ -1627,9 +1650,26 @@ as `scenario-report` refuses it.
 - **Shared `run_id`** - closed by the run-id rule above.
 - **An edited `--protocol` file is refused before any write.** `scenarios` and
   `compounding` compare the file's canonical digest with the registered protocol's,
-  and refuse a level already sealed under another attempt id, before the first
-  append. `compounding` also requires a sealed 1.0x constant-notional baseline.
-  Row and file counts before and after a refused command are equal.
+  build and validate every level's request (so a mistyped option leaves no
+  orphaned start row), and refuse before the first append a level already sealed
+  under another attempt id, an attempt id the trial has already started, and a run
+  whose replay inputs differ from those of a constant-notional baseline already
+  sealed. `compounding` also requires a sealed 1.0x constant-notional baseline.
+  Row and file counts before and after a refused command are equal. The read and
+  the writes are not one transaction: the slice assumes a single operator.
+- **A level already sealed under the run's own attempt id is skipped.** No start
+  event, no simulation, no seal: the existing digest is reported and nothing is
+  written, so a retry is a true no-op even if a provenance option (for example
+  `--occurred-at`) changed. Re-running would derive a different bundle and seal a
+  second document at that level, which `scenario-report` and `compounding-report`
+  refuse for good. `compounding` refuses any `--attempt-id` the trial has already
+  started (an id reused would append nothing, and the audit count would not rise);
+  `scenarios` refuses an id it would start that is sealed at another level, and
+  lets an id that was started but never sealed finish under itself.
+- **Warning: a chain sealed before 8B3.** Re-running `scenarios` on such a chain
+  skips the levels already sealed under the same `--attempt-prefix` rather than
+  re-sealing them, so a stressed level keeps its pre-8B3 `run_id`. Under another
+  prefix the command refuses, because the levels are already sealed.
 - **A stressed baseline is named.** A protocol declaring
   `baseline.stress_multiplier` other than 1 is still reportable (a registration
   cannot be amended) and `ScenarioReport.declared_baseline_multiplier` now says so.
@@ -1668,9 +1708,9 @@ uv run trading-house --help
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
-| `trading-house research trial scenarios` | Run, seal and report the cost grid a protocol preregistered, one attempt and one sealed bundle per level. Takes no cost, window or strategy options: the grid, its costs, its window and its strategy all come from `--protocol`, because the report checks every level against those same declarations |
+| `trading-house research trial scenarios` | Run, seal and report the cost grid a protocol preregistered, one attempt and one sealed bundle per level. Takes no cost, window or strategy options: the grid, its costs, its window and its strategy all come from `--protocol`, because the report checks every level against those same declarations. A level already sealed under the run's own attempt id is skipped, not re-sealed |
 | `trading-house research trial scenario-report` | Check a candidate's sealed scenarios against the grid recovered from the chain's `PREREGISTERED` event, and report. States no verdict |
-| `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one or no 1.0x constant-notional baseline is sealed |
+| `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one, no 1.0x constant-notional baseline is sealed, the run's replay inputs differ from that baseline's, or `--attempt-id` is one the trial already started; the same attempt id over a sealed rerun is a no-op |
 | `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
@@ -1766,7 +1806,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 16 | `trial ledger integrity verification failed` | `research trial verify` found a broken chain (`{"valid": false, "reason": …}` names which), **or** could not read the ledger to check at all | **Stop appending.** A detected break means a row was altered outside the append function — preserve the database and investigate. The unreadable case is a separate answer: nobody could check, which is not the same as nothing being wrong |
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
 | 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series cannot be produced or reduced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, a requested daily range whose first day is after its last, or a day whose prior close is not strictly positive | **Do not record this run as evidence.** Narrow the window, use a coarser timeframe, or check the requested range, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader. A series that violates its own mark identity is *not* this code — that is a pydantic `ValidationError`, which the CLI reports as `configuration invalid`, exit 2 |
-| 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were or which specification they were pinned to, a trial no registration names, or a trial two registrations name | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. Which check fired is on the error's private cause for a log reader, and the remedy differs: a level never run is a new attempt through `research trial scenarios` at a fresh `--attempt-prefix`. A level run **twice** has no remedy — the second document is at that level and completeness refuses the candidate for good, because the only fix would be surgery on the evidence root and the chain. Anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
+| 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were or which specification they were pinned to, a trial no registration names, or a trial two registrations name | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. Which check fired is on the error's private cause for a log reader, and the remedy differs: a level never run is a new attempt through `research trial scenarios` at a fresh `--attempt-prefix`. A level run **twice** has no remedy — the second document is at that level and completeness refuses the candidate for good, because the only fix would be surgery on the evidence root and the chain. `scenarios` and `compounding` no longer produce that state: they skip a level already sealed under their own attempt id and refuse one sealed under another. Anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates
