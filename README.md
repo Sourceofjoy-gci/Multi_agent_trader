@@ -1650,20 +1650,34 @@ as `scenario-report` refuses it.
 - **Shared `run_id`** - closed by the run-id rule above.
 - **An edited `--protocol` file is refused before any write.** `scenarios` and
   `compounding` compare the file's canonical digest with the registered protocol's,
-  build and validate every level's request (so a mistyped option leaves no
-  orphaned start row), and refuse before the first append a level already sealed
+  build and validate every level's request and the provenance values the bundle
+  would check later (a blank `--agent-run-id` or `--attempt-id`, a mistyped
+  number), compare the code's strategy id and version with the protocol's (exit
+  19 when they differ), and refuse before the first append a level already sealed
   under another attempt id, an attempt id the trial has already started, and a run
   whose replay inputs differ from those of a constant-notional baseline already
   sealed. `compounding` also requires a sealed 1.0x constant-notional baseline.
   Row and file counts before and after a refused command are equal. The read and
   the writes are not one transaction: the slice assumes a single operator.
+  What can still orphan a start row: a data-dependent `BacktestRefused` from the
+  simulation and a `derive_daily_returns` refusal (a ruined account), because
+  both need the bars. Nothing else can.
+- **An orphaned `compounding` attempt id is spent.** A `compounding` run that stops
+  after its start row leaves that row in the chain, and the id is refused from then
+  on. Retry under a **new** `--attempt-id`; `audit_attempts` then rises by one for
+  the orphan and one for the retry. The policy is deliberately strict: resuming an
+  id would append nothing and the audit count would not rise for a run that
+  happened. `scenarios` differs because it computes each level's id itself and lets
+  a started, unsealed one finish under itself.
 - **A level already sealed under the run's own attempt id is skipped.** No start
   event, no simulation, no seal: the existing digest is reported and nothing is
   written, so a retry is a true no-op even if a provenance option (for example
   `--occurred-at`) changed. Re-running would derive a different bundle and seal a
   second document at that level, which `scenario-report` and `compounding-report`
-  refuse for good. `compounding` refuses any `--attempt-id` the trial has already
-  started (an id reused would append nothing, and the audit count would not rise);
+  refuse for good. `compounding` refuses an `--attempt-id` the trial has started and
+  not sealed as this run's own rerun (an id reused would append nothing, and the
+  audit count would not rise), while an id already sealed as this run's rerun is a
+  no-op skip;
   `scenarios` refuses an id it would start that is sealed at another level, and
   lets an id that was started but never sealed finish under itself.
 - **Warning: a chain sealed before 8B3.** Re-running `scenarios` on such a chain
@@ -1710,7 +1724,7 @@ uv run trading-house --help
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
 | `trading-house research trial scenarios` | Run, seal and report the cost grid a protocol preregistered, one attempt and one sealed bundle per level. Takes no cost, window or strategy options: the grid, its costs, its window and its strategy all come from `--protocol`, because the report checks every level against those same declarations. A level already sealed under the run's own attempt id is skipped, not re-sealed |
 | `trading-house research trial scenario-report` | Check a candidate's sealed scenarios against the grid recovered from the chain's `PREREGISTERED` event, and report. States no verdict |
-| `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one, no 1.0x constant-notional baseline is sealed, the run's replay inputs differ from that baseline's, or `--attempt-id` is one the trial already started; the same attempt id over a sealed rerun is a no-op |
+| `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one, no 1.0x constant-notional baseline is sealed, the run's replay inputs differ from that baseline's, or the code's strategy version is not the registered one. Refuses an `--attempt-id` the trial has started and not sealed as this run's own rerun; an id already sealed as this run's rerun is a no-op skip. A run that stops after its start row spends its id: retry under a new `--attempt-id` (`audit_attempts` rises by one more) |
 | `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |

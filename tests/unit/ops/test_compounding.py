@@ -31,10 +31,10 @@ from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.ops.compounding import (
     REPLAY_FIELDS,
     CompoundingReport,
-    CompoundingRun,
     compounding_report,
     replay_inputs,
 )
+from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
@@ -276,18 +276,24 @@ def test_each_replay_input_that_differs_between_the_runs_is_refused_by_name(
     assert [f for f in REPLAY_FIELDS if f in cause.split("replay inputs: ")[1]] == [field]
 
 
-def test_the_replay_predicate_lists_exactly_the_fields_a_protocol_does_not_own() -> None:
-    assert REPLAY_FIELDS == (
-        "firm_equity",
-        "exit_policy",
-        "atr_period",
-        "spread_window",
-        "defective_bar_tolerance",
-        "contract_sha256",
-        "constitution_sha256",
-        "instrument_id",
-        "timeframe",
-    )
+def test_every_backtest_result_field_is_classified_as_replay_protocol_owned_or_derived() -> None:
+    """A new ``BacktestResult`` field fails here until someone decides which it is: a replay
+    input the two runs must share (``REPLAY_FIELDS``), a value the protocol declares, or an
+    output of the run itself."""
+
+    protocol_owned = {"start", "end", "cost_model", "strategy_id", "strategy_version"}
+    derived = {
+        "run_id",
+        "trades",
+        "rejections",
+        "bars_seen",
+        "defective_bars",
+        "snapshots_skipped",
+        "net_pnl",
+    }
+
+    assert set(BacktestResult.model_fields) == set(REPLAY_FIELDS) | protocol_owned | derived
+    assert set(REPLAY_FIELDS).isdisjoint(protocol_owned | derived)
     assert set(replay_inputs(_pair(_protocol(), SizingMode.COMPOUNDING, None)[1].result)) == set(
         REPLAY_FIELDS
     )
@@ -354,15 +360,3 @@ def test_a_request_declares_the_replay_inputs_its_run_then_records() -> None:
         constitution_sha256=constitution.constitution_sha256,
     ) == replay_inputs(outcome.result)
     assert replay_inputs(outcome.result)["firm_equity"] == Decimal("90000")
-
-
-def test_a_compounding_run_holds_exactly_these_fields() -> None:
-    assert set(CompoundingRun.model_fields) == {
-        "attempt_id",
-        "evidence_sha256",
-        "source_result_sha256",
-        "trades",
-        "net_pnl",
-        "final_equity",
-        "ends_flat",
-    }

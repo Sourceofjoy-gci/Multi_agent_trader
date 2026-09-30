@@ -15,7 +15,7 @@ import os
 import signal
 import tempfile
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,7 +27,7 @@ from uuid import uuid4
 
 import typer
 from alembic.config import Config
-from pydantic import JsonValue, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from typer._click.exceptions import UsageError
 from typer.core import TyperCommand
 
@@ -41,7 +41,7 @@ from trading_house.brokers.mt5.magic import derive_magic
 from trading_house.constitution.binding import VenueBinding, load_venue_binding
 from trading_house.constitution.loader import LoadedConstitution, load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
-from trading_house.core.clock import SystemClock
+from trading_house.core.clock import SystemClock, ensure_utc
 from trading_house.core.errors import (
     AuditAppendError,
     AuditIntegrityError,
@@ -84,6 +84,7 @@ from trading_house.core.values import (
     BookId,
     CanonicalModel,
     IntentState,
+    NonEmptyStr,
     TimeInForce,
 )
 from trading_house.core.venue import DealRecord, Mt5VenueRef, PositionRecord, Venue
@@ -1891,6 +1892,23 @@ def _request_for(run: _RunInputs, cost_model: CostModel, sizing: SizingMode) -> 
     )
 
 
+def _refuse_unwritable_provenance(run: _RunInputs, attempt_ids: Iterable[str]) -> None:
+    """The values ``mark_to_market_bundle`` would validate only after the start row.
+
+    Same checks, taken first: a blank id or an offset-less timestamp is a typed
+    ``ConfigurationError`` here and not an orphan start row there.
+    """
+
+    text = TypeAdapter(NonEmptyStr)
+    for value in (run.trial_id, run.agent_run_id, *attempt_ids):
+        try:
+            text.validate_python(value)
+        except ValidationError as error:
+            raise ConfigurationError() from error
+    for moment in (run.started_at, run.occurred_at, run.registered_at):
+        ensure_utc(_as_utc(moment))
+
+
 def _seal_levels(
     run: _RunInputs,
     *,
@@ -1903,9 +1921,11 @@ def _seal_levels(
     Returns each level's evidence digest, for a level skipped as much as for one
     run. Everything that needs no simulation is taken before the first append, in
     this order: the ``--protocol`` file must be the registered protocol; every
-    level's request is built and validated (a mistyped option leaves no orphan
-    start row); no level is sealed under another attempt id; no attempt id this
-    run would start is already started; and the run's replay inputs must equal
+    level's request is built and validated, and the option values the bundle would
+    validate later are validated now (a mistyped option leaves no orphan start
+    row); the code's strategy id and version equal the protocol's; no level is
+    sealed under another attempt id; no attempt id this run would start is already
+    started; and the run's replay inputs must equal
     those of the constant-notional baseline the chain holds -- for ``compounding``
     the one 1.0x baseline (required), for ``scenarios`` every constant level
     already sealed, if any.
@@ -1917,10 +1937,24 @@ def _seal_levels(
     The reads above and the writes below are not one transaction. The slice
     assumes a single operator: two concurrent runs could both pass the pre-flight.
     Take a ledger lock if that assumption stops holding.
+
+    What can still orphan a start row: a data-dependent ``BacktestRefused`` from
+    ``simulate`` and a ``derive_daily_returns`` refusal (a ruined account), both
+    of which need the bars. For ``compounding`` the attempt id is then spent.
     """
 
     refuse_edited_protocol(registered_protocol(run.ledger.replay(), run.trial_id), run.parsed)
+    _refuse_unwritable_provenance(run, attempts.values())
     requests = {m: _request_for(run, baseline_at(run.parsed, m), sizing) for m in attempts}
+    for request in requests.values():
+        if (request.strategy.id, request.strategy.version) != (
+            run.parsed.strategy_id,
+            run.parsed.strategy_version,
+        ):
+            raise ScenarioEvidenceError() from ValueError(
+                f"the code's strategy is {request.strategy.id} {request.strategy.version}; "
+                f"the protocol declares {run.parsed.strategy_id} {run.parsed.strategy_version}"
+            )
     records = run.ledger.events_for(run.trial_id)
     sealed = sealed_bundles(records, run.store.read)
     refuse_other_attempts(sealed, sizing=sizing, allowed=attempts.get)
@@ -2149,15 +2183,26 @@ def research_trial_compounding(
     constant-notional baseline beside it, with the capacity state.
 
     Like ``scenarios`` it checks before the first write: the ``--protocol`` file is
-    the registered one, the options are valid, a 1.0x constant-notional baseline is
-    sealed, the run's replay inputs equal that baseline's, and ``--attempt-id`` is
-    not one the trial has already started. The same attempt id over an already
-    sealed rerun is a no-op that reports the existing digest.
+    the registered one, the options are valid, the strategy in code is the one the
+    protocol declares, a 1.0x constant-notional baseline is sealed, and the run's
+    replay inputs equal that baseline's. It refuses an ``--attempt-id`` the trial
+    has started and not sealed as this run's own rerun; an id already sealed as
+    this run's rerun is a no-op that reports the existing digest.
+
+    A run that stops after its start row (a simulation refusal, a ruined account)
+    leaves that row behind and its attempt id is spent. Retry under a NEW
+    ``--attempt-id``; ``audit_attempts`` rises by one more.
     """
 
     # Like ``scenarios``: no option for any value the report compares against the
     # protocol (no window, strategy or cost option). Kept out of the docstring
     # because that is the help text.
+    #
+    # Why a started id is spent rather than resumed (policy, deliberately strict):
+    # a start row is derived from the trial and the attempt id alone, so resuming
+    # it would append nothing and the audit count would not rise for a run that
+    # happened. ``scenarios`` resumes its own levels only because each level is a
+    # distinct id it computed itself.
     def operation() -> dict[str, JsonValue]:
         parsed = _load_json_model(protocol, TrialProtocol)
         spec_sha256 = canonical_sha256(_declared_candidate(parsed, trial_id))

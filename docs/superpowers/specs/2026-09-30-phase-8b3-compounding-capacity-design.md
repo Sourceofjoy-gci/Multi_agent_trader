@@ -53,7 +53,7 @@ limits each with a stated remedy, and this run reads them as:
 | C-5 | `scenario_report` reads only `CONSTANT_NOTIONAL` bundles; a compounding bundle in the same trial is **ignored by the grid, not refused** | It is a different experiment. Counting it as a second 1.0x would make the candidate permanently unreportable — the false-refusal trap the 8B2b README names |
 | C-6 | Compounding runs once, at the baseline cost level (1.0x), as its own attempt | §6.5 says "a separate compounding rerun" and §7.7 "the compounding baseline". A compounding grid is not asked for |
 | C-7 | The compounding report states `same_trade_sequence` as a **reported fact**, not a check | The 8B2b README assigns this to 8B3: with re-based equity the same costs can change a size and so a trade count. Refusing on it would forbid the very difference compounding exists to show |
-| C-8 | The compounding report **refuses** on identity and fidelity: same trial/spec/strategy, window equals the protocol's, cost model equals `costs.baseline` at level 1, same `firm_equity` start, same `bars_seen` | Those are what make the two runs one candidate on one replay; unlike the trade sequence they cannot legitimately differ |
+| C-8 | The compounding report **refuses** on identity and fidelity: same trial/spec/strategy, window equals the protocol's, cost model equals `costs.baseline` at level 1, same `firm_equity` start, same `bars_seen` (amended 2026-09-30: the nine `REPLAY_FIELDS` -- `firm_equity`, `exit_policy`, `atr_period`, `spread_window`, `defective_bar_tolerance`, `contract_sha256`, `constitution_sha256`, `instrument_id`, `timeframe` -- must match, plus `bars_seen`) | Those are what make the two runs one candidate on one replay; unlike the trade sequence they cannot legitimately differ |
 | C-9 | `CapacityDiagnostic` is a typed `UNAVAILABLE` with a reason. No tick-volume proxy is produced | §7.7 permits a proxy but forbids presenting it as capacity; a number nobody can use honestly is noise in a gate input |
 | C-10 | `research trial scenarios` and `compounding` **pre-flight** before any write: the `--protocol` file's canonical digest must equal the registered protocol's; no level may already be sealed under another attempt id (amended: plus the checks in the review note) | Closes defect 3. The one-way door is closed before the door, not after nine writes |
 | C-11 | `ScenarioReport` gains `declared_baseline_multiplier`. A stressed baseline stays reportable (8B2b's review settled that a registration cannot be amended) but is **named** | Closes defect 4 by mentioning, not refusing |
@@ -148,8 +148,14 @@ fixed in the fix wave. Where it changes a statement above, the statement is amen
   identical to the baseline's, so the audit count did not rise. `compounding` now refuses any attempt id
   the trial has already started; `scenarios` refuses one sealed at another level but lets a started and
   never-sealed id finish under itself (the retry path of a failed run).
-- **Requests are built and validated before the first append**, so a mistyped option leaves no orphan
-  start row. The read-then-write pre-flight is not atomic; a single operator is assumed.
+- **Requests and provenance values are built and validated before the first append** (second fix wave:
+  non-empty `agent_run_id`, `trial_id` and attempt ids, UTC-able timestamps, and the code's strategy
+  id/version equal to the protocol's, exit 19), so a mistyped option leaves no orphan start row. Still able
+  to orphan one: a data-dependent `BacktestRefused` from `simulate` and a `derive_daily_returns` refusal,
+  both of which need the bars. An orphaned `compounding` attempt id is spent (retry under a new
+  `--attempt-id`; `audit_attempts` rises by one more); `compounding` refuses an id the trial has started and
+  not sealed as this run's own rerun, and an id already sealed as this run's rerun is a no-op skip. The
+  read-then-write pre-flight is not atomic; a single operator is assumed.
 - **`equity_exhausted`** cannot reach a sealed bundle, and a ruined run's start row counts as an attempt.
 - **`CompoundingRun.ends_flat`** added; `same_trade_sequence` compares closed trades' `proposal_id`s only.
 - **One helper** (`baseline_at`) states "the declared baseline at level m"; the two helpers

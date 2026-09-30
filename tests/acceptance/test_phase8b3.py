@@ -375,7 +375,9 @@ def test_the_readme_states_what_8b3_changed_and_does_not_overclaim_it() -> None:
     assert "closed trades' `proposal_id`s only" in section
     assert "the same replay inputs the protocol does not own" in section
     assert "not one transaction" in section
-    assert "refuses any `--attempt-id` the trial has already started" in section
+    assert "refuses an `--attempt-id` the trial has started and not sealed" in section
+    assert "An orphaned `compounding` attempt id is spent" in section
+    assert "audit_attempts` then rises by one" in section
 
 
 def test_the_scenarios_help_text_does_not_claim_the_late_refusal() -> None:
@@ -396,5 +398,6 @@ def test_the_compounding_help_text_states_its_pre_flight_and_its_retry() -> None
     text = " ".join(result.stdout.split())
 
     assert "checks before the first write" in text
-    assert "not one the trial has already started" in text
+    assert "started and not sealed as this run's own rerun" in text
     assert "is a no-op that reports the existing digest" in text
+    assert "its attempt id is spent. Retry under a NEW" in text

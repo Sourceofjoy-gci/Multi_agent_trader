@@ -518,7 +518,8 @@ def test_a_fresh_compounding_run_adds_one_audit_attempt_and_no_lottery_or_specif
 
 @pytest.mark.parametrize("command", ["scenarios", "compounding"])
 @pytest.mark.parametrize(
-    ("option", "value"), [("--firm-equity", "abc"), ("--defective-bar-tolerance", "2")]
+    ("option", "value"),
+    [("--firm-equity", "abc"), ("--defective-bar-tolerance", "2"), ("--agent-run-id", "")],
 )
 def test_a_mistyped_option_leaves_no_started_row_behind(
     seeded: Fixture,
@@ -529,7 +530,10 @@ def test_a_mistyped_option_leaves_no_started_row_behind(
     option: str,
     value: str,
 ) -> None:
-    """M-5: the request is built and validated before the first append."""
+    """M-5, I-1: the request and the provenance values are validated before the first append.
+
+    Only the failures that need the bars (``BacktestRefused``, a ruined account) can still
+    leave a start row."""
 
     protocol_path = _register(tmp_path, seeded)
     if command == "compounding":
@@ -543,4 +547,50 @@ def test_a_mistyped_option_leaves_no_started_row_behind(
     result = runner.invoke(cli.app, argv)
 
     assert result.exit_code == cli.ExitCode.CONFIGURATION, result.stderr
+    _assert_nothing_written(research_ledger_dsn, research_env, before)
+
+
+def test_a_blank_attempt_id_leaves_no_started_row_behind(
+    seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    """``scenarios`` derives its ids from a prefix and cannot be blank; ``compounding`` can."""
+
+    protocol_path = _register(tmp_path, seeded)
+    _scenarios(seeded, protocol_path)
+    before = (_rows(research_ledger_dsn), _files(research_env))
+
+    result = _compounding(seeded, protocol_path, attempt_id="")
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION, result.stderr
+    _assert_nothing_written(research_ledger_dsn, research_env, before)
+
+
+@pytest.mark.parametrize("command", ["scenarios", "compounding"])
+def test_a_code_strategy_that_is_not_the_registered_version_is_refused_before_any_write(
+    seeded: Fixture,
+    research_env: Path,
+    research_ledger_dsn: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """M-4: the registration names version 1; the code now says 2, so every result this run
+    sealed would be refused by the report. Refused at 19 with nothing appended."""
+
+    from trading_house.strategies.impl.session_momentum import SessionMomentum
+
+    protocol_path = _register(tmp_path, seeded)
+    argv = (
+        _scenario_args(seeded, protocol_path)
+        if command == "scenarios"
+        else _compounding_args(seeded, protocol_path)
+    )
+    if command == "compounding":
+        _scenarios(seeded, protocol_path)
+    before = (_rows(research_ledger_dsn), _files(research_env))
+    monkeypatch.setattr(SessionMomentum, "version", "2")
+
+    result = runner.invoke(cli.app, argv)
+
+    assert result.exit_code == cli.ExitCode.SCENARIO_EVIDENCE, result.stderr
     _assert_nothing_written(research_ledger_dsn, research_env, before)
