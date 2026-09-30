@@ -164,12 +164,12 @@ renders -- so ``Survives the grid; 8D decides.`` would otherwise pass, and it is
 the single easiest edit that could make this gate a lie.
 
 **This is not the same list as the report gate's, on purpose.** That one reads
-``_NO_VERDICT`` from ``tests/unit/ops/test_scenarios.py`` and carries two words
-this one does not -- ``total`` and ``verdict`` -- because it matches *field names*,
-where those two are forbidden outright, and it spells ``promote`` rather than
-``promot``. This one matches prose, where ``total`` is a word an operator uses
-freely about their own P&L. Two surfaces, two rules, one reason each; the
-alternative is one list that is wrong on at least one of them.
+``_NO_VERDICT`` from ``tests/unit/ops/test_scenarios.py`` and carries one word this
+one does not — ``total`` — because it matches *field names*, where a field called
+``total_cost`` would launder the four signed terms into one, whereas ``total`` is a
+word an operator uses freely about their own P&L. The two lists agree on the rest,
+including ``verdict``: a field by that name and a sentence by that name are the
+same claim in different clothes, and only the prose one has to be worded around.
 """
 
 

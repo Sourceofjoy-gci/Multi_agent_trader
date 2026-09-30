@@ -1541,10 +1541,15 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
 - **8B3 inherits a live false-refusal trap here.** `spec_sha256` equality is now a
   hard gate on reportability, so any change to *how a run's declared specification
   is derived* — not to the strategy or the sizing — makes correctly sealed grids
-  fail at exit 19 with three documents already in the chain. If 8B3 introduces a
-  second legitimate `TrialSpec` for one trial, the fix belongs in
-  `ops.scenarios.declared_candidate`, which both the orchestrator and the check
-  already call, and not in a widened comparison.
+  fail at exit 19 with three documents already in the chain. If 8B3 wants one trial
+  to carry two legitimate specifications, the work is in two places and the order
+  matters. `TrialProtocol.candidate_family_is_complete_and_unique` rejects
+  duplicate candidate `trial_id`s today, so that validator has to be relaxed
+  first; and then `expected["spec_sha256"]` in `_refuse_identity` has to become a
+  *set* of digests, because one grid's levels may then legitimately disagree.
+  What must **not** happen is `declared_candidate` returning the first of two —
+  that is the first-match defect this slice exists to close, wearing a different
+  hat.
 - **Orchestrating three runs does not establish that the trade sequence is
   cost-invariant on any future engine.** The identity check pins the sequence
   across the three levels *on today's engine*, and that is a real check — a

@@ -215,7 +215,7 @@ def _register(tmp_path: Path, seeded: Fixture) -> Path:
 
 
 _NOT_ON_THE_ORCHESTRATOR = (
-    # The six cost terms, plus the window and the strategy: eight of
+    # The five money terms, plus the window and the strategy: eight of
     # ``backtest run``'s options that ``scenarios`` deliberately does not take,
     # because ``scenario_report`` compares every one of them against the protocol
     # and a second copy typed on the command line could only agree or refuse the
@@ -323,20 +323,24 @@ def _foreign_baseline_bundle(seeded: Fixture, spec_sha256: str, tmp_path: Path) 
 def test_the_orchestrator_refuses_an_option_it_reads_from_the_protocol(
     seeded: Fixture, tmp_path: Path, option: str
 ) -> None:
-    """The eight are absent, not merely optional — and a refusal is the test.
+    """The eight are absent, not merely optional — and this is the test that says so.
 
     ``_scenario_args`` subtracting them proves they are not *required*. It does
     not prove they are *refused*, and re-adding one to the signature is the
     natural edit for somebody who thinks the protocol's window or strategy might
     be wrong — the very doubt the command's docstring argues is unanswerable,
-    because disagreeing with a registration is a refusal with no remedy. So each
-    of the eight is passed and the command is asked to reject it.
+    because disagreeing with a registration is a refusal with no remedy.
+
+    The **message** is what the assertion turns on, and it is the whole test.
+    Exit 2 is reached three different ways from this ``argv``: an unknown option,
+    a known one with a value that will not parse, and a fully valid invocation
+    whose ``--protocol`` file does not exist. Only the first is the invariant, so
+    ``No such option`` is asserted as well as the code. With the code alone this
+    test would have stayed green through the exact edit it was written for.
 
     No protocol is registered and no database is touched: the refusal is Typer's
     own, before the operation runs, which is also why the ``--protocol`` path
-    here need not exist. ``--strategy`` and the two window options carry values;
-    the money terms carry a number. Only the option's presence matters, and that
-    is what the exit code reports.
+    here need not exist.
     """
 
     argv = [*_scenario_args(seeded, tmp_path / "never-read.json"), option, "1"]
@@ -344,6 +348,7 @@ def test_the_orchestrator_refuses_an_option_it_reads_from_the_protocol(
     result = runner.invoke(cli.app, argv)
 
     assert result.exit_code == cli.ExitCode.CONFIGURATION, result.stderr
+    assert "No such option" in result.stderr
 
 
 def test_the_orchestrator_seals_every_declared_level_and_reports_them(

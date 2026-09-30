@@ -568,7 +568,7 @@ def test_a_trial_declared_by_two_registrations_is_refused_rather_than_picked() -
     """
 
     original = _protocol()
-    amended = _amended_registration(original)
+    amended = _amended_registration(original, protocol_id="protocol-amended")
 
     with pytest.raises(ScenarioEvidenceError) as refusal:
         registered_protocol(
@@ -605,12 +605,21 @@ def test_a_re_registration_under_the_same_protocol_id_is_refused_too() -> None:
         )
 
 
-def _amended_registration(protocol: TrialProtocol) -> TrialProtocol:
-    """The same protocol with one field none of the six checks reads changed."""
+def _amended_registration(
+    protocol: TrialProtocol, *, protocol_id: str | None = None
+) -> TrialProtocol:
+    """The same protocol with one field none of the six checks reads changed.
+
+    ``protocol_id`` is an override rather than a fixed new value, because the two
+    tests using this need different shapes: one must differ in *content* while
+    keeping the same id, and the other may differ in both. Fixing one of them here
+    would have collapsed the pair into the same test twice.
+    """
 
     return TrialProtocol(
         **{
             **protocol.model_dump(),
+            "protocol_id": protocol_id or protocol.protocol_id,
             "execution": protocol.execution.model_copy(update={"seed": "other"}),
         }
     )
