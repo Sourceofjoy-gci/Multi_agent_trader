@@ -39,7 +39,7 @@ from trading_house.brokers.mt5.boundary import TerminalPort
 from trading_house.brokers.mt5.gateway import Mt5Gateway
 from trading_house.brokers.mt5.magic import derive_magic
 from trading_house.constitution.binding import VenueBinding, load_venue_binding
-from trading_house.constitution.loader import load_constitution
+from trading_house.constitution.loader import LoadedConstitution, load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
 from trading_house.core.clock import SystemClock
 from trading_house.core.errors import (
@@ -103,6 +103,12 @@ from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
 from trading_house.ops.backtest import build_strategy, mark_to_market_bundle, simulate
+from trading_house.ops.compounding import (
+    CompoundingReport,
+    compounding_report,
+    sealed_baseline,
+    sealed_rerun,
+)
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.ops.ledger import (
@@ -115,23 +121,27 @@ from trading_house.ops.scenarios import (
     ScenarioReport,
     declared_candidate,
     declared_grid,
+    refuse_edited_protocol,
+    refuse_other_attempts,
     registered_protocol,
     scenario_report,
+    sealed_bundles,
 )
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
+from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.legacy_import import import_phase7_artifact
 from trading_house.research.trial_ledger import (
     EvidenceSealedPayload,
-    LedgerEventType,
     LedgerRecord,
     LegacyImportedPayload,
     TrialProtocol,
     TrialSpec,
 )
+from trading_house.research.validation.capacity import capacity_diagnostic
 from trading_house.settings import RuntimeSettings
 
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
@@ -1408,6 +1418,7 @@ def _backtest_request(
     atr_period: int,
     spread_window: int,
     defective_bar_tolerance: Decimal,
+    sizing: SizingMode = SizingMode.CONSTANT_NOTIONAL,
 ) -> BacktestRequest:
     """The run's declared inputs, with every cost already in ``cost_model``.
 
@@ -1435,6 +1446,7 @@ def _backtest_request(
             atr_period=atr_period,
             spread_window=spread_window,
             defective_bar_tolerance=defective_bar_tolerance,
+            sizing=sizing,
         )
     except ValueError as error:
         # ``firm_equity`` above; a bad range raises ``BacktestRefused`` from
@@ -1812,19 +1824,107 @@ def _scenario_report_for(
     rather than a ``KeyError`` from here.
     """
 
-    sealed: list[tuple[str, EvidenceBundle]] = []
-    for record in ledger.events_for(trial_id):
-        if record.event_type is not LedgerEventType.EVIDENCE_SEALED:
-            continue
-        evidence_sha256 = EvidenceSealedPayload.model_validate(
-            record.event_json["payload"]
-        ).evidence_sha256
-        sealed.append((evidence_sha256, store.read(evidence_sha256)))
+    sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
     return scenario_report(
         trial_id=trial_id,
         protocol=registered_protocol(ledger.replay(), trial_id),
         sealed=sealed,
     )
+
+
+@dataclass(frozen=True)
+class _RunInputs:
+    """What ``scenarios`` and ``compounding`` hand one simulation besides its costs."""
+
+    parsed: TrialProtocol
+    trial_id: str
+    spec_sha256: str
+    ledger: PostgresTrialLedger
+    store: EvidenceStore
+    constitution: LoadedConstitution
+    instrument_contract: InstrumentContract
+    started_at: datetime
+    occurred_at: datetime
+    registered_at: datetime
+    agent_run_id: str
+    exit_policy: ExitPolicyName
+    firm_equity: str
+    atr_period: int
+    spread_window: int
+    defective_bar_tolerance: str
+
+
+def _constitution() -> LoadedConstitution:
+    settings = _settings()
+    return load_constitution(
+        settings.constitution_path,
+        settings.constitution_signature_path,
+        settings.constitution_public_key_path,
+    )
+
+
+def _preflight(
+    parsed: TrialProtocol,
+    trial_id: str,
+    ledger: PostgresTrialLedger,
+    store: EvidenceStore,
+    sizing: SizingMode,
+    allowed: Callable[[Decimal], str | None],
+) -> list[tuple[str, EvidenceBundle]]:
+    """The refusals that need only the chain, taken before anything is written.
+
+    The file must be the registered protocol, and no level this run seals may
+    already be sealed under another attempt id. Returns what the chain holds so a
+    caller can make its own check without a second read.
+    """
+
+    refuse_edited_protocol(registered_protocol(ledger.replay(), trial_id), parsed)
+    sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
+    refuse_other_attempts(sealed, sizing=sizing, allowed=allowed)
+    return sealed
+
+
+def _run_and_seal(
+    run: _RunInputs, *, attempt_id: str, cost_model: CostModel, sizing: SizingMode
+) -> str:
+    """One attempt: start it, simulate it, seal its bundle. Returns the evidence digest."""
+
+    run.ledger.append(
+        execution_started_event(run.trial_id, attempt_id, run.spec_sha256, _as_utc(run.started_at))
+    )
+    request = _backtest_request(
+        # The strategy the registration names, the window it declared, and the
+        # costs built from its baseline -- things the reports check against that
+        # same protocol, so they are read from it rather than typed here. What is
+        # left of ``_backtest_request``'s arguments is what a protocol does not
+        # state and therefore cannot contradict.
+        strategy=run.parsed.strategy_id,
+        exit_policy=run.exit_policy,
+        start=run.parsed.data.start,
+        end=run.parsed.data.end,
+        firm_equity=_decimal(run.firm_equity),
+        cost_model=cost_model,
+        atr_period=run.atr_period,
+        spread_window=run.spread_window,
+        defective_bar_tolerance=_unit_interval_decimal(run.defective_bar_tolerance),
+        sizing=sizing,
+    )
+    outcome = simulate(
+        request,
+        bars=_bar_store(),
+        contract=run.instrument_contract,
+        constitution=run.constitution,
+    )
+    bundle = mark_to_market_bundle(
+        outcome,
+        trial_id=run.trial_id,
+        attempt_id=attempt_id,
+        spec_sha256=run.spec_sha256,
+        agent_run_id=run.agent_run_id,
+        occurred_at=_as_utc(run.occurred_at),
+        registered_at=_as_utc(run.registered_at),
+    )
+    return seal_bundle(bundle, ledger=run.ledger, store=run.store)
 
 
 @trial_app.command("scenarios")
@@ -1908,60 +2008,44 @@ def research_trial_scenarios(
         # unknown ``--trial-id`` is a ``ConfigurationError``, not a bare
         # ``StopIteration`` the catch-all would answer with a correlation id.
         spec_sha256 = canonical_sha256(_declared_candidate(parsed, trial_id))
-        settings = _settings()
         ledger = _trial_ledger()
         store = _evidence_store()
-        constitution = load_constitution(
-            settings.constitution_path,
-            settings.constitution_signature_path,
-            settings.constitution_public_key_path,
+        grid = declared_grid(parsed)
+        attempts = {m: f"{attempt_prefix}-{m}" for m in grid}
+        # Every refusal that needs no simulation comes before the first append.
+        _preflight(parsed, trial_id, ledger, store, SizingMode.CONSTANT_NOTIONAL, attempts.get)
+        run = _RunInputs(
+            parsed=parsed,
+            trial_id=trial_id,
+            spec_sha256=spec_sha256,
+            ledger=ledger,
+            store=store,
+            constitution=_constitution(),
+            instrument_contract=_instrument_contract(contract),
+            started_at=started_at,
+            occurred_at=occurred_at,
+            registered_at=registered_at,
+            agent_run_id=agent_run_id,
+            exit_policy=exit_policy,
+            firm_equity=firm_equity,
+            atr_period=atr_period,
+            spread_window=spread_window,
+            defective_bar_tolerance=defective_bar_tolerance,
         )
-        instrument_contract = _instrument_contract(contract)
         scenarios: list[JsonValue] = []
-        for multiplier in declared_grid(parsed):
-            attempt_id = f"{attempt_prefix}-{multiplier}"
-            ledger.append(
-                execution_started_event(trial_id, attempt_id, spec_sha256, _as_utc(started_at))
-            )
-            request = _backtest_request(
-                # The strategy the registration names, the window it declared, and
-                # the baseline with this level's multiplier on it -- three things
-                # the report checks against that same protocol, so all three are
-                # read from it rather than typed here. What is left of
-                # ``_backtest_request``'s arguments is what a protocol does not
-                # state and therefore cannot contradict.
-                strategy=parsed.strategy_id,
-                exit_policy=exit_policy,
-                start=parsed.data.start,
-                end=parsed.data.end,
-                firm_equity=_decimal(firm_equity),
+        for multiplier in grid:
+            digest = _run_and_seal(
+                run,
+                attempt_id=attempts[multiplier],
                 cost_model=parsed.costs.baseline.model_copy(
                     update={"stress_multiplier": multiplier}
                 ),
-                atr_period=atr_period,
-                spread_window=spread_window,
-                defective_bar_tolerance=_unit_interval_decimal(defective_bar_tolerance),
+                sizing=SizingMode.CONSTANT_NOTIONAL,
             )
-            outcome = simulate(
-                request,
-                bars=_bar_store(),
-                contract=instrument_contract,
-                constitution=constitution,
-            )
-            bundle = mark_to_market_bundle(
-                outcome,
-                trial_id=trial_id,
-                attempt_id=attempt_id,
-                spec_sha256=spec_sha256,
-                agent_run_id=agent_run_id,
-                occurred_at=_as_utc(occurred_at),
-                registered_at=_as_utc(registered_at),
-            )
-            digest = seal_bundle(bundle, ledger=ledger, store=store)
             scenarios.append(
                 {
                     "multiplier": str(multiplier),
-                    "attempt_id": attempt_id,
+                    "attempt_id": attempts[multiplier],
                     "evidence_sha256": digest,
                 }
             )
@@ -1973,6 +2057,127 @@ def research_trial_scenarios(
                 json.loads(_scenario_report_for(trial_id, ledger, store).model_dump_json()),
             ),
         }
+
+    _run(operation)
+
+
+def _compounding_report_for(
+    trial_id: str, ledger: PostgresTrialLedger, store: EvidenceStore
+) -> CompoundingReport:
+    """The trial's compounding rerun beside its 1.0x constant-notional baseline."""
+
+    sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
+    return compounding_report(
+        trial_id=trial_id,
+        protocol=registered_protocol(ledger.replay(), trial_id),
+        constant=sealed_baseline(sealed, trial_id),
+        compounding=sealed_rerun(sealed, trial_id),
+    )
+
+
+@trial_app.command("compounding")
+def research_trial_compounding(
+    protocol: Annotated[
+        Path,
+        typer.Option(
+            "--protocol",
+            help="Frozen TrialProtocol JSON. The costs, window and strategy come from here.",
+        ),
+    ],
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+    attempt_id: Annotated[str, typer.Option("--attempt-id", help="The one attempt this run is.")],
+    started_at: Annotated[datetime, typer.Option("--started-at")],
+    occurred_at: Annotated[datetime, typer.Option("--occurred-at")],
+    registered_at: Annotated[datetime, typer.Option("--registered-at")],
+    agent_run_id: Annotated[str, typer.Option("--agent-run-id")],
+    exit_policy: Annotated[ExitPolicyName, typer.Option("--exit-policy")],
+    firm_equity: Annotated[str, typer.Option("--firm-equity")],
+    contract: Annotated[Path, typer.Option("--contract")],
+    atr_period: Annotated[int, typer.Option("--atr-period", min=1)],
+    spread_window: Annotated[int, typer.Option("--spread-window", min=1)],
+    defective_bar_tolerance: Annotated[str, typer.Option("--defective-bar-tolerance")] = "0",
+) -> None:
+    """Rerun the candidate once with equity-based sizing, seal it, and compare it.
+
+    Runs at the protocol's baseline costs as one attempt, then prints the sealed
+    constant-notional baseline beside it, with the capacity state.
+    """
+
+    # Like ``scenarios``: no option for any value the report compares against the
+    # protocol (no window, strategy or cost option). Kept out of the docstring
+    # because that is the help text.
+    def operation() -> dict[str, JsonValue]:
+        parsed = _load_json_model(protocol, TrialProtocol)
+        spec_sha256 = canonical_sha256(_declared_candidate(parsed, trial_id))
+        ledger = _trial_ledger()
+        store = _evidence_store()
+        sealed = _preflight(
+            parsed, trial_id, ledger, store, SizingMode.COMPOUNDING, lambda _: attempt_id
+        )
+        sealed_baseline(sealed, trial_id)  # nothing to compare against without it
+        run = _RunInputs(
+            parsed=parsed,
+            trial_id=trial_id,
+            spec_sha256=spec_sha256,
+            ledger=ledger,
+            store=store,
+            constitution=_constitution(),
+            instrument_contract=_instrument_contract(contract),
+            started_at=started_at,
+            occurred_at=occurred_at,
+            registered_at=registered_at,
+            agent_run_id=agent_run_id,
+            exit_policy=exit_policy,
+            firm_equity=firm_equity,
+            atr_period=atr_period,
+            spread_window=spread_window,
+            defective_bar_tolerance=defective_bar_tolerance,
+        )
+        digest = _run_and_seal(
+            run,
+            attempt_id=attempt_id,
+            cost_model=parsed.costs.baseline.model_copy(update={"stress_multiplier": Decimal(1)}),
+            sizing=SizingMode.COMPOUNDING,
+        )
+        return {
+            "trial_id": trial_id,
+            "attempt_id": attempt_id,
+            "evidence_sha256": digest,
+            "report": cast(
+                JsonValue,
+                json.loads(_compounding_report_for(trial_id, ledger, store).model_dump_json()),
+            ),
+            "capacity": cast(JsonValue, json.loads(capacity_diagnostic(parsed).model_dump_json())),
+        }
+
+    _run(operation)
+
+
+@trial_app.command("compounding-report")
+def research_trial_compounding_report(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Compare one candidate's sealed compounding rerun with its sealed baseline."""
+
+    def operation() -> dict[str, JsonValue]:
+        report = _compounding_report_for(trial_id, _trial_ledger(), _evidence_store())
+        return cast(dict[str, JsonValue], json.loads(report.model_dump_json()))
+
+    _run(operation)
+
+
+@trial_app.command("capacity")
+def research_trial_capacity(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """State what can be said about capacity for one registered candidate."""
+
+    def operation() -> dict[str, JsonValue]:
+        protocol = registered_protocol(_trial_ledger().replay(), trial_id)
+        # Nested: the diagnostic's own ``status`` would otherwise replace the
+        # envelope's ``status`` key.
+        diagnostic = json.loads(capacity_diagnostic(protocol).model_dump_json())
+        return {"capacity": cast(JsonValue, diagnostic)}
 
     _run(operation)
 

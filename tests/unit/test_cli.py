@@ -383,6 +383,68 @@ def test_scenario_evidence_error_maps_to_its_own_exit_code() -> None:
     assert int(cli.ExitCode.SCENARIO_EVIDENCE) == 19
 
 
+_COMPOUNDING_OPTIONS = [
+    "--protocol", "p.json", "--trial-id", "trial-1", "--attempt-id", "a",
+    "--started-at", "2026-03-01T11:00:00", "--occurred-at", "2026-03-01T11:00:00",
+    "--registered-at", "2026-03-01T11:00:00", "--agent-run-id", "r",
+    "--exit-policy", "none", "--firm-equity", "100000", "--contract", "c.json",
+    "--atr-period", "14", "--spread-window", "20",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--start",
+        "--end",
+        "--strategy",
+        "--commission-per-lot-per-side",
+        "--slippage-points-per-side",
+        "--swap-long-points-per-day",
+        "--swap-short-points-per-day",
+        "--triple-swap-weekday",
+        "--stress-multiplier",
+        "--attempt-prefix",
+    ],
+)
+def test_compounding_takes_no_option_the_protocol_owns(option: str) -> None:
+    """Absent, not optional: Typer must say ``No such option`` before anything runs."""
+
+    result = runner.invoke(
+        cli.app, ["research", "trial", "compounding", *_COMPOUNDING_OPTIONS, option, "1"]
+    )
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "No such option" in result.stderr
+
+
+def test_scenarios_does_not_take_the_compounding_attempt_option() -> None:
+    result = runner.invoke(
+        cli.app, ["research", "trial", "scenarios", *_COMPOUNDING_OPTIONS, "--attempt-id", "x"]
+    )
+
+    assert result.exit_code == cli.ExitCode.CONFIGURATION
+    assert "No such option" in result.stderr
+
+
+class _EmptyLedger:
+    def replay(self) -> tuple[()]:
+        return ()
+
+
+def test_capacity_for_an_unregistered_trial_maps_to_the_scenario_evidence_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal rides ``ScenarioEvidenceError``, so it is 19 with nothing on stdout."""
+
+    monkeypatch.setattr(cli, "_trial_ledger", lambda: _EmptyLedger())
+
+    result = runner.invoke(cli.app, ["research", "trial", "capacity", "--trial-id", "nobody"])
+
+    assert result.exit_code == int(cli.ExitCode.SCENARIO_EVIDENCE)
+    assert result.stdout == ""
+
+
 def test_insufficient_history_is_distinguishable_from_missing_coverage() -> None:
     """Different remedies: one wants a backfill, the other wants patience or
     a shorter period. A script branching on exit code has to tell them apart."""

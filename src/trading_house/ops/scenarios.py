@@ -19,7 +19,7 @@ it here would fix a threshold after seeing how the numbers came out.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import cast
 
@@ -33,7 +33,10 @@ from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
+    EvidenceSealedPayload,
     LedgerEvent,
+    LedgerEventType,
+    LedgerRecord,
     PreregisteredPayload,
     TrialProtocol,
     TrialSpec,
@@ -222,6 +225,66 @@ def registered_protocol(events: Sequence[LedgerEvent], trial_id: str) -> TrialPr
             f"the same protocol: {sorted(digests)}"
         )
     return found[0]
+
+
+def sealed_bundles(
+    records: Sequence[LedgerRecord], read: Callable[[str], EvidenceBundle]
+) -> list[tuple[str, EvidenceBundle]]:
+    """Every bundle a trial's chain rows seal, paired with the digest that names it.
+
+    ``records`` is ``events_for(trial_id)``; ``read`` is ``EvidenceStore.read``,
+    which re-verifies each document's bytes on the way in. The one scan shared by
+    the reports and the pre-flight below, so what a command refuses before writing
+    is read exactly as what a report later reads.
+    """
+
+    sealed: list[tuple[str, EvidenceBundle]] = []
+    for record in records:
+        if record.event_type is not LedgerEventType.EVIDENCE_SEALED:
+            continue
+        digest = EvidenceSealedPayload.model_validate(record.event_json["payload"]).evidence_sha256
+        sealed.append((digest, read(digest)))
+    return sealed
+
+
+def refuse_edited_protocol(registered: TrialProtocol, supplied: TrialProtocol) -> None:
+    """The ``--protocol`` file must be the registered protocol, byte for canonical byte.
+
+    Names both digests, because the operator's next move is to diff the two.
+    """
+
+    registered_digest, supplied_digest = canonical_sha256(registered), canonical_sha256(supplied)
+    if registered_digest != supplied_digest:
+        raise ScenarioEvidenceError() from ValueError(
+            f"the --protocol file is {supplied_digest}; the registered protocol is "
+            f"{registered_digest}"
+        )
+
+
+def refuse_other_attempts(
+    sealed: Sequence[tuple[str, EvidenceBundle]],
+    *,
+    sizing: SizingMode,
+    allowed: Callable[[Decimal], str | None],
+) -> None:
+    """No level this run would seal is already sealed under a different attempt id.
+
+    ``allowed`` maps a bundle's cost multiplier to the one attempt id this run
+    would use there, or ``None`` for a level it does not seal. The same attempt id
+    is an identical retry and stays a no-op; any other is a second document at a
+    level the report would then refuse for good, so it is refused before a write.
+    """
+
+    for _, bundle in sealed:
+        if bundle.sizing is not sizing:
+            continue
+        multiplier = bundle.result.cost_model.stress_multiplier
+        attempt_id = allowed(multiplier)
+        if attempt_id is not None and bundle.attempt_id != attempt_id:
+            raise ScenarioEvidenceError() from ValueError(
+                f"{multiplier}x is already sealed as {sizing.value} under attempt "
+                f"{bundle.attempt_id}; this run would seal it under {attempt_id}"
+            )
 
 
 def _candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:

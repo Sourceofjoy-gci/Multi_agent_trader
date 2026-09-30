@@ -14,6 +14,7 @@ because unlike the trade sequence those cannot legitimately differ.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import cast
 
@@ -97,6 +98,42 @@ def compounding_report(
         same_trade_sequence=_sequence(a) == _sequence(b),
         final_equity_difference=comp.final_equity - base.final_equity,
     )
+
+
+def _only(
+    sealed: Sequence[tuple[str, EvidenceBundle]],
+    trial_id: str,
+    sizing: SizingMode,
+    multiplier: Decimal | None,
+) -> tuple[str, EvidenceBundle]:
+    found = [
+        (d, b)
+        for d, b in sealed
+        if b.sizing is sizing
+        and (multiplier is None or b.result.cost_model.stress_multiplier == multiplier)
+    ]
+    if len(found) != 1:
+        level = "" if multiplier is None else f" at {multiplier}x"
+        raise ScenarioEvidenceError() from ValueError(
+            f"trial {trial_id} has {len(found)} {sizing.value} bundles{level}; one is required"
+        )
+    return found[0]
+
+
+def sealed_baseline(
+    sealed: Sequence[tuple[str, EvidenceBundle]], trial_id: str
+) -> tuple[str, EvidenceBundle]:
+    """The trial's one constant-notional bundle at 1.0x, or a refusal."""
+
+    return _only(sealed, trial_id, SizingMode.CONSTANT_NOTIONAL, Decimal(1))
+
+
+def sealed_rerun(
+    sealed: Sequence[tuple[str, EvidenceBundle]], trial_id: str
+) -> tuple[str, EvidenceBundle]:
+    """The trial's one compounding bundle, or a refusal."""
+
+    return _only(sealed, trial_id, SizingMode.COMPOUNDING, None)
 
 
 def _refuse_sizing(constant: EvidenceBundle, compounding: EvidenceBundle) -> None:

@@ -752,33 +752,21 @@ def test_the_grid_is_one_selection_lottery_whatever_it_costs_to_run(
 
 @pytest.mark.integration
 @pytest.mark.usefixtures("isolated_research_ledger")
-def test_a_protocol_file_edited_after_registration_is_refused_after_its_writes(
+def test_a_protocol_file_edited_after_registration_is_refused_before_any_write(
     seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
 ) -> None:
-    """The one place an operator is surprised, and the cost of the surprise.
+    """The edit 8B2b could only refuse late is refused before anything is written (8B3, C-10).
 
     ``research trial scenarios`` reads the grid and the money terms from the file
-    it is given; ``scenario-report`` re-derives its own from the sealed
-    registration. The two must agree, and a protocol file edited after the fact
-    cannot widen what will be accepted -- so an operator who registers a
-    protocol, edits their copy, and runs the orchestrator gets a grid sealed from
-    the edited file and then a refusal, rather than a report about a grid nobody
-    preregistered.
+    it is given, and ``scenario-report`` re-derives its own from the sealed
+    registration. Until 8B3 an operator who edited their copy got three sealed
+    documents and nine rows before the report refused. The command now compares
+    the file's canonical digest with the registered protocol's first, so the chain
+    holds only the registration and the evidence root is empty.
 
-    It is fail-closed and it is *late*, and both halves are asserted. The run
-    starts three attempts, seals three documents and appends three rows per level
-    before the report is asked for anything; only then does it refuse, and the
-    refusal names the disagreement -- the sealed 1.0x scenario's declared costs
-    against the registration's baseline. A refusal *before* the writes would need
-    the command to read the chain's registration first, which is the whole reason
-    the file is an option at all; the honest statement is that nine rows and
-    three documents are the price of an orchestrator that runs at all.
-
-    The last block is the point of the case. What the three sealed documents
-    declare is the *edited* file, so the writes really did happen and really
-    were the wrong ones -- and what the chain still holds, byte for byte, is the
-    protocol that was registered. An operator's copy is a file; a file is not the
-    record, and this is the one place the two are given the chance to disagree.
+    The last block is unchanged from the late-refusal version of this case: an
+    operator's copy is a file, and the chain still holds, byte for byte, the
+    protocol that was registered.
     """
 
     protocol_path = _register(tmp_path, seeded)
@@ -793,19 +781,8 @@ def test_a_protocol_file_edited_after_registration_is_refused_after_its_writes(
     result = runner.invoke(cli.app, _scenario_args(seeded, protocol_path))
 
     _assert_refused(result, cli.ExitCode.SCENARIO_EVIDENCE)
-    rows = _ledger(research_ledger_dsn).events()
-    assert len(rows) == 1 + 3 * len(MULTIPLIERS)
-    assert len(list(research_env.rglob("*.json"))) == len(MULTIPLIERS)
-    assert "the 1.0 scenario declares" in _refusal_cause(research_ledger_dsn, research_env)
-
-    # The writes happened, and they wrote the edited declaration.
-    sealed = [_store(research_env).read(path.stem) for path in sorted(research_env.rglob("*.json"))]
-    assert {bundle.result.cost_model.stress_multiplier for bundle in sealed} == {
-        Decimal(level) for level in MULTIPLIERS
-    }
-    assert {bundle.result.cost_model.commission_per_lot_per_side for bundle in sealed} == {
-        Decimal("4.50")
-    }
+    assert len(_ledger(research_ledger_dsn).events()) == 1
+    assert not list(research_env.rglob("*.json"))
     assert declared_grid(registered) == tuple(Decimal(level) for level in MULTIPLIERS)
     assert registered_protocol(_ledger(research_ledger_dsn).replay(), TRIAL_ID) == registered
     assert registered.costs.baseline.commission_per_lot_per_side == Decimal("3.50")
@@ -849,8 +826,18 @@ def test_the_four_pinned_digests_are_still_exactly_these_literals() -> None:
 # --- 9. the operator-facing text ----------------------------------------------
 
 
-@pytest.mark.parametrize("command", [["scenarios"], ["scenario-report"]])
-def test_neither_commands_help_text_claims_a_verdict(command: list[str]) -> None:
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["scenarios"],
+        ["scenario-report"],
+        # 8B3: the three commands it adds are held to the same total rule.
+        ["compounding"],
+        ["compounding-report"],
+        ["capacity"],
+    ],
+)
+def test_no_report_commands_help_text_claims_a_verdict(command: list[str]) -> None:
     """The gate the framework's premise actually needs.
 
     No slice fixes a threshold after seeing results. A test that greps the

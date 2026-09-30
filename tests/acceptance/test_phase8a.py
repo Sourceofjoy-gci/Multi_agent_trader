@@ -105,6 +105,9 @@ TRIAL_COMMANDS = (
     "count",
     "scenarios",
     "scenario-report",
+    "compounding",
+    "compounding-report",
+    "capacity",
     "verify",
 )
 

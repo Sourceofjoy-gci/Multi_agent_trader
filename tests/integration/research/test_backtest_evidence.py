@@ -347,18 +347,15 @@ def test_a_stressed_run_pays_more_spread_and_keeps_the_market_move(
     run whose market P&L drifted would be reporting a different market, and the
     attribution is the only place that would show it.
 
-    The two runs share a ``run_id``: ``Backtester._run_id`` omits the cost model,
-    and the fix is closed, because the legacy importer refuses any artifact whose
-    digest is not its own ``result.digest()`` and folding the scenario into the
-    identity would make every Phase 7 artifact fail its own import. So the
-    scenario identity rides the sealed attribution instead -- which is exactly
-    what the first two assertions below are reading.
+    The two runs have different ``run_id``s since 8B3 (C-4): a non-default
+    stress multiplier enters the identity, and a constant 1.0x run's id is
+    unchanged, so the legacy importer's ``digest == result.digest()`` rule holds.
     """
 
     baseline = _bundle_of(_run(seeded, marked=True))
     stressed = _bundle_of(_run(seeded, marked=True, **{"--stress-multiplier": "1.5"}))
 
-    assert stressed.result.run_id == baseline.result.run_id
+    assert stressed.result.run_id != baseline.result.run_id
     assert stressed.source_result_sha256 != baseline.source_result_sha256
     assert stressed.cost_attribution is not None
     assert baseline.cost_attribution is not None
