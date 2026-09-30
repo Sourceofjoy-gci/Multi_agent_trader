@@ -28,7 +28,7 @@ from decimal import Decimal
 from itertools import pairwise
 from typing import Self
 
-from pydantic import NonNegativeInt, field_validator, model_validator
+from pydantic import Field, NonNegativeInt, field_validator, model_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import EquityEvidenceError, TimestampError
@@ -38,6 +38,7 @@ from trading_house.research.backtest.costs_attribution import (
     attribution_disagreement,
 )
 from trading_house.research.backtest.result import BacktestResult
+from trading_house.research.backtest.sizing import SizingMode, is_constant_notional
 
 MAX_EQUITY_OBSERVATIONS = 2_000_000
 # ponytail: an O(1) guard on a count the loop already knows. It is here to fail
@@ -142,6 +143,11 @@ class BacktestOutcome(CanonicalModel):
     result: BacktestResult
     equity: EquitySeries
     attribution: CostAttribution
+    # Left out of the bytes when constant, so a constant outcome serializes as
+    # it did before this field existed.
+    sizing: SizingMode = Field(
+        default=SizingMode.CONSTANT_NOTIONAL, exclude_if=is_constant_notional
+    )
 
     @model_validator(mode="after")
     def series_is_the_result_it_came_from(self) -> Self:

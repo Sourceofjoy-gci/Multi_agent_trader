@@ -7,6 +7,7 @@ does, so a fake risk engine here would test the simulator against a sizing
 rule nothing in production uses.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -29,6 +30,7 @@ from trading_house.research.backtest.engine import (
 )
 from trading_house.research.backtest.mark import BacktestOutcome
 from trading_house.research.backtest.result import BacktestResult
+from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.backtest.snapshot import FeatureSnapshot
 from trading_house.research.backtest.strategy import ExitPolicy, NoExitPolicy
 from trading_house.risk.engine import RiskEngine
@@ -432,6 +434,8 @@ def _outcome(
     atr_period: int = ATR_PERIOD,
     spread_window: int = SPREAD_WINDOW,
     reader: FakeBarReader | None = None,
+    sizing: SizingMode = SizingMode.CONSTANT_NOTIONAL,
+    risk_factory: Callable[[ReplayClock], RiskEngine] | None = None,
 ) -> BacktestOutcome:
     source = reader if reader is not None else FakeBarReader(bars)
     # One clock, shared: the risk engine's tick-freshness gate compares its own
@@ -442,7 +446,9 @@ def _outcome(
     selected_contract = contract if contract is not None else _contract()
     tester = Backtester(
         bars=source,
-        risk=RiskEngine(_constitution(), clock),
+        risk=(
+            risk_factory(clock) if risk_factory is not None else RiskEngine(_constitution(), clock)
+        ),
         margin=AlwaysAffordableMargin(),
         contract=selected_contract,
         clock=clock,
@@ -468,6 +474,7 @@ def _outcome(
             cost_model=cost_model if cost_model is not None else _cost_model(),
             atr_period=atr_period,
             spread_window=spread_window,
+            sizing=sizing,
             **tolerance_kwargs,
         )
     )
@@ -486,6 +493,7 @@ def _run(
     atr_period: int = ATR_PERIOD,
     spread_window: int = SPREAD_WINDOW,
     reader: FakeBarReader | None = None,
+    cost_model: CostModel | None = None,
 ) -> BacktestResult:
     """The result, for the many tests that only care about trades and their totals.
 
@@ -509,4 +517,5 @@ def _run(
         atr_period=atr_period,
         spread_window=spread_window,
         reader=reader,
+        cost_model=cost_model,
     ).result

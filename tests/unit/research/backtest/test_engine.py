@@ -15,6 +15,7 @@ from tests.unit.research.backtest.conftest import (
     PeekingStrategy,
     ToyStrategy,
     _bar,
+    _constitution,
     _contract,
     _cost_model,
     _loaded_constitution,
@@ -25,20 +26,23 @@ from tests.unit.research.backtest.conftest import (
 )
 from trading_house.core.errors import EquityEvidenceError, TimestampError
 from trading_house.core.schemas import Side
-from trading_house.marketdata.models import BarQuality, Timeframe, duration
+from trading_house.marketdata.models import Bar, BarQuality, Timeframe, duration
 from trading_house.research.backtest import engine
 from trading_house.research.backtest.costs import slippage_price_offset
 from trading_house.research.backtest.engine import (
     BacktestRefused,
+    ReplayClock,
     trail_candidate,
 )
 from trading_house.research.backtest.fills import ExitKind
-from trading_house.research.backtest.result import RefusalKind
+from trading_house.research.backtest.result import BacktestResult, RefusalKind
+from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.backtest.strategy import (
     ChandelierPolicy,
     FixedTargetPolicy,
     NoExitPolicy,
 )
+from trading_house.risk.engine import RiskEngine
 
 
 def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
@@ -1120,3 +1124,160 @@ def test_a_candidate_closer_than_the_brokers_minimum_distance_is_clamped() -> No
 
     assert candidate is not None
     assert bar.close - candidate >= max(contract.min_stop_distance, contract.freeze_distance)
+
+
+# --- Phase 8B3: scenario identity in the run id, and the compounding arm -----
+
+_PRE_CHANGE_RUN_ID = "81300ddd2be308e006ab418e38565fb81b0b78313edc6ed408baa635d759cd0e"
+_PRE_CHANGE_DIGEST = "91a237e8fd17fb3761a8c87cb45021f87a2eea65066466ffc59d8bdb97e8bcac"
+_PRE_CHANGE_OUTCOME_SHA256 = "0393c5ab2b317348b3b03dbee8177e04378f1e0845cf77f7e5104586f5703676"
+
+_EQUITY = Decimal("1000000")
+"""Large enough that the lot grid (0.01) is finer than one trade's effect on
+equity: 33.75 lots unrounded, and a 40-point winner moves equity by ~0.11%."""
+
+
+def _long_hold(*, side: Side = Side.BUY) -> ToyStrategy:
+    """Re-enters the bar after every exit, holding 30 bars. On the rising ramp a
+    long wins (~40 points against a 10-point spread) and a short loses."""
+
+    return ToyStrategy(every_n=1, max_holding_seconds=1800, side=side)
+
+
+def test_a_constant_notional_run_keeps_its_pre_change_identity() -> None:
+    outcome = _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
+
+    assert outcome.result.run_id == _PRE_CHANGE_RUN_ID
+    assert outcome.result.digest() == _PRE_CHANGE_DIGEST
+    # ``sizing`` is excluded from a constant outcome's bytes, so nothing that
+    # serialised this type before has moved.
+    assert "sizing" not in outcome.model_dump(mode="json")
+    assert hashlib.sha256(outcome.model_dump_json().encode()).hexdigest() == (
+        _PRE_CHANGE_OUTCOME_SHA256
+    )
+
+
+def test_a_stressed_run_has_its_own_id_and_spellings_of_a_multiplier_share_one() -> None:
+    bars = _ramp(60)
+    one = _run_with_cost(bars, Decimal(1))
+    stressed = _run_with_cost(bars, Decimal("1.5"))
+
+    assert one.run_id == _PRE_CHANGE_RUN_ID
+    assert stressed.run_id != one.run_id
+    assert stressed.digest() != one.digest()
+    assert (
+        _run_with_cost(bars, Decimal("1.50")).run_id == _run_with_cost(bars, Decimal("1.5")).run_id
+    )
+    assert _run_with_cost(bars, Decimal("1.0")).run_id == one.run_id
+
+
+def _run_with_cost(bars: tuple[Bar, ...], multiplier: Decimal) -> BacktestResult:
+    return _run(
+        bars=bars,
+        strategy=ToyStrategy(every_n=20),
+        cost_model=_cost_model(stress_multiplier=multiplier),
+    )
+
+
+def test_the_first_position_is_identical_in_both_sizing_modes() -> None:
+    bars = _ramp(90)
+    constant = _outcome(bars=bars, strategy=_long_hold(), firm_equity=_EQUITY)
+    compounding = _outcome(
+        bars=bars, strategy=_long_hold(), firm_equity=_EQUITY, sizing=SizingMode.COMPOUNDING
+    )
+
+    assert len(constant.result.trades) >= 2
+    assert constant.result.trades[0] == compounding.result.trades[0]
+    assert constant.result.trades[0].net_pnl > 0
+
+
+def test_a_compounding_run_has_a_different_id_from_the_constant_run_of_one_request() -> None:
+    bars = _ramp(90)
+    constant = _outcome(bars=bars, strategy=_long_hold(), firm_equity=_EQUITY)
+    compounding = _outcome(
+        bars=bars, strategy=_long_hold(), firm_equity=_EQUITY, sizing=SizingMode.COMPOUNDING
+    )
+
+    assert compounding.sizing is SizingMode.COMPOUNDING
+    assert constant.sizing is SizingMode.CONSTANT_NOTIONAL
+    assert compounding.result.run_id != constant.result.run_id
+    assert compounding.result.digest() != constant.result.digest()
+    assert compounding.model_dump(mode="json")["sizing"] == "compounding"
+
+
+def test_a_win_grows_the_next_lot_and_a_loss_shrinks_it_at_the_equity_the_decision_saw() -> None:
+    bars = _ramp(90)
+    won = _outcome(
+        bars=bars, strategy=_long_hold(), firm_equity=_EQUITY, sizing=SizingMode.COMPOUNDING
+    ).result
+    lost = _outcome(
+        bars=bars,
+        strategy=_long_hold(side=Side.SELL),
+        firm_equity=_EQUITY,
+        sizing=SizingMode.COMPOUNDING,
+    ).result
+
+    assert won.trades[0].net_pnl > 0 > lost.trades[0].net_pnl
+    assert won.trades[1].lots > won.trades[0].lots
+    assert lost.trades[1].lots < lost.trades[0].lots
+    # The same sizing path, not a second opinion: a constant-notional run whose
+    # capital IS the equity after the first trade sizes its first trade the way
+    # compounding sized the second.
+    for result in (won, lost):
+        at_decision = _outcome(
+            bars=bars,
+            strategy=_long_hold(side=result.trades[0].side),
+            firm_equity=_EQUITY + result.trades[0].net_pnl,
+        ).result
+        assert at_decision.trades[0].lots == result.trades[1].lots
+
+
+def test_constant_notional_never_changes_its_lots() -> None:
+    result = _run(bars=_ramp(90), strategy=_long_hold(), firm_equity=_EQUITY)
+
+    assert len({trade.lots for trade in result.trades}) == 1
+
+
+def test_a_non_positive_sizing_equity_rejects_without_reaching_the_risk_engine() -> None:
+    calls: list[Decimal] = []
+
+    class SpyRisk(RiskEngine):
+        def evaluate_for_execution(self, proposal, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs["firm_equity"])
+            return super().evaluate_for_execution(proposal, **kwargs)
+
+    def spy(clock: ReplayClock) -> RiskEngine:
+        return SpyRisk(_constitution(), clock)
+
+    # A commission large enough that one round trip costs more than the account.
+    ruinous = _cost_model(commission_per_lot_per_side=Decimal("100000"))
+    bars = _ramp(90)
+
+    compounding = _outcome(
+        bars=bars,
+        strategy=_long_hold(),
+        firm_equity=_EQUITY,
+        cost_model=ruinous,
+        sizing=SizingMode.COMPOUNDING,
+        risk_factory=spy,
+    )
+    calls_compounding = list(calls)
+    calls.clear()
+    constant = _outcome(
+        bars=bars,
+        strategy=_long_hold(),
+        firm_equity=_EQUITY,
+        cost_model=ruinous,
+        risk_factory=spy,
+    )
+
+    assert len(compounding.result.trades) == 1
+    assert compounding.result.trades[0].net_pnl < -_EQUITY
+    assert ("equity_exhausted",) in compounding.result.rejections
+    assert calls_compounding == [_EQUITY]  # the one decision taken while solvent
+    assert all(equity > 0 for equity in calls_compounding)
+    # The same run at constant notional is never exhausted, and keeps asking.
+    assert ("equity_exhausted",) not in constant.result.rejections
+    assert len(constant.result.trades) >= 2
+    assert len(calls) > 1
+    assert set(calls) == {_EQUITY}

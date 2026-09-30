@@ -72,6 +72,7 @@ from trading_house.research.backtest.mark import (
     EquitySeries,
 )
 from trading_house.research.backtest.result import BacktestResult, RefusalKind, SimulatedTrade
+from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.backtest.snapshot import FeatureSnapshot, horizon_is_simulatable
 from trading_house.research.backtest.strategy import (
     ChandelierPolicy,
@@ -132,9 +133,10 @@ class ReplayClock:
 class BacktestRequest:
     """One run. ``start`` and ``end`` are an inclusive range of bar open times.
 
-    ``firm_equity`` is constant for the whole run (D-4): this simulator does
-    not compound, so a strategy's measured edge cannot be an artefact of
-    position sizes growing with its own luck.
+    ``firm_equity`` is the initial capital. Under the default
+    ``CONSTANT_NOTIONAL`` sizing (D-4) every decision is sized from it, so a
+    strategy's measured edge cannot be an artefact of position sizes growing
+    with its own luck; ``COMPOUNDING`` (Phase 8B3) sizes from it plus realized PnL.
 
     A dataclass rather than a ``CanonicalModel`` because ``strategy`` is a bare
     ``Protocol``: pydantic cannot build a schema for one, and widening the base
@@ -155,6 +157,7 @@ class BacktestRequest:
     atr_period: int
     spread_window: int
     defective_bar_tolerance: Decimal = Decimal(0)
+    sizing: SizingMode = SizingMode.CONSTANT_NOTIONAL
 
     def __post_init__(self) -> None:
         # The boundary carrying the money. A float here would survive every
@@ -460,11 +463,23 @@ class Backtester:
             if position is not None or queued is not None:
                 continue
 
+            # Decisions are taken only when flat, so unrealized is zero here and
+            # the compounding equity is initial capital plus realized (C-2).
+            sizing_equity = (
+                request.firm_equity + realized
+                if request.sizing is SizingMode.COMPOUNDING
+                else request.firm_equity
+            )
+            if sizing_equity <= 0:
+                # A ruined account is a result, not a crash (C-3): the risk
+                # engine raises on a non-positive equity, so it is not asked.
+                rejections.append(("equity_exhausted",))
+                continue
             decision = self._risk.evaluate_for_execution(
                 proposal,
                 margin=self._margin,
                 contract=self._contract,
-                firm_equity=request.firm_equity,
+                firm_equity=sizing_equity,
                 atr=snapshot.atr,
                 median_spread_points=snapshot.median_spread_points,
                 tick_spread_points=snapshot.tick_spread_points,
@@ -512,6 +527,7 @@ class Backtester:
             result=result,
             equity=EquitySeries(firm_equity=request.firm_equity, observations=tuple(observations)),
             attribution=CostAttribution(trades=tuple(attributions)),
+            sizing=request.sizing,
         )
 
     def _refuse_outside_coverage(self, request: BacktestRequest, coverage: Coverage) -> None:
@@ -874,5 +890,12 @@ class Backtester:
             "spread_window": request.spread_window,
             "defective_bar_tolerance": str(tolerance_fraction),
         }
+        # Scenario identity enters the id only when non-default (C-4), so every
+        # constant 1.0x run keeps the id it had before these keys existed.
+        multiplier = request.cost_model.stress_multiplier
+        if multiplier != 1:
+            identity["stress_multiplier"] = format(multiplier.normalize(), "f")
+        if request.sizing is SizingMode.COMPOUNDING:
+            identity["sizing"] = SizingMode.COMPOUNDING.value
         canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
         return hashlib.sha256(canonical.encode()).hexdigest()
