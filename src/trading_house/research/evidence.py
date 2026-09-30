@@ -66,6 +66,7 @@ from trading_house.research.backtest.costs_attribution import (
 from trading_house.research.backtest.mark import DailyReturnPoint as DailyReturnPoint
 from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.backtest.result import BacktestResult
+from trading_house.research.backtest.sizing import SizingMode, is_constant_notional
 from trading_house.research.canonical import DOMAIN_SEPARATOR, canonical_bytes, canonical_sha256
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
@@ -248,6 +249,25 @@ class EvidenceBundle(CanonicalModel):
     # coupling validator below is what makes that unambiguous rather than a
     # hole.
     cost_attribution: CostAttribution | None = Field(default=None, exclude_if=_is_absent)
+    # How the run sized its positions (Phase 8B3, spec 4.2). ``exclude_if`` is
+    # load-bearing for the reason stated on ``mark_to_market``: a constant-
+    # notional bundle omits the key, so every bundle sealed before this field
+    # existed keeps its bytes and the pinned v1 digest does not move. Absent
+    # therefore means constant notional.
+    sizing: SizingMode = Field(
+        default=SizingMode.CONSTANT_NOTIONAL, exclude_if=is_constant_notional
+    )
+
+    @model_validator(mode="after")
+    def a_compounding_bundle_is_mark_to_market(self) -> Self:
+        """Compounding is defined over the per-bar equity path, so it needs the series."""
+
+        if (
+            self.sizing is SizingMode.COMPOUNDING
+            and self.return_series_basis is not ReturnSeriesBasis.MARK_TO_MARKET
+        ):
+            raise ValueError("a compounding bundle must be on the mark-to-market basis")
+        return self
 
     @model_validator(mode="after")
     def source_digest_is_the_result_it_carries(self) -> Self:

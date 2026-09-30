@@ -206,6 +206,7 @@ def mark_to_market_bundle(
         # is a sum of this split, so the store that keeps only the sum keeps only
         # arithmetic.
         cost_attribution=attribution,
+        sizing=outcome.sizing,
         costs=CostSummary(
             status=CostAttributionStatus.COMPLETE,
             commission=sum((trade.commission for trade in result.trades), Decimal(0)),

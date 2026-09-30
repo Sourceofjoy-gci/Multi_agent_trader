@@ -30,6 +30,7 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -58,8 +59,9 @@ from trading_house.ops.scenarios import (
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRequest
 from trading_house.research.backtest.result import BacktestResult
-from trading_house.research.canonical import canonical_sha256
-from trading_house.research.evidence import EvidenceBundle
+from trading_house.research.backtest.sizing import SizingMode
+from trading_house.research.canonical import canonical_bytes, canonical_sha256
+from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     CostSpec,
@@ -298,7 +300,12 @@ def _preregistered_event(protocol: TrialProtocol) -> LedgerEvent:
 
 
 def _bundle_at(
-    protocol: TrialProtocol, bars: tuple[Any, ...], multiplier: Decimal, *, trial_id: str
+    protocol: TrialProtocol,
+    bars: tuple[Any, ...],
+    multiplier: Decimal,
+    *,
+    trial_id: str,
+    sizing: SizingMode = SizingMode.CONSTANT_NOTIONAL,
 ) -> EvidenceBundle:
     """One scenario, from a real run at one multiplier, sealed the way the chain seals it.
 
@@ -326,6 +333,7 @@ def _bundle_at(
             cost_model=CostModel(**{**baseline.model_dump(), "stress_multiplier": multiplier}),
             atr_period=ATR_PERIOD,
             spread_window=SPREAD_WINDOW,
+            sizing=sizing,
         )
     )
     return mark_to_market_bundle(
@@ -873,6 +881,7 @@ def test_a_protocol_whose_baseline_is_itself_stressed_is_still_reportable() -> N
 
     assert report.declared_multipliers == (Decimal("1"), Decimal("1.5"), Decimal("2"))
     assert [s.multiplier for s in report.scenarios] == [Decimal("1"), Decimal("1.5"), Decimal("2")]
+    assert report.declared_baseline_multiplier == Decimal("1.5")
 
 
 def test_a_baseline_scenario_whose_money_terms_drift_is_still_refused() -> None:
@@ -936,6 +945,7 @@ def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
     )
 
     assert report.declared_multipliers == (Decimal("1"), Decimal("1.5"), Decimal("2"))
+    assert report.declared_baseline_multiplier == Decimal("1")
     assert [s.multiplier for s in report.scenarios] == [Decimal("1"), Decimal("1.5"), Decimal("2")]
     assert not hasattr(report, "total_cost")
     # Recursively, not over the top-level keys: a ``total_cost`` added to
@@ -951,6 +961,7 @@ def test_the_report_names_the_grid_it_expected_before_what_it_found() -> None:
         "trial_id",
         "spec_sha256",
         "declared_multipliers",
+        "declared_baseline_multiplier",
         "scenarios",
         "degradations",
     }
@@ -1024,3 +1035,82 @@ def test_the_reported_terms_reconstruct_the_result_they_came_from() -> None:
         )
         assert rebuilt == scenario.net_pnl
         assert scenario.net_pnl == sealed[scenario.multiplier].result.net_pnl
+
+
+# --- 8B3: the bundle's sizing mode, and a report that ignores compounding --------
+
+
+def _compounding(protocol: TrialProtocol) -> tuple[str, EvidenceBundle]:
+    bundle = _bundle_at(
+        protocol,
+        BARS,
+        Decimal("1"),
+        trial_id=_trial_id(protocol),
+        sizing=SizingMode.COMPOUNDING,
+    )
+    return canonical_sha256(bundle), bundle
+
+
+def test_a_constant_bundle_has_no_sizing_key_and_a_compounding_bundle_has_one() -> None:
+    protocol = _protocol()
+    (_, constant), *_ = _sealed(protocol)
+    _, compounding = _compounding(protocol)
+
+    assert b'"sizing"' not in canonical_bytes(constant)
+    assert b'"sizing":"compounding"' in canonical_bytes(compounding)
+
+
+def test_a_compounding_bundle_round_trips_through_the_store(tmp_path: Path) -> None:
+    protocol = _protocol()
+    (_, constant), *_ = _sealed(protocol)
+    _, compounding = _compounding(protocol)
+    store = EvidenceStore(tmp_path)
+
+    # ``read`` refuses non-canonical bytes, so this is the exclusion working both ways.
+    assert store.read(store.write(compounding).sha256) == compounding
+    assert store.read(store.write(constant).sha256).sizing is SizingMode.CONSTANT_NOTIONAL
+
+
+def test_a_compounding_bundle_off_the_mark_to_market_basis_is_refused() -> None:
+    protocol = _protocol()
+    _, compounding = _compounding(protocol)
+    payload = json.loads(compounding.model_dump_json())
+    payload["return_series_basis"] = "realized_closed_trades"
+    del payload["mark_to_market"]
+
+    with pytest.raises(ValueError, match="mark-to-market basis"):
+        EvidenceBundle.model_validate_json(json.dumps(payload))
+
+
+def test_mark_to_market_bundle_carries_the_outcomes_sizing() -> None:
+    protocol = _protocol()
+    _, compounding = _compounding(protocol)
+    (_, constant), *_ = _sealed(protocol)
+
+    assert compounding.sizing is SizingMode.COMPOUNDING
+    assert constant.sizing is SizingMode.CONSTANT_NOTIONAL
+
+
+def test_a_compounding_bundle_in_the_sealed_set_is_ignored_not_refused() -> None:
+    """The false-refusal trap: it sits at the 1.0x level beside the constant 1.0x,
+    which unfiltered reads as a level sealed twice."""
+
+    protocol = _protocol()
+    sealed = _sealed(protocol)
+    plain = scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+    mixed = scenario_report(
+        trial_id=_trial_id(protocol), protocol=protocol, sealed=(*sealed, _compounding(protocol))
+    )
+    alone = (_compounding(protocol), *sealed)
+
+    assert mixed == plain
+    assert scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=alone) == plain
+
+
+def test_a_trial_with_only_a_compounding_bundle_is_still_an_incomplete_grid() -> None:
+    protocol = _protocol()
+    with pytest.raises(ScenarioEvidenceError) as refused:
+        scenario_report(
+            trial_id=_trial_id(protocol), protocol=protocol, sealed=(_compounding(protocol),)
+        )
+    assert "missing" in str(refused.value.__cause__)

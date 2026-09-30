@@ -28,6 +28,7 @@ from pydantic import NonNegativeInt
 from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
 from trading_house.research.backtest.costs_attribution import CostAttribution
+from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
 from trading_house.research.trial_ledger import (
@@ -100,6 +101,11 @@ class ScenarioReport(CanonicalModel):
     trial_id: NonEmptyStr
     spec_sha256: NonEmptyStr
     declared_multipliers: tuple[Decimal, ...]
+    declared_baseline_multiplier: Decimal
+    """The protocol's own ``costs.baseline.stress_multiplier``, named rather than
+    normalised away. The grid above is always relative to level 1, so a protocol
+    declaring a stressed baseline is reported against unstressed costs; this field
+    is where a reader is told the declaration said otherwise."""
     scenarios: tuple[ScenarioTotals, ...]
     degradations: tuple[ScenarioDegradation, ...]
 
@@ -246,6 +252,11 @@ def scenario_report(
     leave the report unable to say which sealed file any of its numbers came
     from.
 
+    Bundles sealed under compounding sizing are ignored, not refused: the grid is
+    the constant-notional set, and a compounding rerun of the same trial is a
+    different experiment. A protocol declaring a stressed baseline is reportable;
+    the declaration is carried as ``declared_baseline_multiplier``.
+
     Six checks, in this order, so an incomplete candidate is refused for the
     first reason that applies rather than for a later one it also happens to
     break:
@@ -284,6 +295,11 @@ def scenario_report(
     or the other.
     """
 
+    # Only constant-notional bundles are the grid (8B3, C-5). A compounding rerun
+    # of the same trial is sealed at the same multiplier and would otherwise read
+    # as a level sealed twice; it is ignored here, and ``compounding_report`` is
+    # the read that consumes it.
+    sealed = [(d, b) for d, b in sealed if b.sizing is SizingMode.CONSTANT_NOTIONAL]
     _refuse_reportable(trial_id, sealed)
 
     grid = declared_grid(protocol)
@@ -329,6 +345,7 @@ def scenario_report(
         # source for a field the check has just proven.
         spec_sha256=bundles[0].spec_sha256,
         declared_multipliers=grid,
+        declared_baseline_multiplier=protocol.costs.baseline.stress_multiplier,
         scenarios=scenarios,
         degradations=degradations,
     )
