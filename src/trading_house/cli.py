@@ -1985,12 +1985,12 @@ def research_trial_scenarios(
     be surgery on the evidence root and the chain, which the premise forbids. Not
     having the option is the only version of this that has no such state to reach.
 
-    What this cannot prevent is a ``--protocol`` **file** edited after
-    registration, which is the same refusal reached by a different route: the
-    command reads the file, and ``scenario-report`` re-derives its own grid from
-    the sealed registration and refuses. A registration cannot be amended, so a
-    grid that was never declared has to be preregistered as a new one and run
-    against its own candidate.
+    A ``--protocol`` **file** edited after registration is refused before
+    anything is written: the command compares the file's canonical digest with
+    the registered protocol's first, and does the same for a level already sealed
+    under another attempt id. A registration cannot be amended, so a grid that
+    was never declared has to be preregistered as a new one and run against its
+    own candidate.
 
     Every level shares one specification digest, computed from the protocol's own
     candidate rather than typed three times. Three hand-typed digests is exactly

@@ -869,9 +869,9 @@ def test_a_protocol_whose_baseline_is_itself_stressed_is_still_reportable() -> N
     cannot be amended after the fact.
 
     The report normalises both sides to level 1 and reads the money terms, so
-    the odd multiplier is neither refused nor mentioned. That is the trade
-    ``declared_grid``'s docstring argues, and this test is where it is visible:
-    what is checked is that the report still comes out, not that anyone is told.
+    the odd multiplier is not refused, and since 8B3 it is named:
+    ``declared_baseline_multiplier`` carries it, so a reader is told rather than
+    left to discover it from the money terms.
     """
 
     protocol = _protocol(baseline_multiplier="1.5")

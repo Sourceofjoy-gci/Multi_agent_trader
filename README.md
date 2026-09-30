@@ -1313,16 +1313,12 @@ that reports `complete` says every modelled term was *attributed*; it does not
 say the term was well measured, and nothing in 8B2a changes the numbers a fill
 model can know.
 
-**Known limit: a run at 1.5x and the same run at 1.0x share a `run_id`.**
-`Backtester._run_id` derives the identity from the request and omits the cost
-model, and that is closed on purpose: the legacy importer refuses any artifact
-whose `digest` is not its own `result.digest()`, so folding the scenario into the
-run identity would make every Phase 7 artifact fail its own import. The two runs
-still have different `source_result_sha256` — a different `CostModel` is a
-different result — and the scenario identity rides the **sealed attribution**
-instead, where a reader can see the stress that produced it. A phase that needs
-scenario identity to be part of the run's own identity has to widen that
-deliberately, and to re-import the legacy arms with it.
+**Closed in 8B3: a run at 1.5x and the same run at 1.0x used to share a
+`run_id`.** They no longer do; see *Phase 8B3* below. Scenario identity enters the
+id only when it is not the default, which is what lets the legacy importer's
+`digest == result.digest()` check keep holding for every Phase 7 artifact. What
+still shares an id is two 1.0x runs that differ only in a non-multiplier cost
+term; the report's baseline-fidelity check catches that one.
 
 ## Phase 8B2b — the declared cost grid
 
@@ -1405,20 +1401,17 @@ And a report that validated a hand-supplied protocol would be checking the
 operator's *copy* rather than the record, which is the one thing preregistration
 exists to prevent.
 
-**A `--protocol` file edited after registration is refused — after its writes.**
-This is the one place an operator is surprised, so it is stated rather than left
-to be discovered. `scenarios` reads the multipliers and the money terms from the
-file it is given and seals from those; `scenario-report` then re-derives its own
-grid from the sealed registration and refuses at **exit 19** when they disagree.
-The runs have already happened: per level, an `EXECUTION_STARTED` row, a sealed
-document, and the `RESULT_RECORDED` and `EVIDENCE_SEALED` rows that reference it
-— so three documents and nine events before the refusal, on a chain that already
-held the registration. It is late, and there is no edit that fixes it, because a
-registration cannot be amended: the sealed documents stay where they are, evidence
-of a run against a declaration the chain does not hold, and a grid that was never
-declared has to be preregistered as a new one and run against its own candidate.
-The multipliers themselves cannot disagree even in the file: `CostSpec` pins the
-stressed levels to exactly `{1.5, 2}`, so what can disagree is the baseline they
+**A `--protocol` file edited after registration is refused before any write.**
+`scenarios` reads the multipliers and the money terms from the file it is given,
+and `scenario-report` re-derives its own grid from the sealed registration. Until
+8B3 an operator whose copy disagreed got three sealed documents and nine events
+before the report refused at **exit 19**. The command now compares the file's
+canonical digest with the registered protocol's first, so the same refusal
+arrives with the chain holding only the registration and the evidence root
+empty. A registration still cannot be amended: a grid that was never declared has
+to be preregistered as a new one and run against its own candidate. The
+multipliers themselves cannot disagree even in the file, because `CostSpec` pins
+the stressed levels to exactly `{1.5, 2}`; what can disagree is the baseline they
 are multiples of.
 
 ### The six checks, and what each one names
@@ -1519,14 +1512,11 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
   and a 19 that also covered a deleted file would send an operator to run a
   scenario they should be restoring. `research trial verify` answers 17 for the
   same missing document and for the same reason.
-- **The shared-`run_id` limit still holds**, and 8B2b does not widen it: a 1.0x
-  and a 1.5x run of the same window share a `run_id`, for the reason 8B2a gives
-  (folding the cost model into the run identity would make every Phase 7 artifact
-  fail its own import). The two runs still have different
-  `source_result_sha256`, and the report prints both it and the document address
-  on every row so a reader can get from a number back to the bytes that produced
-  it. The scenario identity rides the sealed attribution, where the stress is
-  visible.
+- **The shared-`run_id` limit is closed.** It was a limit of 8B2b as shipped: a
+  1.0x and a 1.5x run of the same window shared a `run_id`. 8B3 folds a
+  non-default multiplier into the id (see *Phase 8B3*); every 1.0x id is
+  unchanged. The report still prints `source_result_sha256` and the document
+  address on every row.
 - **`spec_sha256` is still unvouched *in the ledger*.** The ledger preserves the
   digest and cannot *vouch* for it — see *What Phase 8A does not implement* above.
   The report is a different matter: it holds the sealed protocol, and
@@ -1552,13 +1542,112 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
   hat.
 - **Orchestrating three runs does not establish that the trade sequence is
   cost-invariant on any future engine.** The identity check pins the sequence
-  across the three levels *on today's engine*, and that is a real check — a
-  stressed scenario that traded something the baseline did not is a different
-  experiment. It is not a property of the strategy, because 8B3's compounding
-  path makes sizing cost-sensitive: with equity re-based each run, the same
-  declared costs can move the size of a position and therefore the number of
-  trades. Re-establishing it there is 8B3's own check, not an inheritance from
-  here.
+  across the three levels *on today's engine*, and that is a real check. It is
+  not a property of the strategy, because the compounding path of 8B3 makes
+  sizing equity-sensitive. 8B3 therefore does not check the sequence across the
+  two sizing modes: it **reports** `same_trade_sequence`.
+
+## Phase 8B3 - the compounding rerun and the capacity state
+
+8B3 adds a second, separate experiment beside the cost grid: the same candidate on
+the same replay at its declared baseline costs, sized from **current** equity
+instead of initial capital. It also types the capacity diagnostic and closes three
+recorded 8B2 defects. It adds **no verdict, no threshold, no statistic, no
+migration, no new event type and no dependency**, and no constant-notional run id,
+result digest or bundle digest moves.
+
+### The sizing semantic
+
+Under `compounding`, the real risk engine is asked to size from
+`firm_equity + realized` at the decision bar. Decisions are taken only when flat,
+so unrealized profit is zero there and the flat decision-bar equity is all there
+is to know. Every constitutional cap applies unchanged. If that equity is not
+positive the proposal is rejected with reason `equity_exhausted` and is recorded
+with the other rejections; the risk engine is never called on it.
+
+The rerun is constant-notional evidence's sibling, not its replacement. It is
+sealed as an ordinary bundle whose bytes carry `sizing: compounding` (constant
+bundles carry no `sizing` key at all, which is why their digests are unchanged)
+and which must carry a mark-to-market series.
+
+### Commands
+
+```bash
+# Run the rerun at the baseline cost level, seal it as one attempt, and report.
+# Same options as `scenarios`, with --attempt-id in place of --attempt-prefix.
+uv run trading-house research trial compounding \
+  --protocol protocol.json --trial-id trial-1 --attempt-id comp-1 \
+  --started-at 2026-03-01T11:00:00 --occurred-at 2026-03-01T12:00:00 \
+  --registered-at 2026-03-01T13:00:00 --agent-run-id run-2026-03-01 \
+  --exit-policy none --firm-equity 100000 --contract contract.json \
+  --atr-period 2 --spread-window 10 --defective-bar-tolerance 0
+
+# Re-read the comparison, and the capacity state, from the chain alone.
+uv run trading-house research trial compounding-report --trial-id trial-1
+uv run trading-house research trial capacity --trial-id trial-1
+```
+
+### Identity: the run-id rule
+
+Scenario identity enters `run_id` **only when it is not the default**: a
+`stress_multiplier` other than 1 adds a normalised multiplier (so `1.5` and `1.50`
+agree) and compounding adds `sizing`. A 1.0x constant-notional id is therefore
+byte-identical to what it was, and the legacy importer's
+`digest == result.digest()` rule still holds for every Phase 7 artifact. This
+closes the defect 8B2a recorded, where a 1.5x run and a 1.0x run shared an id.
+
+**The grid ignores the rerun.** `scenario-report` reads constant-notional bundles
+only, so a compounding bundle in the same trial neither changes the report nor
+makes the candidate unreportable.
+
+### The compounding report
+
+`compounding-report` (and the report `compounding` prints) sets the two runs side
+by side: per run its attempt, both digests, trade count, net P&L and final equity,
+then `final_equity_difference` (compounding minus constant, a delta and never a
+ratio). It **refuses** at exit 19, with the specifics on the private cause, unless
+the pair is one candidate on one replay: same trial, specification, strategy,
+window equal to the protocol's, cost model equal to the baseline at level 1, same
+starting equity, same bars read, and an equity series on both.
+
+**`same_trade_sequence` is reported, not checked.** With re-based equity the same
+costs can change a size and therefore a trade, and refusing on it would forbid the
+very difference the rerun exists to show.
+
+### Capacity: `UNAVAILABLE`, and why there is no proxy
+
+`capacity` states `unavailable` for any registered candidate and gives its reason:
+a protocol can declare no volume-to-lots model, and tick volume alone is never
+presented as capital capacity. No proxy figure is produced, because a number nobody
+can use honestly is noise in a later gate's input. An unregistered trial is refused
+as `scenario-report` refuses it.
+
+### The three defects it closes
+
+- **Shared `run_id`** - closed by the run-id rule above.
+- **An edited `--protocol` file is refused before any write.** `scenarios` and
+  `compounding` compare the file's canonical digest with the registered protocol's,
+  and refuse a level already sealed under another attempt id, before the first
+  append. `compounding` also requires a sealed 1.0x constant-notional baseline.
+  Row and file counts before and after a refused command are equal.
+- **A stressed baseline is named.** A protocol declaring
+  `baseline.stress_multiplier` other than 1 is still reportable (a registration
+  cannot be amended) and `ScenarioReport.declared_baseline_multiplier` now says so.
+
+### What 8B3 does not establish
+
+- **No decision.** Whether compounding is better, what drawdown is acceptable and
+  whether a candidate is sound are for the later validation phases, with thresholds
+  fixed in advance.
+- **Two runs at 1.0x differing only in non-multiplier cost terms still share a
+  `run_id`.** The report's baseline-fidelity check catches that at report time;
+  folding the whole cost model into the id would fail every Phase 7 import.
+- **A run that takes the account to zero or below cannot be sealed.** The daily
+  return derivation refuses non-positive equity; that is fail-closed and stated.
+- **Compounding at 1.5x and 2.0x is not run.** One rerun at the baseline is what
+  the umbrella design asks for.
+- **`spec_sha256` is still unvouched in the ledger** (see *What Phase 8A does not
+  implement*).
 
 ## Operator commands
 
@@ -1581,6 +1670,9 @@ uv run trading-house --help
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
 | `trading-house research trial scenarios` | Run, seal and report the cost grid a protocol preregistered, one attempt and one sealed bundle per level. Takes no cost, window or strategy options: the grid, its costs, its window and its strategy all come from `--protocol`, because the report checks every level against those same declarations |
 | `trading-house research trial scenario-report` | Check a candidate's sealed scenarios against the grid recovered from the chain's `PREREGISTERED` event, and report. States no verdict |
+| `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one or no 1.0x constant-notional baseline is sealed |
+| `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
+| `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
 | `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |
