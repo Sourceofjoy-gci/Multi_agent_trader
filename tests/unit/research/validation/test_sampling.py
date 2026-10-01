@@ -145,17 +145,27 @@ def test_the_first_fold_has_no_predecessor_so_a_trade_entering_before_the_series
     assert train == [3]
 
 
-def test_as_written_r3_drops_an_earlier_test_folds_trades_at_a_later_isolated_boundary() -> None:
-    """The rule as specified, pinned so a change to it is a decision and not an accident.
+def test_a_test_trade_is_dropped_only_at_the_boundary_of_its_own_exit_fold() -> None:
+    """Held out {0, 2}: fold 2 (11-15) has the non-test predecessor f1, fold 0 has none.
 
-    Held out {0, 2}: fold 2 has a non-test predecessor (f1), and the test-side clause is
-    ``entry_day <= s - 1`` for *every* test trade, so a trade wholly inside fold 0 is dropped
-    because of fold 2's boundary even though it is nowhere near it. Flagged in the 8C1 report.
+    (2,3) exits in f0, which has no predecessor: kept, even though fold 2's boundary is later
+    (the original wording dropped it). (12,13) exits in f2 and enters on day 12 > 10: kept.
+    (9,12) exits in f2 and entered on day 9 <= 10: it crosses its own fold's boundary: dropped.
     """
 
-    _, test = _split(_sample((2, 3), (12, 13)), {0, 2}, purge=1, embargo=0)
+    _, test = _split(_sample((2, 3), (12, 13), (9, 12)), {0, 2}, purge=1, embargo=0)
 
-    assert test == [1]
+    assert test == [0, 1]
+
+
+def test_a_long_trade_is_judged_only_at_its_own_exit_folds_boundary() -> None:
+    """Held out {1, 2}. (4,8) exits in f1, whose predecessor f0 is not held out, and entered on
+    day 4 <= 5: dropped. (3,12) exits in f2, whose predecessor f1 IS held out: kept, although it
+    also crossed fold 1's start; that is not the boundary of its own exit fold."""
+
+    _, test = _split(_sample((3, 12), (4, 8)), {1, 2}, purge=1, embargo=0)
+
+    assert test == [0]
 
 
 def test_an_empty_sample_splits_into_two_empty_index_arrays() -> None:
@@ -253,10 +263,10 @@ def test_no_days_or_no_folds_is_refused(
 # T2 (8,8) f1, T3 (9,11) f2, T4 (13,13) f2, T5 (15,16) f3, T6 (18,18) f3, T7 (20,21) f4,
 # T8 (23,23) f4, T9 (25,26) f5, T10 (28,28) f5.
 #
-# In a split, a test trade is dropped when its entry day is <= 5t for some test fold t >= 1
-# whose predecessor is not a test fold (5t is the day before fold t starts). So each split
-# has one threshold M, the largest such 5t, and drops the trades with entry <= M:
-#   split: 0:none 1:10 2:15 3:20 4:25 5:5 6:15 7:20 8:25 9:10 10:20 11:25 12:15 13:25 14:20
+# A test trade exiting in fold j >= 1 is dropped when fold j-1 is not held out in its split
+# and its entry day is <= 5j (the day before fold j starts). Per fold, the trades that can
+# be dropped: f1: T1 (entry 4); f2: T3 (9); f3: T5 (15); f4: T7 (20); f5: T9 (25). The
+# others (T0 in f0, T2 8 > 5, T4 13 > 10, T6 18 > 15, T8 23 > 20, T10 28 > 25) are never.
 # Path p takes for fold j the p-th split holding j (see test_splits), so for purge 1:
 #   p0 splits [0,0,1,2,3,4]   p1 [1,5,5,6,7,8]   p2 [2,6,9,9,10,11]
 #   p3 [3,7,10,12,12,13]      p4 [4,8,11,13,14,14]
@@ -265,19 +275,25 @@ TRADES = _sample(
     (18, 18), (20, 21), (23, 23), (25, 26), (28, 28),
 )  # fmt: skip
 
+# Fold j-1 in the split assigned to fold j (so whether Tj is dropped):
+#   p0 (0,1)(0,2)(0,3)(0,4)(0,5): 0 in S -> T1 kept; 1,2,3,4 absent -> T3 T5 T7 T9 dropped
+#   p1 (1,2)(1,2)(1,3)(1,4)(1,5): 0 absent -> T1 dropped; 1 in S -> T3 kept; T5 T7 T9 dropped
+#   p2 (1,3)(2,3)(2,3)(2,4)(2,5): T1 T3 dropped; 2 in S -> T5 kept; T7 T9 dropped
+#   p3 (1,4)(2,4)(3,4)(3,4)(3,5): T1 T3 T5 dropped; 3 in S -> T7 kept; T9 dropped
+#   p4 (1,5)(2,5)(3,5)(4,5)(4,5): T1 T3 T5 T7 dropped; 4 in S -> T9 kept
 PATH_KEPT = [
     [0, 1, 2, 4, 6, 8, 10],
-    [2, 3, 4, 6, 8, 10],
-    [4, 5, 6, 8, 10],
-    [6, 7, 8, 10],
-    [8, 9, 10],
+    [0, 2, 3, 4, 6, 8, 10],
+    [0, 2, 4, 5, 6, 8, 10],
+    [0, 2, 4, 6, 7, 8, 10],
+    [0, 2, 4, 6, 8, 9, 10],
 ]
 PATH_EXCLUDED = [
     [3, 5, 7, 9],
-    [0, 1, 5, 7, 9],
-    [0, 1, 2, 3, 7, 9],
-    [0, 1, 2, 3, 4, 5, 9],
-    [0, 1, 2, 3, 4, 5, 6, 7],
+    [1, 5, 7, 9],
+    [1, 3, 7, 9],
+    [1, 3, 5, 9],
+    [1, 3, 5, 7],
 ]
 
 

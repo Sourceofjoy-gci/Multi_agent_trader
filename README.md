@@ -1755,15 +1755,16 @@ A candidate here is fixed-parameter: nothing is refit, so a test fold's returns 
 the same in every CPCV split and, with no further rule, every path would be the
 identical full series. R-3 is what makes a split's samples depend on which folds
 were held out. A closed trade belongs to the fold containing its **exit** day. In
-a split, a **test** trade is dropped when it spans a boundary into a non-test
-predecessor fold: for a test fold starting on `s` whose previous day lies in a
-non-test fold, when `purge_days >= 1` and `entry_day <= s - 1`. A **train** trade
+a split, a **test** trade is dropped only when it crosses the boundary of its own
+exit fold: with `F` that fold and `s` its start, when fold `F - 1` exists and is not
+a test fold, `purge_days >= 1` and `entry_day <= s - 1`. It is never dropped for
+another test fold's boundary. A **train** trade
 is dropped when, for any test fold `[s, e]`, `entry_day <= e + embargo_days` and
-`exit_day >= s - purge_days`. The rule is applied exactly as the design states it, including two
-properties worth knowing: the test-side clause uses `purge_days` only as an on/off
-switch (the train side uses its length), and it applies to every test trade, so a
-test trade lying wholly inside an earlier test fold is also dropped by the boundary
-of a later, isolated test fold.
+`exit_day >= s - purge_days`. The test-side clause was amended after the 8C1 implementation found the
+original wording incoherent (it dropped a test trade wholly inside an earlier test
+fold because of a later, isolated test fold's boundary). One property remains worth
+knowing: the test-side clause uses `purge_days` only as an on/off switch (the train
+side uses its length), because a trade that crosses `s` necessarily reaches the zone.
 
 ### What 8C1 does not establish
 

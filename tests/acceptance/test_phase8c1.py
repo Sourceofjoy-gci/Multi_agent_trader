@@ -144,7 +144,7 @@ def _oracle_kept(
     fold: int,
     purge: int,
 ) -> list[int]:
-    """The test-side rule written out per trade, for the trades exiting in ``fold``.
+    """The test-side rule (own exit fold only) written out, for trades exiting in ``fold``.
 
     A straight transcription of the sentence in the design, with dates and loops, so the
     comparison is between two spellings and not two calls of one function.
@@ -154,12 +154,10 @@ def _oracle_kept(
     for index, (entry, exit_) in enumerate(trades):
         if not folds[fold][0] <= exit_ <= folds[fold][1]:
             continue
-        dropped = False
-        for t in test:
-            start = folds[t][0]
-            predecessor_is_test = t - 1 in test
-            if t >= 1 and not predecessor_is_test and purge >= 1 and entry <= start - timedelta(1):
-                dropped = True
+        start = folds[fold][0]
+        dropped = (
+            purge >= 1 and fold >= 1 and fold - 1 not in test and entry <= start - timedelta(1)
+        )
         if not dropped:
             kept.append(index)
     return kept
@@ -291,17 +289,18 @@ def test_a_five_year_series_cuts_cpcv_folds_with_the_remainder_in_the_first_thre
 def test_the_paths_of_a_five_year_series_keep_and_drop_the_hand_derived_trades() -> None:
     """Trades: a enters 31 Oct and exits 2 Nov (fold 1), b is inside fold 1, c inside fold 0.
 
-    Fold 1 starts 1 Nov 2020. In a split where fold 1 is held out and fold 0 is not, ``a``
-    enters on or before 31 Oct and is dropped. Under R-3 as written, ``c`` (wholly inside
-    fold 0) is also dropped whenever fold 0 is held out together with a later, isolated fold,
-    and ``b`` whenever fold 1 is held out with a later, isolated fold. Hence:
-      path 0 (splits 0, 0): nothing dropped; path 1 (1, 5): a and c; paths 2-4: all three.
+    Fold 1 starts 1 Nov 2020. Only ``a`` can be dropped: it exits in fold 1 and entered on
+    31 Oct, the day before. It is dropped exactly when fold 0 is not held out in the split
+    that supplies fold 1; ``b`` entered inside fold 1 and ``c`` exits in fold 0, which has no
+    predecessor, so neither is ever dropped. Fold 1's splits by path are (0,1), (1,2), (1,3),
+    (1,4), (1,5): fold 0 is held out only on path 0. Hence path 0 keeps all three and
+    paths 1-4 keep two and drop one.
     """
 
     report = _five_year_report()
 
     assert [(p.trades_kept, p.trades_excluded) for p in report.cpcv.paths] == [
-        (3, 0), (1, 2), (0, 3), (0, 3), (0, 3),
+        (3, 0), (2, 1), (2, 1), (2, 1), (2, 1),
     ]  # fmt: skip
     assert report.closed_trades == 3
 

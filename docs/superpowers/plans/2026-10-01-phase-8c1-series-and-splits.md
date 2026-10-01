@@ -46,8 +46,11 @@ Mutation-prove: off-by-one on a boundary, wrong remainder placement, step != 6, 
 1. `split_samples(trades: TradeSample, days, folds, test_indices, *, purge_days, embargo_days)
    -> (train_idx, test_idx)` (index arrays into the sample). A trade's fold is the fold containing its exit_day.
    Test candidates: exit fold in test_indices; train candidates: exit fold not in test_indices.
-   A TEST trade is excluded when it spans a boundary into a non-test predecessor fold: for any test fold with
-   start s whose day s-1 lies in a non-test fold, exclude if `purge_days >= 1 and entry_day <= s - 1`.
+   A TEST trade is excluded only at the boundary of its OWN exit fold F (start s): exclude iff fold F-1 exists
+   and is a non-test fold, `purge_days >= 1` and `entry_day <= s - 1`; never for another test fold's boundary.
+   (Amended 2026-10-01 after the 8C1 implementation found the original clause - "for any test fold ... exclude
+   if entry_day <= s - 1" - incoherent: it dropped a test trade wholly inside an earlier test fold because of a
+   later isolated test fold's boundary.)
    A TRAIN trade is excluded when, for any test fold [s, e], `entry_day <= e + embargo_days and exit_day >=
    s - purge_days` (this also removes trades lying entirely inside the zone).
    Document in the docstring that this is R-3 and why (fixed-parameter candidates make every path otherwise

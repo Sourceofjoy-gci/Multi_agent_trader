@@ -100,18 +100,20 @@ def split_samples(
     Test candidates are the trades whose exit fold is in ``test_indices``; train
     candidates are the rest.
 
-    A **test** trade is excluded when it spans a boundary into a non-test
-    predecessor fold: for any test fold starting on ``s`` whose preceding day lies
-    in a non-test fold, when ``purge_days >= 1`` and ``entry_day <= s - 1``.
+    A **test** trade is excluded only when it crosses the boundary of its OWN exit
+    fold: with ``F`` the fold containing its exit day and ``s`` that fold's start,
+    when fold ``F - 1`` exists and is not a test fold, ``purge_days >= 1`` and
+    ``entry_day <= s - 1``. It is never dropped for another test fold's boundary.
 
     A **train** trade is excluded when, for any test fold ``[s, e]``,
     ``entry_day <= e + embargo_days`` and ``exit_day >= s - purge_days``. That also
     removes a trade lying wholly inside either zone.
 
     Why: see the module docstring. The rule is the design's R-3, written there so
-    that it cannot be strengthened or relaxed after results exist; it is applied as
-    written, including the one asymmetry that the test side uses ``purge_days`` only
-    as an on/off switch while the train side uses its length.
+    that it cannot be strengthened or relaxed after results exist (amended once, after
+    the 8C1 implementation found the first test-side wording incoherent). The test side
+    uses ``purge_days`` only as an on/off switch, since a trade that crosses ``s``
+    necessarily reaches the zone; the train side uses its length.
     """
 
     _require_zone(purge_days, embargo_days)
@@ -119,14 +121,15 @@ def split_samples(
     tests = sorted(set(test_indices))
     if not tests or tests[0] < 0 or tests[-1] >= len(folds):
         raise refusal("the test folds must be a non-empty subset of the folds")
-    in_test = np.isin(_exit_folds(trades, folds), tests)
+    fold_of = _exit_folds(trades, folds)
+    in_test = np.isin(fold_of, tests)
     entries, exits = _ordinals(trades.entry_day), _ordinals(trades.exit_day)
     test_excluded = np.zeros(len(trades), dtype=np.bool_)
     train_excluded = np.zeros(len(trades), dtype=np.bool_)
     for fold in tests:
         start, end = folds[fold].start.toordinal(), folds[fold].end.toordinal()
         if purge_days >= 1 and fold >= 1 and fold - 1 not in tests:
-            test_excluded |= entries <= start - 1
+            test_excluded |= (fold_of == fold) & (entries <= start - 1)
         train_excluded |= (entries <= end + embargo_days) & (exits >= start - purge_days)
     return (
         np.flatnonzero(~in_test & ~train_excluded).astype(np.intp),
