@@ -1795,8 +1795,10 @@ side uses its length), because a trade that crosses `s` necessarily reaches the 
   generalisation.
 - **`purge_hours` of 0 makes every path identical,** because the test-side clause
   is off when the purge is under a day. So does a run in which no trade straddles a
-  fold start (typical of intraday runs). `paths_differ` is `false` then, and a
-  measurement over the paths has nothing to say.
+  fold start (typical of intraday runs). `paths_differ` is `false` then, and the
+  CPCV 5th-percentile measurement is still computed (amended 2026-10-01 by 8C3,
+  replacing this slice's earlier note that it would be undefined): it equals the
+  aggregate out-of-sample net expectancy, and `paths_differ` is carried beside it.
 - **A remaining gap in R-3.** A test trade that entered in a non-test fold two or
   more folds back and exits in a test fold whose own predecessor is a *test* fold
   is kept, because only its own exit fold's boundary is judged.
@@ -1910,6 +1912,99 @@ remains the only numerical dependency; the normal CDF is `math.erf` and its inve
   overflows) with exit 20 rather than reporting an undefined measurement, because none of
   them can arise from a validated series and the protocol's own fields.
 
+## Phase 8C3 - drawdown, Monte Carlo, coverage and `validate`
+
+8C3 is the last slice of the statistical-validation phase (design:
+`docs/superpowers/specs/2026-10-01-phase-8c-statistical-validation-design.md`). It adds
+the remaining **measurements** and the command that assembles every measurement into one
+typed document. It adds **no gate, no verdict and no cutoff decision**, no migration and
+no event type; its one command, `research trial validate --trial-id T`, is read only.
+NumPy remains the only numerical dependency.
+
+### What exists
+
+- **Signed constants** (`research/validation/policy.py`), fixed before any 8C3 output
+  existed and pinned by a test that fails if a literal moves: `DSR_MINIMUM = 0.95`,
+  `PBO_MAXIMUM = 0.50`, `MAX_DRAWDOWN = 0.10`, `MIN_OOS_TRADES = 30`, `MIN_REGIMES = 2`,
+  `CPCV_P5_QUANTILE = 0.05`, `MIN_WFA_FOLDS = 1`, `MC_POLICY_VERSION = "8c-mc-1"`. They
+  are what 8D reads. 8C3's measurements read only `MAX_DRAWDOWN` (the Monte Carlo's halt
+  level), `CPCV_P5_QUANTILE` (the rank) and `MC_POLICY_VERSION` (the seed).
+- **Drawdown** (`drawdown.py`): the largest peak-to-trough fall as a fraction of the
+  running peak. On a bundle it is measured over the initial equity followed by every
+  bar's marked equity, open-position marks included and never closed trades, so a position
+  that dips and recovers before its exit has a drawdown. A bundle with no equity series has
+  an undefined drawdown, never one computed from trades. On a CPCV path it is measured over
+  the path's daily returns compounded from 1.0. The measurements are `max_drawdown_baseline`,
+  `max_drawdown_cpcv_path_<i>` and `max_drawdown_compounding`; equity that reaches zero or
+  below is refused (a bundle) or undefined (compounded returns).
+- **Monte Carlo** (`montecarlo.py`): the stationary bootstrap's per-step index stream
+  (shared with `bootstrap.py`, outputs unchanged) resamples the daily returns to the
+  series' own length, the **horizon** (R-4: the protocol's declared data window, in days),
+  and compounds them from 1.0, tracking the running peak and the largest drawdown streaming
+  over time steps, so memory is `O(replicates)`. `p_halt` is the fraction of replicates
+  whose maximum drawdown is at or beyond `MAX_DRAWDOWN` (`>=`), and `p_loss` the fraction
+  whose FINAL equity is strictly below 1.0. The seed is the bootstrap's recipe under policy
+  version `8c-mc-1`, so the two streams are independent. A daily return of -100% or worse,
+  or an overflowing equity, makes both undefined.
+- **Coverage, the CPCV 5th percentile and scenarios** (`coverage.py`). Each CPCV path's
+  net expectancy is the mean net P&L per kept closed trade; the 5th-percentile measurement
+  is the nearest-rank value at `ceil(CPCV_P5_QUANTILE * n_paths)` of the ascending
+  expectancies (rank 1 at 5 and 20 paths, rank 2 at 21), undefined naming the path if one
+  keeps no trade. Out-of-sample coverage takes the path with the FEWEST kept trades:
+  `oos_trades` is its size and `regimes_represented` the number of declared labels with a
+  trade in it, defined only when every declared label is a session name.
+  `scenario_expectancy_1.5` and `scenario_expectancy_2.0` are the net expectancy over the
+  full sealed sample of the stressed run, **not** a locked out-of-sample one: no holdout
+  exists, and what that means is 8D's to say.
+- **`research trial validate --trial-id T`** (`ops/validate.py`,
+  `research/validation/evidence.py`). A pure assembly (`statistical_evidence`) over inputs
+  that `read_validation_inputs` has read: the trial's one sealed constant-notional 1.0x
+  baseline (none or two is refused with exit 19, as `splits` refuses), the compounding
+  run and the 1.5x and 2.0x runs where one is sealed (none is an undefined measurement,
+  never zero; two is refused), every protocol candidate with exactly one sealed 1.0x
+  baseline for PBO (the rest listed as excluded) and the chain's counters and head. It
+  prints a `StatisticalEvidence` in which every measurement is a finite value or a reason
+  and names the digests it came from. It exits 0 whenever it assembles: an undefined
+  measurement is data, not an error. Its output is byte-identical on a second run.
+
+### Resolutions
+
+- **The CPCV 5th-percentile measurement is always computed (amended 2026-10-01).** 8C1
+  told this slice to make it undefined when `paths_differ` is false. That would make the
+  fifth gate unmeetable for every intraday strategy, since none straddles a fold start,
+  so it would measure nothing. The measurement is computed always, and `paths_differ` is
+  carried beside it as a plain diagnostic. When the paths are identical their 5th
+  percentile is the sample's net expectancy, a real quantity: is out-of-sample net
+  expectancy positive. **Gate 5 therefore reads the aggregate out-of-sample net
+  expectancy when the paths are identical, and 8D must say so in its reason.**
+- **The holding horizon is read from the strategy registry, never assumed.** `horizon_days`
+  is the registered strategy's `horizon_seconds` rounded up to whole days, taken from the
+  registry's strategy object without running anything, and only when its version equals the
+  protocol's. The registered session momentum strategy declares 32,400 seconds, one day, so
+  its DSR is defined (the 8C2 rule is that only a one-day horizon is). A strategy that is
+  not registered, or a version that differs, leaves the horizon unknown and DSR undefined
+  with that reason; one day is never assumed.
+- **Both simulations seed from the baseline's attempt.** The bootstrap and the Monte Carlo
+  are seeded from the spec digest and the baseline bundle's attempt id, under their own
+  policy versions.
+
+### What 8C3 does not establish
+
+- **No gate and no verdict.** No value is compared with `DSR_MINIMUM`, `PBO_MAXIMUM`,
+  `MIN_OOS_TRADES`, `MIN_REGIMES` or zero; `MAX_DRAWDOWN` is only the Monte Carlo's halt
+  level. Those constants are for 8D, which fixes nothing after it has seen a result.
+- **Identical paths are one path.** When no trade straddles a fold start, `paths_differ`
+  is `false` and the CPCV 5th percentile equals the aggregate expectancy of the run's
+  trades; it is not out-of-sample robustness.
+- **A candidate that never traded** has an undefined 5th percentile (naming path 0) and a
+  zero `oos_trades`; no regime count is defined for an empty sample or an empty or
+  non-session label set.
+- **The Monte Carlo resamples daily returns, not paths of intraday marks,** so it says
+  nothing of drawdown inside a day, and it inherits the bootstrap's block-length choice.
+- **`validate` does not repeat the grid report's identity checks.** It requires the 1.0x
+  baseline and that the bundles name the trial; `scenario-report` is where cost, window and
+  specification fidelity are checked.
+
 ## Phase 8A.1 - ledger-level specification vouching
 
 `research trial start` and every other writer reach the ledger through one append
@@ -1964,6 +2059,7 @@ uv run trading-house --help
 | `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one, no 1.0x constant-notional baseline is sealed, the run's replay inputs differ from that baseline's, or the code's strategy version is not the registered one. Refuses an `--attempt-id` the trial has started and not sealed as this run's own rerun; an id already sealed as this run's rerun is a no-op skip. A run that stops after its start row spends its id: retry under a new `--attempt-id` (`audit_attempts` rises by one more) |
 | `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
 | `trading-house research trial splits` | Print the walk-forward folds and the CPCV folds, splits and paths of a registered candidate's one sealed 1.0x constant-notional run, with the closed trades each path's test samples kept and dropped (test-side, purge-driven; the embargo affects only the train sample) and `paths_differ`. Read only; no statistic, no verdict. A series under 30 days, or a policy the series cannot honour, is refused with exit 20 |
+| `trading-house research trial validate` | Print every statistical measurement of a registered candidate's sealed evidence as one document: walk-forward fold count, PSR, DSR, PBO, the bootstrap, the drawdown Monte Carlo, drawdowns (baseline, each CPCV path, compounding), the CPCV 5th percentile, out-of-sample coverage, the 1.5x and 2.0x expectancies and the capacity state, each a finite value or a reason and each naming its evidence digests. Read only, byte-deterministic, no statistic compared with anything. Refuses as `splits` does: an unregistered trial or no/duplicate sealed 1.0x baseline with exit 19, a series under 30 days with exit 20 |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
