@@ -402,9 +402,9 @@ def test_a_real_candidate_passes_all_six_checks_and_reports_its_declared_grid(
     # registration, so a grid that minted one digest per level would be counted
     # as three specifications. The report's own copy is read off the sealed
     # documents rather than off the protocol: the ledger's ``spec_sha256`` column
-    # is the operator's declared value, unvouched since 8A, so a report that read
-    # it from the registration would be asserting a cross-check the chain does
-    # not make.
+    # is the operator's declared value, unvouched since 8A for everything but a
+    # start, so a report that read it from the registration would be asserting a
+    # cross-check the chain does not make.
     assert report["spec_sha256"] == _spec_sha256(seeded)
     sealed = [_store(research_env).read(row["evidence_sha256"]) for row in report["scenarios"]]
     assert {bundle.spec_sha256 for bundle in sealed} == {report["spec_sha256"]}

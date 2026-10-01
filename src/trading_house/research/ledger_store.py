@@ -58,7 +58,7 @@ import json
 import struct
 from collections.abc import Callable
 from typing import Any, Never, Protocol
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -289,6 +289,19 @@ def _is_registered(cursor: psycopg.Cursor[tuple[Any, ...]], trial_id: str) -> bo
     return bool(row is not None and row[0])
 
 
+def _already_appended(
+    cursor: psycopg.Cursor[tuple[Any, ...]], event_id: UUID, canonical_event: bytes
+) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM research.trial_ledger_events WHERE event_id = %s AND canonical_event = %s",
+        (event_id, canonical_event),
+    )
+    return cursor.fetchone() is not None
+
+
+# ponytail: each start re-parses every registration naming its trial, so the cost is
+# O(registrations x candidates) per start. Upgrade: a GIN index on event_json plus a
+# candidate-level containment query on the digest, or cache the declared set per trial.
 def _start_digest_is_vouched(
     cursor: psycopg.Cursor[tuple[Any, ...]], trial_id: str, spec_sha256: str
 ) -> bool:
@@ -352,9 +365,16 @@ def _append_operation(
             # The one event type whose digest feeds ``trial_counters`` is vouched
             # for here, where the row is written. Events already in the chain are
             # never re-judged: replay and verify do not come through this path.
+            #
+            # A byte-identical event already in the chain is a retry, not a new
+            # claim: it was judged (or predates the judgement) when it landed, and
+            # a registration made since must not turn its retry into a refusal. A
+            # same-id event with different bytes is not skipped, so it still
+            # reaches the append function's conflict path.
             if (
                 event.event_type is LedgerEventType.EXECUTION_STARTED
                 and event.trial_id is not None
+                and not _already_appended(cursor, event.event_id, canonical_event)
                 and not _start_digest_is_vouched(cursor, event.trial_id, event.spec_sha256)
             ):
                 raise _UnvouchedSpecification()

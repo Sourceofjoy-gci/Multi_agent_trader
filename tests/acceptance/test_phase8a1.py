@@ -137,6 +137,10 @@ def test_the_readme_states_what_8a1_vouches_for_and_what_it_does_not() -> None:
     assert "accepts either declared digest, and refuses a third" in section
     assert "A trial declared only by `LEGACY_IMPORTED` has no registration" in section
     assert "No migration and no new event type were added." in section
+    assert "skips the check, so retrying it succeeds and adds nothing" in section
+    assert "A same-id event with *different* bytes is not skipped" in section
+    assert "may be missed. That can only *refuse* a start, never admit one" in section
+    assert "A trial both legacy-imported and preregistered is vouched against" in section
     assert "`replay`, `verify` and `count` read what is in the chain" in section
     # The two superseded claims are gone, and what replaced them is present above.
     assert "is a count of supplied digests, not a verified match" not in text

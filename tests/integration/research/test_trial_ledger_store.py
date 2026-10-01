@@ -14,6 +14,7 @@ with no trigger at all.
 
 from __future__ import annotations
 
+import json
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -1084,6 +1085,12 @@ def test_every_kind_of_tampering_is_reported_rather_than_raised(
 # --- Phase 8A.1: a start's digest is vouched for at append time ------------------
 
 STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def canonical_json_bytes(document: dict[str, Any]) -> bytes:
+    return json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+
+
 UNDECLARED = "d" * 64
 
 
@@ -1134,6 +1141,8 @@ def test_a_start_whose_digest_no_registration_declares_is_refused_and_appends_no
     ):
         with pytest.raises(TrialLedgerAppendError) as refused:
             ledger.append(_start(trial_id, "a-1", digest))
+        # Guards only against chaining a driver error (whose text can carry the
+        # DSN); the refusal's own cause is the fixed store failure.
         assert research_ledger_dsn not in "".join(traceback.format_exception(refused.value))
 
     assert ledger.events() == before
@@ -1213,26 +1222,143 @@ def test_history_holding_a_drifted_start_still_replays_and_verifies(
     drifted = _start(trial_id, "a-2", UNDECLARED)
     with pytest.raises(TrialLedgerAppendError):
         ledger.append(drifted)
-    tail = bytes.fromhex(ledger.events()[-1].event_hash)
-
-    with open_runtime_connection(SecretStr(research_ledger_dsn)) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT * FROM research.append_trial_ledger_event(%s, %s, %s, %s)",
-                (
-                    canonical_bytes(drifted),
-                    Jsonb(drifted.model_dump(mode="json")),
-                    tail,
-                    bytes.fromhex(canonical_sha256(drifted.payload)),
-                ),
-            )
-        connection.commit()
+    _raw_append(research_ledger_dsn, ledger, drifted)
 
     report = ledger.verify()
     assert report.valid
     assert report.checked_events == 3
     assert len(ledger.replay()) == 3
     assert ledger.counters().effective_specifications == 2
+
+
+def _raw_append(dsn: str, ledger: PostgresTrialLedger, event: LedgerEvent) -> None:
+    """Write an event through the database's append function, bypassing the store's check.
+
+    The path every row took before 8A.1, so a row built here is history rather
+    than a forgery.
+    """
+
+    tail = bytes.fromhex(ledger.events()[-1].event_hash)
+    with open_runtime_connection(SecretStr(dsn)) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM research.append_trial_ledger_event(%s, %s, %s, %s)",
+                (
+                    canonical_bytes(event),
+                    Jsonb(event.model_dump(mode="json")),
+                    tail,
+                    bytes.fromhex(canonical_sha256(event.payload)),
+                ),
+            )
+        connection.commit()
+
+
+def test_a_drifted_start_already_in_the_chain_can_be_retried_byte_identical(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    """Scenario A: the vouch must not refuse what is already history."""
+
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    drifted = _start(trial_protocol.candidates[0].trial_id, "a-1", UNDECLARED)
+    _raw_append(research_ledger_dsn, ledger, drifted)
+    before = ledger.events()
+
+    again = ledger.append(drifted)
+
+    assert again == before[-1]
+    assert ledger.events() == before
+
+
+def test_a_start_whose_trial_was_registered_after_it_can_still_be_retried(
+    research_ledger_dsn: str,
+) -> None:
+    """Scenario B, and the legacy-and-registered rule: a registration binds from then on."""
+
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_legacy_event("trial-lb"))
+    start = _start("trial-lb", "a-1", UNDECLARED)
+    first = ledger.append(start)
+    registered = _variant("trial-lb", "later")
+    ledger.register(registered)
+    before = ledger.events()
+
+    assert ledger.append(start) == first
+    assert ledger.events() == before
+    # Both legacy and registered now: vouched against the registration.
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(_start("trial-lb", "a-2", UNDECLARED))
+    ledger.append(_start("trial-lb", "a-3", canonical_sha256(registered.candidates[0])))
+
+
+def test_a_same_id_start_with_different_bytes_is_still_refused(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    trial_id = trial_protocol.candidates[0].trial_id
+    _raw_append(research_ledger_dsn, ledger, _start(trial_id, "a-1", UNDECLARED))
+    before = ledger.events()
+    other_bytes = execution_started_event(
+        trial_id, "a-1", UNDECLARED, datetime(2026, 2, 2, tzinfo=UTC)
+    )
+
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(other_bytes)
+
+    assert ledger.events() == before
+
+
+def test_the_retry_skip_compares_the_bytes_and_not_only_the_id(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    """The database's own conflict refusal would also stop a same-id event, so the
+    end-to-end case above cannot tell a byte comparison from an id comparison; this
+    pins the skip's own predicate."""
+
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    event = _start(trial_protocol.candidates[0].trial_id, "a-1", UNDECLARED)
+    _raw_append(research_ledger_dsn, ledger, event)
+    changed = canonical_bytes(
+        execution_started_event(
+            trial_protocol.candidates[0].trial_id,
+            "a-1",
+            UNDECLARED,
+            datetime(2026, 2, 2, tzinfo=UTC),
+        )
+    )
+
+    with (
+        open_runtime_connection(SecretStr(research_ledger_dsn)) as connection,
+        connection.cursor() as cursor,
+    ):
+        assert ledger_store._already_appended(cursor, event.event_id, canonical_bytes(event))
+        assert not ledger_store._already_appended(cursor, event.event_id, changed)
+
+
+def test_a_stored_protocol_that_does_not_parse_refuses_the_start(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    """Fail closed: a declaration that cannot be read vouches for nothing."""
+
+    ledger = _ledger(research_ledger_dsn)
+    broken = _preregistered_event(trial_protocol).model_dump(mode="json")
+    del broken["payload"]["protocol"]["candidates"][0]["rationale"]
+    tail = GENESIS_HASH
+    with open_runtime_connection(SecretStr(research_ledger_dsn)) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM research.append_trial_ledger_event(%s, %s, %s, %s)",
+                (canonical_json_bytes(broken), Jsonb(broken), tail, b"p" * 32),
+            )
+        connection.commit()
+    candidate = trial_protocol.candidates[0]
+
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(_start(candidate.trial_id, "a-1", canonical_sha256(candidate)))
+
+    assert len(ledger.events()) == 1
 
 
 def test_vouching_reads_on_the_connection_the_append_runs_on(

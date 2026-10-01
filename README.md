@@ -1719,11 +1719,17 @@ appends no row, and names no digest.
   different specifications accepts either declared digest, and refuses a third.
 - **Legacy-only trials are exempt.** A trial declared only by `LEGACY_IMPORTED`
   has no registration to compare with, so its start is not checked.
-- **Same transaction.** The declared candidates are read on the append's own
-  cursor, so the check reads the chain the row is about to extend.
-- **Retries still succeed.** A retry of an already-appended start carries a digest
-  that was declared when it first passed; the chain is append-only, so it passes
-  again and the append function then recognises it by event id.
+- **Same connection and transaction.** The declared candidates are read on the
+  append's own cursor, but that read precedes the append function's advisory lock,
+  so a registration landing concurrently may be missed. That can only *refuse* a
+  start, never admit one.
+- **Retries still succeed.** A start already in the chain with byte-identical
+  canonical bytes skips the check, so retrying it succeeds and adds nothing even if
+  it predates 8A.1 or a registration has been made since. A same-id event with
+  *different* bytes is not skipped and still reaches the append function's conflict
+  refusal.
+- **Legacy and registered.** A trial both legacy-imported and preregistered is
+  vouched against its registration: a start with an undeclared digest is refused.
 - **History is not re-judged.** `replay`, `verify` and `count` read what is in the
   chain; a drifted start appended before 8A.1 still verifies and is still counted.
 - **What is not vouched.** `LEGACY_IMPORTED` and `EVIDENCE_SEALED`,

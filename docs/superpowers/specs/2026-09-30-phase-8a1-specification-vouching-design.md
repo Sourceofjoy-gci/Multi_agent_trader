@@ -35,10 +35,10 @@ transaction, where it cannot be skipped by a caller that goes around the CLI.
 |---|---|---|
 | V-1 | `append` refuses an `EXECUTION_STARTED` whose `spec_sha256` is not `canonical_sha256` of a candidate that some `PREREGISTERED` event declares under that `trial_id` | The rule lives where the row is written; the CLI gets it for free |
 | V-2 | "Declared under that trial id" is **the set** of digests across every registration naming the trial | Phase 8A permits registering one trial twice (8B2b found this). A set is the honest generalisation; first-match is the defect the 8B2b review already named |
-| V-3 | The refusal is `TrialLedgerAppendError` with an opaque public message and a private cause naming trial id only | The ledger's contract is one redacted error; the digest values are not secret but the store does not narrate its inputs |
+| V-3 | The refusal is `TrialLedgerAppendError` with an opaque public message; the private cause is the store's fixed `_LedgerStoreFailure` and names nothing, not even the trial id | The ledger's contract is one redacted error; the digest values are not secret but the store does not narrate its inputs |
 | V-4 | A trial declared *only* by a legacy import is exempt | See 1.1 |
-| V-5 | The check runs in the same transaction as the append, reading the chain it is about to extend | A check made in a separate read could be raced by a registration landing between the two; in-transaction it reads what the row is chained onto |
-| V-6 | A retry of an already-appended start (same event id) still succeeds | Idempotency is the append function's, and a start that was valid when written is valid on replay of the same bytes |
+| V-5 | The check runs on the append's own connection and transaction | It precedes the append function's advisory lock, so a registration landing concurrently may be missed; that can only refuse a start, never admit one |
+| V-6 | A start already in the chain with byte-identical canonical bytes skips the check, so its retry succeeds; a same-id event with different bytes does not skip and reaches the append function's conflict path | The vouch runs before the append function's idempotency, so without the skip a pre-8A.1 drifted start, or one whose trial was registered after a legacy import, would be refused on retry |
 
 ## 3. Implementation notes
 
