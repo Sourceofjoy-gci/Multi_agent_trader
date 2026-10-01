@@ -111,11 +111,31 @@ def test_every_one_of_the_three_seed_inputs_changes_the_seed() -> None:
     assert bootstrap_seed("spec", "attempt", "8c-sb-1") == base
 
 
-def test_a_separator_inside_a_seed_input_is_refused_because_it_would_collide() -> None:
-    with pytest.raises(StatisticalInputError) as error:
-        bootstrap_seed("a|b", "c", "d")
+def test_a_pipe_inside_a_seed_input_is_escaped_so_the_split_point_cannot_move() -> None:
+    """Attempt ids are free strings. Each part is escaped (backslash to two backslashes, then
+    pipe to backslash-pipe) before joining with a pipe; the literals are
+    ``sha256`` of ``a\\|b|c|d`` and ``a|b\\|c|d`` computed outside with ``hashlib``."""
 
-    _refused(error, "separator")
+    inside_spec = bootstrap_seed("a|b", "c", "d")
+    inside_attempt = bootstrap_seed("a", "b|c", "d")
+
+    assert inside_spec == 1161938308464241630
+    assert inside_attempt == 17225293246125214731
+    assert inside_spec != inside_attempt  # unescaped, both are the string a|b|c|d
+
+
+def test_a_backslash_is_escaped_so_it_cannot_pose_as_an_escaped_pipe() -> None:
+    """Escaping the pipe alone leaves ("", backslash, "|") and ("", "|" + backslash, "") both
+    as ``|\\|\\|``. Doubling backslashes first keeps them apart."""
+
+    backslash = "\\"
+    first = bootstrap_seed("", backslash, "|")
+    second = bootstrap_seed("", "|" + backslash, "")
+
+    assert first == 17282075575358598405  # literals computed outside with hashlib
+    assert second == 10243548752087658444
+    assert bootstrap_seed("a" + backslash, "b", "d") == 9104952693066099549
+    assert bootstrap_seed("a|b", "", "d") == 880385702445715750
 
 
 def test_the_policy_version_is_pinned() -> None:

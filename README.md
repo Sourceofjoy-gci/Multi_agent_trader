@@ -1831,26 +1831,31 @@ remains the only numerical dependency; the normal CDF is `math.erf` and its inve
 
 - **`Measurement`** (`research/validation/measurement.py`). Every statistic is either a
   finite `value` or an `undefined_reason`, exactly one of the two, plus the evidence
-  digests it was derived from and `promotion_grade` (true only for a mark-to-market
-  series). `NaN` and `inf` are refused at construction, and a statistic that cannot be
+  digests it was derived from and `basis_is_mark_to_market` (the `ReturnSeries`
+  property `promotion_grade`: true only for a mark-to-market series; the field is named
+  for the fact so that no emitted key carries a decision word). `NaN` and `inf` are refused at construction, and a statistic that cannot be
   computed is returned as undefined with its reason, never as a default.
 - **PSR** (`psr.py`): `Phi(sqrt(n - 1) * (sr_d - benchmark) / sqrt(variance_term))`,
   with the raw central-moment skewness and kurtosis of umbrella 7.4.
-- **DSR** (`psr.py`): the same statistic deflated by `E[max Z]` for `N` trials, where
-  `N` is the larger of the selection-lottery and effective-specification counters
-  (never the audit count). The result also records both counters and the digest of the
-  chain head they were read at.
+- **DSR** (`psr.py`): the same statistic deflated by a benchmark `SR0 = E[max Z] * spread`
+  for `N` trials, where `N` is the larger of the selection-lottery and
+  effective-specification counters (never the audit count). The result also records
+  both counters, the digest of the chain head they were read at, and which dispersion
+  set the benchmark (R-5).
 - **PBO** (`pbo.py`): over every result-producing candidate and the CPCV splits.
   Candidates with no sealed baseline are listed as excluded and never ranked. One
   candidate, a candidate with no in-sample or no out-of-sample trade in a split, or a
   primary metric other than `net_expectancy` makes it undefined.
 - **Stationary bootstrap** (`bootstrap.py`): Politis-Romano over `numpy`'s
   `Generator(PCG64)`, seeded from the first 8 bytes of
-  `sha256("spec_sha256|attempt_id|policy_version")` with policy version `8c-sb-1`. The
+  `sha256("spec_sha256|attempt_id|policy_version")` with policy version `8c-sb-1`; each
+  part is escaped (a backslash is doubled, then a pipe is prefixed with a backslash)
+  before joining, so a free-string attempt id containing either character cannot make
+  two different triples hash alike, and ids with neither character keep their seeds. The
   report states the seed, block length, replicates, the mean of the replicate means and
   the 5th and 95th percentiles; `bootstrap_lower_bound` is the 5th.
 
-### Four resolutions of the design, and why
+### Five resolutions of the design, and why
 
 - **R-1 (PBO direction).** The umbrella's three sentences about ranking cannot all hold
   with best-first ranks. Out-of-sample ranks are taken **ascending (1 = worst)** and
@@ -1863,9 +1868,18 @@ remains the only numerical dependency; the normal CDF is `math.erf` and its inve
   `mean / std(ddof=1)`, because the formula's `n` counts days. Annualising it inside `z`
   would scale `z` by about 19 and read ~1 for almost any series. The annualised figure
   `sr_d * sqrt(365)` is reported separately as the diagnostic `sharpe_annualised`.
-- **R-5 (DSR benchmark).** The benchmark is `E[max Z]` scaled by the estimator's own
-  standard error: `z = sqrt(n - 1) * sr_d / sqrt(variance_term) - E[max Z]`. That needs
-  no cross-sectional Sharpe variance (one candidate has none) and equals PSR at `N = 1`.
+- **R-5 (DSR benchmark).** The benchmark is `SR0 = E[max Z] * max(SE, cross-section)`:
+  the estimator's own standard error `SE = sqrt(variance_term / (n - 1))`, or, when the
+  caller supplies at least two candidate per-day Sharpes, their sample standard deviation
+  (`ddof=1`) if that is larger; `z = sqrt(n - 1) * (sr_d - SR0) / sqrt(variance_term)`.
+  With the standard error alone this is `z = sqrt(n - 1) * sr_d / sqrt(variance_term) -
+  E[max Z]`. It equals PSR at `N = 1`, and is at least as strict as either dispersion
+  alone. The result records both numbers and which one was used.
+- **R-7 (expected maximum).** The umbrella's `alpha = 1/N` weights are not the published
+  Bailey-Lopez de Prado constant. `E[max Z]` uses the Euler-Mascheroni constant
+  `0.5772156649015329` as the weight of the second quantile. For `N >= 2` that is larger
+  (`N = 2`: 0.520 against 0.450; `N = 10`: 1.575 against 1.332), so DSR is stricter. This
+  is a defect in the umbrella text, resolved in the stricter direction.
 - **R-6 (bootstrap percentiles).** The 5th percentile is the `lower` and the 95th the
   `higher` neighbouring replicate mean, conservative and always an actual replicate.
 
@@ -1878,11 +1892,21 @@ remains the only numerical dependency; the normal CDF is `math.erf` and its inve
   undefined with that reason rather than computed as if the days were independent.
 - **`N` is chain-global.** It counts every candidate in the chain, not one strategy
   family: conservative, and fail-closed.
-- **In-sample ties are exact float equality,** and a variance term that is not positive
-  makes PSR and DSR undefined (it cannot arise from data under the per-day Sharpe except
-  by rounding, and is covered by construction).
+- **PSR and DSR assume serially independent daily returns.** They do not correct for
+  autocorrelation. The bootstrap handles dependence through its blocks; PSR and DSR do
+  not, so a strongly autocorrelated series is overstated by them.
+- **Tied or identical candidates give PBO 1.0, and that is uninformative, not evidence
+  of overfitting.** With every candidate tied the in-sample best is the whole set, its
+  `lambda` is 1/2, and `lambda <= 1/2` counts as overfit: fail-closed, because nothing
+  can then be said about selection.
+- **`oos_lambda` is `(rank - 1) / (N - 1)`, not the paper's `rank / (N + 1)`.** The
+  decision is equivalent; the numbers are not comparable with the paper's.
+- **In-sample ties are exact float equality.** A variance term that is not positive
+  makes PSR and DSR undefined. With population moments it is non-negative in the limit
+  and with `ddof=1` Sharpe it is practically unreachable from data (it needs a two-point
+  sample tuned to rounding); the branch is real and is tested with substituted moments.
 - **The bootstrap refuses malformed input** (fewer than two observations, no
-  replicate, a non-positive constant, a `|` inside a seed input, a replicate mean that
+  replicate, a non-positive constant, a replicate mean that
   overflows) with exit 20 rather than reporting an undefined measurement, because none of
   them can arise from a validated series and the protocol's own fields.
 

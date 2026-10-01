@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from trading_house.core.errors import StatisticalInputError
-from trading_house.research.validation.pbo import PRIMARY_METRIC, PboResult, pbo
+from trading_house.research.validation.pbo import PRIMARY_METRIC, PboResult, PboSplit, pbo
 from trading_house.research.validation.series import TradeSample
 from trading_house.research.validation.splits import CpcvFold, CpcvSplit, cpcv_splits
 
@@ -311,3 +311,18 @@ def test_the_result_never_holds_a_non_finite_float() -> None:
     for s in result.splits:
         assert 0.0 <= s.oos_lambda <= 1.0
     assert np.isfinite(result.pbo.value)  # type: ignore[arg-type]
+
+
+def test_a_split_whose_overfit_flag_contradicts_its_lambda_is_refused() -> None:
+    def split(lam: float, overfit: bool) -> PboSplit:
+        return PboSplit(index=0, is_best=("A",), oos_lambda=lam, overfit=overfit)
+
+    assert split(0.5, True).overfit is True  # the boundary is overfit
+    assert split(0.0, True).overfit is True
+    assert split(0.75, False).overfit is False
+    with pytest.raises(ValueError, match="exactly lambda <= 1/2"):
+        split(0.5, False)
+    with pytest.raises(ValueError, match="exactly lambda <= 1/2"):
+        split(0.9, True)
+    with pytest.raises(ValueError, match="exactly lambda <= 1/2"):
+        split(0.1, False)

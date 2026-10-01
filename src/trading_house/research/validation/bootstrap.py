@@ -33,12 +33,16 @@ POLICY_VERSION = "8c-sb-1"
 
 
 def bootstrap_seed(spec_sha256: str, attempt_id: str, policy_version: str) -> int:
-    """First 8 bytes, big-endian, of ``sha256("spec|attempt|policy")``; never ``hash()``."""
+    """First 8 bytes, big-endian, of ``sha256("spec|attempt|policy")``; never ``hash()``.
+
+    Each part is escaped before joining (a backslash becomes two, then a pipe becomes
+    backslash-pipe), so no two different triples give one string. A part with neither
+    character is unchanged, so the seeds of ordinary ids are as they were.
+    """
 
     parts = (spec_sha256, attempt_id, policy_version)
-    if any("|" in part for part in parts):
-        raise refusal("a seed input may not contain the | separator")
-    digest = hashlib.sha256("|".join(parts).encode()).digest()
+    escaped = (part.replace("\\", "\\\\").replace("|", "\\|") for part in parts)
+    digest = hashlib.sha256("|".join(escaped).encode()).digest()
     return int.from_bytes(digest[:8], "big")
 
 

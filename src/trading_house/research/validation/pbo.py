@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date
+from typing import Self
 
-from pydantic import NonNegativeInt
+from pydantic import NonNegativeInt, model_validator
 
 from trading_house.core.values import CanonicalModel, NonEmptyStr, Probability
 from trading_house.research.validation.measurement import Measurement
@@ -35,8 +36,17 @@ class PboSplit(CanonicalModel):
     is_best: tuple[NonEmptyStr, ...]
     """The candidate ids tied for the best in-sample metric, sorted."""
     oos_lambda: Probability
+    """``(rank - 1) / (N - 1)`` with ascending average ranks (R-1), the mean over the tied
+    in-sample best. NOT the Bailey et al. ``rank / (N + 1)``: the decision is equivalent,
+    but the numbers are not comparable with the paper's."""
     overfit: bool
     """``lambda <= 1/2``, i.e. ``logit <= 0``."""
+
+    @model_validator(mode="after")
+    def overfit_agrees_with_lambda(self) -> Self:
+        if self.overfit != (self.oos_lambda <= 0.5):
+            raise ValueError("overfit must be exactly lambda <= 1/2")
+        return self
 
 
 class PboResult(CanonicalModel):

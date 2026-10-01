@@ -6,9 +6,10 @@ to check the literals; it was not derived by calling the code under test.
 
 ```python
 import math
-from statistics import NormalDist
+from statistics import NormalDist, stdev
 
 N01 = NormalDist()
+GAMMA = 0.5772156649015329  # Euler-Mascheroni
 
 
 def series(n, drift, scale):
@@ -34,7 +35,14 @@ def stats(x):
     return n, mean, std, sr, skew, kurt, vt
 
 
-def emz(n):
+def emz(n):                               # R-7: Bailey-Lopez de Prado weights
+    if n == 1:
+        return 0.0
+    return ((1 - GAMMA) * N01.inv_cdf(1 - 1 / n)
+            + GAMMA * N01.inv_cdf(1 - 1 / (n * math.e)))
+
+
+def emz_umbrella(n):                      # the umbrella's alpha = 1/N weights
     if n == 1:
         return 0.0
     a = 1 / n
@@ -46,9 +54,12 @@ def psr(x, bench=0.0):
     return N01.cdf(math.sqrt(n - 1) * (sr - bench) / math.sqrt(vt))
 
 
-def dsr(x, trials):       # R-5: E[max Z] subtracted on the standardised scale
+def dsr(x, trials, sharpes=None):         # R-5: SR0 = E[max Z] * max(SE, cross-section)
     n, mean, std, sr, skew, kurt, vt = stats(x)
-    return N01.cdf(math.sqrt(n - 1) * sr / math.sqrt(vt) - emz(trials))
+    se = math.sqrt(vt / (n - 1))
+    cs = stdev(sharpes) if sharpes is not None and len(sharpes) >= 2 else None
+    spread = se if cs is None else max(se, cs)
+    return N01.cdf(math.sqrt(n - 1) * (sr - emz(trials) * spread) / math.sqrt(vt))
 
 
 CASES = (("A", series(500, 0.0004, 0.004)),
@@ -73,6 +84,8 @@ from trading_house.core.errors import StatisticalInputError
 from trading_house.research.trial_ledger import ReturnSeriesBasis, TrialCounters
 from trading_house.research.validation.moments import Moments
 from trading_house.research.validation.psr import (
+    EULER_MASCHERONI,
+    DsrResult,
     dsr,
     expected_max_z,
     phi,
@@ -295,11 +308,12 @@ def test_the_scale_is_the_root_of_n_minus_one_over_the_root_of_the_variance_term
     ("trials", "expected"),
     [
         (1, 0.0),
-        (2, 0.45022629831889516),
-        (3, 0.6744705091678826),
-        (10, 1.3323205854483036),
-        (100, 2.3298864997501014),
-        (1000, 3.090517969252707),
+        (2, 0.5197553442805939),
+        (3, 0.8528044961506948),
+        (10, 1.57459830134575),
+        (100, 2.5306028932016846),
+        (1000, 3.255121513652723),
+        (10**6, 4.867860037846844),
     ],
 )
 def test_expected_max_z_matches_the_independent_reference(trials: int, expected: float) -> None:
@@ -320,15 +334,15 @@ def test_expected_max_z_is_undefined_outside_its_domain(trials: int) -> None:
 @pytest.mark.parametrize(
     ("series", "trials", "expected"),
     [
-        (A, 2, 0.9681610347106413),
-        (A, 10, 0.834557758710663),
-        (A, 100, 0.4899349359339036),
-        (C, 2, 0.39247397034819487),
-        (C, 10, 0.12405113860728795),
-        (C, 100, 0.0156775431542312),
-        (D, 2, 0.756925447372904),
-        (D, 10, 0.426360579280324),
-        (D, 100, 0.11836227815567679),
+        (A, 2, 0.9628611579983628),
+        (A, 10, 0.7673220674487647),
+        (A, 100, 0.41062075925406133),
+        (C, 2, 0.3660227545289373),
+        (C, 10, 0.08116938666718404),
+        (C, 100, 0.009304974334485738),
+        (D, 2, 0.7346434034620353),
+        (D, 10, 0.3343527640908007),
+        (D, 100, 0.08318996593453903),
     ],
 )
 def test_dsr_matches_the_independent_reference(
@@ -350,7 +364,7 @@ def test_dsr_strictly_decreases_as_the_trial_count_grows(series: ReturnSeries) -
 
 
 def test_dsr_divides_by_the_larger_of_the_two_counters_whichever_it_is() -> None:
-    reference = 0.834557758710663  # series A at N = 10
+    reference = 0.7673220674487647  # series A at N = 10
 
     more_lotteries = dsr(
         A, trials=_counters(10, 3, audit=99), horizon_days=1, chain_head_sha256=HEAD
@@ -363,7 +377,7 @@ def test_dsr_divides_by_the_larger_of_the_two_counters_whichever_it_is() -> None
     for result in (more_lotteries, more_specifications, equal):
         assert result.trials == 10
         assert _value(result.dsr) == pytest.approx(reference, rel=1e-8)
-        assert result.expected_max_z == pytest.approx(1.3323205854483036, rel=1e-11)
+        assert result.expected_max_z == pytest.approx(1.57459830134575, rel=1e-11)
     # The audit count is a governance diagnostic and never the denominator.
     assert (more_lotteries.selection_lotteries, more_lotteries.effective_specifications) == (10, 3)
     assert (
@@ -406,3 +420,157 @@ def test_dsr_with_an_unrepresentable_trial_count_is_undefined() -> None:
 
     assert result.dsr.value is None
     assert result.expected_max_z is None
+
+
+# --- R-7: the published expected-maximum weights ---------------------------------------
+
+
+@pytest.mark.parametrize("trials", [2, 3, 10, 100, 10**6])
+def test_r7_the_published_weights_are_never_below_the_umbrellas_one_over_n(trials: int) -> None:
+    """The umbrella's alpha = 1/N weights, written out here as the comparison."""
+
+    from statistics import NormalDist
+
+    normal = NormalDist()
+    alpha = 1 / trials
+    umbrella = (1 - alpha) * normal.inv_cdf(1 - 1 / trials) + alpha * normal.inv_cdf(
+        1 - 1 / (trials * math.e)
+    )
+
+    published = expected_max_z(trials)
+
+    assert published is not None
+    assert published > umbrella
+    # the gap is (1 - 2 alpha)-ish of the difference of the two quantiles: at N = 2, 0.520 v 0.450
+    assert published - umbrella > 0.05
+
+
+def test_r7_the_weight_is_the_euler_mascheroni_constant() -> None:
+    assert EULER_MASCHERONI == 0.5772156649015329
+
+
+# --- R-5 strengthened: the cross-sectional spread ---------------------------------------
+
+
+def _cross(sharpes: list[float], trials: int = 10, series: ReturnSeries = A) -> DsrResult:
+    return dsr(
+        series,
+        trials=_counters(trials, trials),
+        horizon_days=1,
+        chain_head_sha256=HEAD,
+        candidate_sharpes=sharpes,
+    )
+
+
+def test_a_wider_cross_section_than_the_standard_error_sets_the_benchmark() -> None:
+    result = _cross([0.05, 0.25])
+
+    assert result.dispersion_used == "cross_section"
+    assert result.cross_section == pytest.approx(0.1414213562373095, rel=1e-12)  # ddof=1
+    assert result.standard_error == pytest.approx(0.04484970993700909, rel=1e-9)
+    assert _value(result.dsr) == pytest.approx(0.003902246307251278, rel=1e-6)
+
+
+def test_a_narrower_cross_section_leaves_the_standard_error_in_charge() -> None:
+    result = _cross([0.10, 0.11])
+
+    assert result.dispersion_used == "standard_error"
+    assert result.cross_section == pytest.approx(0.007071067811865472, rel=1e-12)
+    assert _value(result.dsr) == pytest.approx(0.7673220674487647, rel=1e-8)  # the SE-only value
+
+
+def test_three_candidate_sharpes_use_the_sample_standard_deviation() -> None:
+    result = _cross([0.05, 0.20, 0.11])
+
+    assert result.cross_section == pytest.approx(0.0754983443527075, rel=1e-12)
+    assert _value(result.dsr) == pytest.approx(0.36468407888585863, rel=1e-6)
+
+
+def test_the_cross_section_applies_to_a_skewed_series_too() -> None:
+    result = _cross([0.05, 0.25], series=D)
+
+    assert result.dispersion_used == "cross_section"
+    assert _value(result.dsr) == pytest.approx(0.006135513966216866, rel=1e-5)
+
+
+def test_fewer_than_two_candidate_sharpes_give_no_cross_section() -> None:
+    one = _cross([0.9])
+    none = dsr(A, trials=_counters(10, 10), horizon_days=1, chain_head_sha256=HEAD)
+
+    for result in (one, none):
+        assert result.cross_section is None
+        assert result.dispersion_used == "standard_error"
+        assert _value(result.dsr) == pytest.approx(0.7673220674487647, rel=1e-8)
+
+
+def test_the_cross_section_never_changes_dsr_at_one_trial() -> None:
+    result = _cross([0.05, 0.25], trials=1)
+
+    assert _value(result.dsr) == pytest.approx(_value(psr(A)), rel=1e-14)
+
+
+def test_a_non_finite_candidate_sharpe_is_refused() -> None:
+    with pytest.raises(StatisticalInputError) as error:
+        _cross([0.1, math.nan])
+
+    assert "must be finite" in str(error.value.__cause__)
+
+
+def test_the_dispersion_is_recorded_even_when_the_statistic_is_undefined() -> None:
+    result = dsr(
+        _series([0.001] * 40),
+        trials=_counters(3, 3),
+        horizon_days=1,
+        chain_head_sha256=HEAD,
+        candidate_sharpes=[0.1, 0.3],
+    )
+
+    assert result.dsr.value is None
+    assert result.cross_section == pytest.approx(0.1414213562373095, rel=1e-12)
+    assert (result.standard_error, result.dispersion_used) == (None, None)
+
+
+# --- the DsrResult is consistent or refused -----------------------------------------------
+
+
+def _rebuild(result: DsrResult, **changes: object) -> DsrResult:
+    fields = {name: getattr(result, name) for name in DsrResult.model_fields}
+    return DsrResult(**(fields | changes))
+
+
+def test_a_dsr_result_whose_trials_is_not_the_larger_counter_is_refused() -> None:
+    good = dsr(A, trials=_counters(10, 3), horizon_days=1, chain_head_sha256=HEAD)
+
+    assert _rebuild(good).trials == 10
+    with pytest.raises(ValueError, match="larger of the two counters"):
+        _rebuild(good, trials=3)
+    with pytest.raises(ValueError, match="larger of the two counters"):
+        _rebuild(good, trials=11)
+
+
+def test_a_dsr_result_must_name_a_dispersion_exactly_when_it_has_a_standard_error() -> None:
+    good = dsr(A, trials=_counters(3, 3), horizon_days=1, chain_head_sha256=HEAD)
+
+    with pytest.raises(ValueError, match="exactly when a standard error"):
+        _rebuild(good, dispersion_used=None)
+    with pytest.raises(ValueError, match="exactly when a standard error"):
+        _rebuild(good, standard_error=None)
+
+
+def test_a_dsr_result_cannot_claim_the_wrong_dispersion() -> None:
+    wide = _cross([0.05, 0.25])
+    narrow = _cross([0.10, 0.11])
+
+    assert _rebuild(wide).dispersion_used == "cross_section"
+    with pytest.raises(ValueError, match="unless the cross-section exceeds it"):
+        _rebuild(wide, dispersion_used="standard_error")
+    with pytest.raises(ValueError, match="only when it exceeds"):
+        _rebuild(narrow, dispersion_used="cross_section")
+    with pytest.raises(ValueError, match="only when it exceeds"):
+        _rebuild(wide, cross_section=None)
+    # a tie goes to the standard error: equal spreads are not "exceeds"
+    with pytest.raises(ValueError, match="only when it exceeds"):
+        _rebuild(wide, cross_section=wide.standard_error)
+    assert _rebuild(narrow, cross_section=narrow.standard_error).dispersion_used == (
+        "standard_error"
+    )
