@@ -1814,6 +1814,78 @@ side uses its length), because a trade that crosses `s` necessarily reaches the 
   names the trial; `scenario-report` is where cost, window and specification
   fidelity are checked.
 
+## Phase 8C2 - PSR, DSR, PBO and the stationary bootstrap
+
+8C2 is the second slice of the statistical-validation phase (design:
+`docs/superpowers/specs/2026-10-01-phase-8c-statistical-validation-design.md`). It
+adds four **measurements** over the 8C1 input and splits: the probabilistic and
+deflated Sharpe ratios, the probability of backtest overfitting and a stationary
+bootstrap of the mean daily return. It adds **no gate, no verdict and no threshold
+decision**, no migration, no event type and **no command**: 8C3's `validate` assembles
+every measurement into one document, so nothing is printed here, and the tests (a unit
+suite and an acceptance run over a real sealed bundle) are the interface. NumPy
+remains the only numerical dependency; the normal CDF is `math.erf` and its inverse is
+`statistics.NormalDist`.
+
+### What is measured
+
+- **`Measurement`** (`research/validation/measurement.py`). Every statistic is either a
+  finite `value` or an `undefined_reason`, exactly one of the two, plus the evidence
+  digests it was derived from and `promotion_grade` (true only for a mark-to-market
+  series). `NaN` and `inf` are refused at construction, and a statistic that cannot be
+  computed is returned as undefined with its reason, never as a default.
+- **PSR** (`psr.py`): `Phi(sqrt(n - 1) * (sr_d - benchmark) / sqrt(variance_term))`,
+  with the raw central-moment skewness and kurtosis of umbrella 7.4.
+- **DSR** (`psr.py`): the same statistic deflated by `E[max Z]` for `N` trials, where
+  `N` is the larger of the selection-lottery and effective-specification counters
+  (never the audit count). The result also records both counters and the digest of the
+  chain head they were read at.
+- **PBO** (`pbo.py`): over every result-producing candidate and the CPCV splits.
+  Candidates with no sealed baseline are listed as excluded and never ranked. One
+  candidate, a candidate with no in-sample or no out-of-sample trade in a split, or a
+  primary metric other than `net_expectancy` makes it undefined.
+- **Stationary bootstrap** (`bootstrap.py`): Politis-Romano over `numpy`'s
+  `Generator(PCG64)`, seeded from the first 8 bytes of
+  `sha256("spec_sha256|attempt_id|policy_version")` with policy version `8c-sb-1`. The
+  report states the seed, block length, replicates, the mean of the replicate means and
+  the 5th and 95th percentiles; `bootstrap_lower_bound` is the 5th.
+
+### Four resolutions of the design, and why
+
+- **R-1 (PBO direction).** The umbrella's three sentences about ranking cannot all hold
+  with best-first ranks. Out-of-sample ranks are taken **ascending (1 = worst)** and
+  `lambda = (rank - 1) / (N - 1)`, so an in-sample best that is out-of-sample best has
+  `lambda = 1` and is *not* overfit, and one that is out-of-sample worst has
+  `lambda = 0` and is. A split is overfit when `lambda <= 1/2` (`logit <= 0`), decided
+  on integers so no logarithm and no infinity is evaluated. Ties take the average rank;
+  the in-sample best is the whole tied set and its `lambda` their mean.
+- **R-2 (per-day Sharpe).** The standardised statistic uses the **per-day** Sharpe
+  `mean / std(ddof=1)`, because the formula's `n` counts days. Annualising it inside `z`
+  would scale `z` by about 19 and read ~1 for almost any series. The annualised figure
+  `sr_d * sqrt(365)` is reported separately as the diagnostic `sharpe_annualised`.
+- **R-5 (DSR benchmark).** The benchmark is `E[max Z]` scaled by the estimator's own
+  standard error: `z = sqrt(n - 1) * sr_d / sqrt(variance_term) - E[max Z]`. That needs
+  no cross-sectional Sharpe variance (one candidate has none) and equals PSR at `N = 1`.
+- **R-6 (bootstrap percentiles).** The 5th percentile is the `lower` and the 95th the
+  `higher` neighbouring replicate mean, conservative and always an actual replicate.
+
+### What 8C2 does not establish
+
+- **No gate and no verdict.** No value is compared with 0.95, 0.50 or zero here, and
+  no key says whether a candidate passed. That is 8D.
+- **DSR's horizon sentence is honoured only for `horizon_days == 1`.** For any other
+  horizon the daily returns overlap, no non-overlap handling is implemented, and DSR is
+  undefined with that reason rather than computed as if the days were independent.
+- **`N` is chain-global.** It counts every candidate in the chain, not one strategy
+  family: conservative, and fail-closed.
+- **In-sample ties are exact float equality,** and a variance term that is not positive
+  makes PSR and DSR undefined (it cannot arise from data under the per-day Sharpe except
+  by rounding, and is covered by construction).
+- **The bootstrap refuses malformed input** (fewer than two observations, no
+  replicate, a non-positive constant, a `|` inside a seed input, a replicate mean that
+  overflows) with exit 20 rather than reporting an undefined measurement, because none of
+  them can arise from a validated series and the protocol's own fields.
+
 ## Phase 8A.1 - ledger-level specification vouching
 
 `research trial start` and every other writer reach the ledger through one append
