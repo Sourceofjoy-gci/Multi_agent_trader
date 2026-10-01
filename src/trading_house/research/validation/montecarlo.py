@@ -6,8 +6,11 @@ same per-step index stream as ``bootstrap.py``) to the series' own length, the h
 Per replicate it tracks the running peak and the largest drawdown streaming over the
 time steps, so memory is ``O(replicates)`` and never ``O(replicates x n)``.
 
-``p_halt`` is the fraction of replicates whose maximum drawdown is **at or beyond**
-``MAX_DRAWDOWN`` (``>=``). ``p_loss`` is the fraction whose FINAL equity is **below**
+``p_halt`` is the fraction of replicates whose maximum drawdown is **at the limit or
+beyond** it: ``>= MAX_DRAWDOWN - DRAWDOWN_TOLERANCE``, the tolerance absorbing float rounding
+(an exact 10% fall from a flat start measures 0.09999999999999998). The future strict
+``<`` rule reads ``< MAX_DRAWDOWN - DRAWDOWN_TOLERANCE``, so the simulation's ``>=`` and the
+gate's ``<`` are complements. ``p_loss`` is the fraction whose FINAL equity is **below**
 1.0, strictly: ending exactly where it began is not a loss. Neither is compared with
 anything here.
 
@@ -27,7 +30,11 @@ from pydantic import NonNegativeInt, PositiveInt
 from trading_house.core.values import CanonicalModel, FiniteFloat, NonEmptyStr
 from trading_house.research.validation.bootstrap import _index_stream, bootstrap_seed
 from trading_house.research.validation.measurement import Measurement
-from trading_house.research.validation.policy import MAX_DRAWDOWN, MC_POLICY_VERSION
+from trading_house.research.validation.policy import (
+    DRAWDOWN_TOLERANCE,
+    MAX_DRAWDOWN,
+    MC_POLICY_VERSION,
+)
 from trading_house.research.validation.series import ReturnSeries
 
 
@@ -73,9 +80,9 @@ def _simulate(
 def _fractions(
     worst: npt.NDArray[np.float64], final: npt.NDArray[np.float64]
 ) -> tuple[float, float]:
-    """``(p_halt, p_loss)``: drawdown at or beyond the level, and final equity below 1.0."""
+    """``(p_halt, p_loss)``: drawdown at the limit (within tolerance) or beyond, and final < 1.0."""
 
-    return float((worst >= MAX_DRAWDOWN).mean()), float((final < 1.0).mean())
+    return float((worst >= MAX_DRAWDOWN - DRAWDOWN_TOLERANCE).mean()), float((final < 1.0).mean())
 
 
 def drawdown_loss_probabilities(

@@ -44,7 +44,7 @@ from tests.acceptance.test_phase8c1 import (  # noqa: F401
     long_seeded,
 )
 from tests.integration.research.conftest import research_env  # noqa: F401
-from tests.integration.research.test_backtest_evidence import Fixture, _record
+from tests.integration.research.test_backtest_evidence import Fixture, _record, _run, _write
 from tests.integration.research.test_compounding import _compounding, _files, _rows
 from tests.integration.research.test_scenarios import (
     OTHER_TRIAL_ID,
@@ -54,9 +54,11 @@ from tests.integration.research.test_scenarios import (
     _register,
     _scenarios,
 )
-from tests.integration.research.test_trial_cli import _ledger, _store
+from tests.integration.research.test_trial_cli import _ledger, _start, _store
 from tests.unit.ops.test_scenarios import _NO_VERDICT
 from trading_house import cli
+from trading_house.core.errors import ScenarioEvidenceError
+from trading_house.ops.validate import read_validation_inputs, statistical_evidence
 from trading_house.research.canonical import canonical_sha256
 
 runner = CliRunner()
@@ -181,6 +183,12 @@ def test_validate_agrees_with_an_independent_reading_of_the_sealed_documents(
         # identical paths: the 5th percentile is the aggregate expectancy of the baseline's trades
         assert payload["cpcv_p5"]["p5"]["value"] == pytest.approx(_mean_net(base), abs=1e-9)
     assert payload["cpcv_p5"]["quantile"] == 0.05
+    assert payload["cpcv_p5"]["closed_trades"] == len(base.result.trades)
+    assert payload["coverage"]["closed_trades"] == len(base.result.trades)
+    assert payload["cpcv_p5"]["all_trades_kept"] is not payload["cpcv_p5"]["paths_differ"]
+    assert payload["coverage"]["all_trades_kept"] is payload["cpcv_p5"]["all_trades_kept"]
+    assert payload["dsr"]["cross_section_count"] == 1  # one candidate, so no cross-section
+    assert payload["dsr"]["cross_section"] is None
     assert payload["coverage"]["declared_labels"] == ["london", "new_york"]
 
     # the registered strategy's horizon is read without a run: 32,400 s is one day
@@ -310,6 +318,125 @@ def test_a_run_under_thirty_days_is_refused_as_a_statistical_input(
     assert (_rows(research_ledger_dsn), _files(research_env)) == (rows, files)
 
 
+def test_a_baseline_that_is_not_the_protocols_candidate_is_refused_and_nothing_is_written(
+    long_seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    """Sealed with another candidate's specification digest: ``validate`` runs the same
+    faithfulness checks the sibling reports run, refuses with the same exit code, writes
+    nothing, and says which clause."""
+
+    protocol = _protocol(long_seeded)
+    _register(tmp_path, long_seeded)
+    honest = canonical_sha256(protocol.candidates[0])
+    drifted = canonical_sha256(protocol.candidates[1])
+    assert _start(trial_id=TRIAL_ID, attempt_id="grid-1", spec_sha256=honest).exit_code == 0
+    _record(
+        _write(
+            tmp_path / "drifted.json",
+            _run(
+                long_seeded,
+                marked=True,
+                trial_id=TRIAL_ID,
+                attempt_id="grid-1",
+                **{"--stress-multiplier": "1", "--spec-sha256": drifted},
+            ),
+        ),
+        attempt_id="grid-1",
+    )
+    rows, files = _rows(research_ledger_dsn), _files(research_env)
+
+    result = _validate()
+
+    _assert_refused(result, cli.ExitCode.SCENARIO_EVIDENCE)
+    assert (_rows(research_ledger_dsn), _files(research_env)) == (rows, files)
+    with pytest.raises(ScenarioEvidenceError) as refusal:
+        statistical_evidence(
+            read_validation_inputs(TRIAL_ID, _ledger(research_ledger_dsn), _store(research_env))
+        )
+    assert "declares spec" in str(refusal.value.__cause__)
+
+
+def test_a_bundle_run_on_an_opened_holdout_changes_nothing_for_any_read(
+    long_seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    """A second 1.0x bundle, sealed with its holdout OPENED, sits in the trial. Every read
+    that selects bundles ignores it: ``scenario-report``, ``splits``, ``compounding-report``
+    and ``validate`` print what they printed before, and none refuses it as a duplicate."""
+
+    protocol = _protocol(long_seeded)
+    protocol_path = _register(tmp_path, long_seeded)
+    _scenarios(long_seeded, protocol_path)
+    assert _compounding(long_seeded, protocol_path).exit_code == cli.ExitCode.OK
+    reads = (
+        ["scenario-report", "--trial-id", TRIAL_ID],
+        ["splits", "--trial-id", TRIAL_ID],
+        ["compounding-report", "--trial-id", TRIAL_ID],
+        ["validate", "--trial-id", TRIAL_ID],
+    )
+    before = [runner.invoke(cli.app, ["research", "trial", *argv]) for argv in reads]
+    assert [r.exit_code for r in before] == [0, 0, 0, 0]
+
+    document = _foreign_baseline_bundle(
+        long_seeded, canonical_sha256(protocol.candidates[0]), tmp_path
+    )
+    payload = json.loads(document.read_text(encoding="utf-8"))
+    payload["bundle"]["provenance"]["holdout_state"] = "opened"
+    document.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    _record(document, attempt_id="foreign-1.0")
+    assert len(_store(research_env).read(_ledger_digests(research_ledger_dsn)[-1]).daily_returns)
+
+    after = [runner.invoke(cli.app, ["research", "trial", *argv]) for argv in reads]
+
+    assert [r.exit_code for r in after] == [0, 0, 0, 0]
+    assert [r.stdout for r in after[:3]] == [r.stdout for r in before[:3]]
+
+    def without_head(result: Any) -> dict[str, Any]:
+        # the one thing that must move: the chain has one more row, so its head is new
+        document = json.loads(result.stdout)
+        assert document["evidence"].pop("chain_head") != ""
+        document["dsr"].pop("chain_head_sha256")
+        return document
+
+    assert without_head(after[3]) == without_head(before[3])
+    assert (
+        json.loads(after[3].stdout)["evidence"]["chain_head"]
+        != json.loads(before[3].stdout)["evidence"]["chain_head"]
+    )
+
+
+def _ledger_digests(dsn: str) -> list[str]:
+    """The evidence digests the chain names, in chain order."""
+
+    return [
+        record.event_json["payload"]["evidence_sha256"]
+        for record in _ledger(dsn).events()
+        if record.event_type.value == "evidence_sealed"
+    ]
+
+
+def test_the_counters_and_the_head_come_from_one_read_of_the_chain(
+    long_seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    assert ledger.snapshot() == ((), None)
+    with pytest.raises(ScenarioEvidenceError) as empty:
+        read_validation_inputs(TRIAL_ID, ledger, _store(research_env))
+    assert "the chain holds no event" in str(empty.value.__cause__)
+    _flow(long_seeded, tmp_path)
+
+    events, head = ledger.snapshot()
+
+    assert head == ledger.events()[-1].event_hash
+    assert events == ledger.replay()
+    assert len(events) == len(ledger.events())
+    assert (
+        statistical_evidence(
+            read_validation_inputs(TRIAL_ID, ledger, _store(research_env))
+        ).evidence.chain_head
+        == head
+    )
+
+
 def test_validate_takes_no_option_the_protocol_owns() -> None:
     result = runner.invoke(
         cli.app, ["research", "trial", "validate", "--trial-id", "t", "--protocol", "p.json"]
@@ -379,17 +506,31 @@ def test_the_readme_states_what_8c3_measures_and_what_it_resolved() -> None:
         "`MAX_DRAWDOWN = 0.10`",
         '`MC_POLICY_VERSION = "8c-mc-1"`',
         "open-position marks included and never closed trades",
-        "A bundle with no equity series has an undefined drawdown, never one computed from trades.",
-        "`p_halt` is the fraction of replicates whose maximum drawdown is at or beyond "
-        "`MAX_DRAWDOWN` (`>=`)",
+        "has an undefined drawdown with the reason, never one computed from trades",
+        "`>= MAX_DRAWDOWN - DRAWDOWN_TOLERANCE`",
+        "`DRAWDOWN_TOLERANCE = 1e-12`",
+        "the future gate passes only when the drawdown is `< MAX_DRAWDOWN - DRAWDOWN_TOLERANCE`",
+        "an exact 10% fall from a flat start measures 0.09999999999999998",
+        "whose basis is not mark-to-market (`REALIZED_CLOSED_TRADES`), has an undefined drawdown",
         "whose FINAL equity is strictly below 1.0",
         "`ceil(CPCV_P5_QUANTILE * n_paths)`",
-        "Out-of-sample coverage takes the path with the FEWEST kept trades",
+        "Coverage takes the path with the FEWEST kept trades",
+        "That sample is the CPCV-kept sample, not a holdout.",
+        "`closed_trades` (the closed trades of the baseline run) and `all_trades_kept`",
         "**not** a locked out-of-sample one",
         "**The CPCV 5th-percentile measurement is always computed (amended 2026-10-01).**",
         "`paths_differ` is carried beside it as a plain diagnostic",
-        "**Gate 5 therefore reads the aggregate out-of-sample net expectancy when the paths "
-        "are identical, and 8D must say so in its reason.**",
+        "**Gate 5 therefore reads the net expectancy of the full sealed research-window "
+        "sample when the paths are identical, and 8D must say so in its reason.**",
+        "that sample is in-sample on the research window, not out-of-sample evidence",
+        "`cross_section_count` says how many entered",
+        "through the one shared helper `refuse_unfaithful`",
+        "taken from ONE read of the chain",
+        "A bundle sealed after its holdout was OPENED or CONSUMED is a different experiment",
+        "**CPCV path drawdowns are identical by construction**",
+        "**Regimes are recognised, not vouched.**",
+        "**A PBO candidate sealed over other days refuses the whole command** (exit 20)",
+        "the reason says which of the two it was",
         "The registered session momentum strategy declares 32,400 seconds, one day, so its "
         "DSR is defined",
         "one day is never assumed",

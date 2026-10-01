@@ -588,3 +588,38 @@ def test_a_dsr_result_cannot_claim_the_wrong_dispersion() -> None:
     assert _rebuild(narrow, cross_section=narrow.standard_error).dispersion_used == (
         "standard_error"
     )
+
+
+def test_a_dsr_result_counts_the_sharpes_that_entered_its_cross_section() -> None:
+    wide = _cross([0.05, 0.25])
+    one = dsr(A, trials=_counters(3, 3), horizon_days=1, chain_head_sha256=HEAD)
+    three = dsr(
+        A,
+        trials=_counters(3, 3),
+        horizon_days=1,
+        chain_head_sha256=HEAD,
+        candidate_sharpes=[0.05, 0.25, 0.15],
+    )
+
+    assert (one.cross_section, one.cross_section_count) == (None, 0)
+    assert wide.cross_section_count == 2
+    assert three.cross_section_count == 3
+    assert three.cross_section == pytest.approx(0.1)  # std(0.05, 0.25, 0.15), ddof=1
+    with pytest.raises(ValueError, match="exactly when two or more Sharpes entered"):
+        _rebuild(wide, cross_section_count=1)
+    with pytest.raises(ValueError, match="exactly when two or more Sharpes entered"):
+        _rebuild(one, cross_section_count=2)
+
+
+def test_an_unknown_horizon_names_its_reason_when_it_has_one() -> None:
+    result = dsr(
+        A,
+        trials=_counters(3, 3),
+        horizon_days=None,
+        chain_head_sha256=HEAD,
+        horizon_reason="strategy x is not registered",
+    )
+
+    assert result.dsr.undefined_reason == (
+        "the declared holding horizon is not known: strategy x is not registered"
+    )

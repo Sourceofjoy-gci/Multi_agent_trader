@@ -224,9 +224,10 @@ def test_the_drawdown_is_the_deepest_fall_and_not_the_final_one() -> None:
 
 def test_a_fall_of_exactly_ten_percent_is_computed_as_that_and_counted_as_a_halt() -> None:
     """+900% then -10%: 1 -> 10 -> 9, a fall of (10 - 9) / 10 = 0.1, the float 0.1 itself
-    (1/10 rounds to it). +900% then -9%: 10 -> 9.1, a fall of 0.09. The halt level is the
-    signed 0.10 and at or beyond counts: worst falls of 0.1, 0.09 and 0.11 are halts for the
-    first and third only, and final equity of exactly 1.0 is not a loss."""
+    (1/10 rounds to it). +900% then -9%: 10 -> 9.1, a fall of 0.09, no halt. A fall counts as
+    at the limit when it is >= 0.10 - 1e-12 (the tolerance absorbs float rounding), so worst
+    falls of 0.1, 0.09 and 0.11 are halts for the first and third only, and final equity of
+    exactly 1.0 is not a loss."""
 
     natural = [np.array([i]) for i in range(30)]
     exact = np.array([9.0, -0.1] + [0.0] * 28, dtype=np.float64)
@@ -239,6 +240,32 @@ def test_a_fall_of_exactly_ten_percent_is_computed_as_that_and_counted_as_a_halt
     )
     assert p_halt == 0.5  # 0.1 and 0.11 of four
     assert p_loss == 0.5  # 0.5 and 0.9999999 are below 1.0; 1.0 and 1.0000001 are not
+
+
+def test_a_single_minus_ten_percent_step_from_a_flat_start_is_a_halt() -> None:
+    """The float trap: 1 + (-0.1) = 0.9 and (1.0 - 0.9) / 1.0 = 0.09999999999999998, which is
+    BELOW the float 0.1 although the fall is exactly 10%. Without the tolerance this misses
+    the halt (and a strict ``<`` gate would pass a true 10% fall); with it the replicate
+    halts."""
+
+    values = np.array([-0.1] + [0.0] * 29, dtype=np.float64)
+    worst, _ = _simulate(values, [np.array([i]) for i in range(30)], 1)
+
+    assert worst.tolist() == [0.09999999999999998]
+    assert worst[0] < 0.10
+    assert _fractions(worst, np.array([0.9]))[0] == 1.0
+
+
+def test_the_tolerance_is_a_one_part_in_a_trillion_allowance_below_the_limit() -> None:
+    """Worst falls of 0.1 - 5e-13 (inside the allowance) and 0.1 + 1e-12 are halts; 0.1 - 2e-12
+    (outside it) and 0.1 - 1e-6 are not. Mutating the sign (limit + tolerance) drops the first;
+    widening the tolerance admits the third; zeroing it drops the single-step case above."""
+
+    worst = np.array([0.1 - 5e-13, 0.1 + 1e-12, 0.1 - 2e-12, 0.1 - 1e-6])
+
+    p_halt, _ = _fractions(worst, np.ones(4))
+
+    assert p_halt == 0.5  # the first two of four
 
 
 def test_a_replicate_that_ends_exactly_where_it_began_is_not_a_loss() -> None:

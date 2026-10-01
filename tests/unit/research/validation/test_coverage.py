@@ -49,6 +49,7 @@ def _p5(values: list[float], *, differ: bool = True):  # type: ignore[no-untyped
     return cpcv_p5(
         [_one(v) for v in values],
         paths_differ=differ,
+        closed_trades=1,
         evidence_sha256=DIGESTS,
         basis_is_mark_to_market=True,
     )
@@ -138,6 +139,7 @@ def test_a_path_with_no_kept_trade_makes_the_measurement_undefined_and_names_it(
     result = cpcv_p5(
         [_one(1.0), _one(2.0), _sample(), _one(3.0), _one(4.0)],
         paths_differ=True,
+        closed_trades=1,
         evidence_sha256=DIGESTS,
         basis_is_mark_to_market=True,
     )
@@ -160,6 +162,7 @@ def test_the_first_of_several_empty_paths_is_the_one_named() -> None:
     result = cpcv_p5(
         [_one(1.0), _sample(), _one(2.0), _sample(), _one(3.0)],
         paths_differ=True,
+        closed_trades=1,
         evidence_sha256=DIGESTS,
         basis_is_mark_to_market=True,
     )
@@ -168,7 +171,13 @@ def test_the_first_of_several_empty_paths_is_the_one_named() -> None:
 
 
 def test_no_paths_is_undefined() -> None:
-    result = cpcv_p5([], paths_differ=False, evidence_sha256=DIGESTS, basis_is_mark_to_market=True)
+    result = cpcv_p5(
+        [],
+        paths_differ=False,
+        closed_trades=0,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
 
     assert result.p5.value is None
     assert result.p5.undefined_reason == "there are no CPCV paths"
@@ -182,7 +191,11 @@ def test_identical_paths_are_measured_and_say_they_are_identical() -> None:
 
     same = _sample((2.0, "london"), (3.0, "asian"))
     result = cpcv_p5(
-        [same] * 5, paths_differ=False, evidence_sha256=DIGESTS, basis_is_mark_to_market=True
+        [same] * 5,
+        paths_differ=False,
+        closed_trades=2,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
     )
 
     assert result.p5.value == 2.5
@@ -195,6 +208,7 @@ def test_the_result_carries_its_quantile_flag_evidence_and_basis() -> None:
     realized = cpcv_p5(
         [_one(1.0)] * 5,
         paths_differ=False,
+        closed_trades=1,
         evidence_sha256=("x" * 64, "y" * 64),
         basis_is_mark_to_market=False,
     )
@@ -211,6 +225,7 @@ def test_an_undefined_p5_still_carries_evidence_and_basis() -> None:
     result = cpcv_p5(
         [_sample()] * 5,
         paths_differ=True,
+        closed_trades=1,
         evidence_sha256=("x" * 64,),
         basis_is_mark_to_market=False,
     )
@@ -224,7 +239,13 @@ def test_an_undefined_p5_still_carries_evidence_and_basis() -> None:
 
 
 def _coverage(paths: list[TradeSample], labels: tuple[str, ...] = ("london", "asian")):  # type: ignore[no-untyped-def]
-    return oos_coverage(paths, labels, evidence_sha256=DIGESTS, basis_is_mark_to_market=True)
+    return oos_coverage(
+        paths,
+        labels,
+        closed_trades=max((len(p) for p in paths), default=0),
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
 
 
 def _n(count: int, name: str = "london") -> TradeSample:
@@ -317,6 +338,7 @@ def test_coverage_names_its_evidence_and_basis() -> None:
     result = oos_coverage(
         [_n(2)],
         ("london",),
+        closed_trades=2,
         evidence_sha256=("q" * 64,),
         basis_is_mark_to_market=False,
     )
@@ -367,3 +389,75 @@ def test_a_scenario_with_no_trade_or_no_run_is_undefined_with_distinct_reasons()
     assert absent.undefined_reason == "no constant-notional run is sealed at 2.0x"
     assert (empty.name, absent.name) == ("scenario_expectancy_1.5", "scenario_expectancy_2.0")
     assert empty.basis_is_mark_to_market is False
+
+
+# --- how much of the run the measurements hold ----------------------------------------
+
+
+def test_p5_says_how_many_trades_the_run_closed_and_whether_every_path_kept_them_all() -> None:
+    whole = cpcv_p5(
+        [_n(3)] * 5,
+        paths_differ=False,
+        closed_trades=3,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
+    one_dropped = cpcv_p5(
+        [_n(3), _n(3), _n(2), _n(3), _n(3)],
+        paths_differ=True,
+        closed_trades=3,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
+    none = cpcv_p5(
+        [],
+        paths_differ=False,
+        closed_trades=0,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
+
+    assert (whole.closed_trades, whole.all_trades_kept) == (3, True)
+    assert (one_dropped.closed_trades, one_dropped.all_trades_kept) == (3, False)
+    assert none.all_trades_kept is False  # no path kept anything
+
+
+def test_coverage_says_whether_its_sample_is_the_whole_run() -> None:
+    whole = oos_coverage(
+        [_n(3), _n(3)],
+        ("london",),
+        closed_trades=3,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
+    partial = oos_coverage(
+        [_n(3), _n(2)],
+        ("london",),
+        closed_trades=3,
+        evidence_sha256=DIGESTS,
+        basis_is_mark_to_market=True,
+    )
+    none = oos_coverage(
+        [], ("london",), closed_trades=3, evidence_sha256=DIGESTS, basis_is_mark_to_market=True
+    )
+
+    assert (whole.oos_trades.value, whole.closed_trades, whole.all_trades_kept) == (3.0, 3, True)
+    assert (partial.oos_trades.value, partial.closed_trades, partial.all_trades_kept) == (
+        2.0,
+        3,
+        False,
+    )
+    assert (none.closed_trades, none.all_trades_kept) == (3, False)
+
+
+def test_the_documentation_calls_an_identical_path_sample_in_sample_not_out_of_sample() -> None:
+    import inspect
+
+    import trading_house.research.validation.coverage as module
+
+    doc = " ".join((module.__doc__ or "").split())
+    field = " ".join(inspect.getsource(module.CpcvP5Result).split())
+    assert "the full sealed research-window sample" in doc
+    assert "IN-SAMPLE on the research window" in doc
+    assert "in-sample on the research window for a fixed-parameter candidate" in field
+    assert "not out-of-sample evidence" in field

@@ -147,6 +147,9 @@ class DsrResult(CanonicalModel):
     """The estimator's own standard error ``sqrt(variance_term / (n - 1))``, when computable."""
     cross_section: NonNegativeFiniteFloat | None
     """The sample standard deviation of the candidates' per-day Sharpes, when 2+ were given."""
+    cross_section_count: NonNegativeInt
+    """How many candidate Sharpes entered the cross-section (a candidate with no defined
+    Sharpe, such as a constant series, is not counted but is still ranked by PBO)."""
     dispersion_used: Literal["standard_error", "cross_section"] | None
     """Which of the two scaled ``E[max Z]``: the larger; ``None`` when no benchmark was formed."""
 
@@ -167,6 +170,8 @@ class DsrResult(CanonicalModel):
             or (self.cross_section is not None and self.cross_section > self.standard_error)
         ):
             raise ValueError("the standard error is used unless the cross-section exceeds it")
+        if (self.cross_section is not None) != (self.cross_section_count >= 2):
+            raise ValueError("a cross-section exists exactly when two or more Sharpes entered it")
         return self
 
 
@@ -177,6 +182,7 @@ def dsr(
     horizon_days: int | None,
     chain_head_sha256: str,
     candidate_sharpes: Sequence[float] = (),
+    horizon_reason: str | None = None,
 ) -> DsrResult:
     """``Phi(sqrt(n - 1) * (sr_d - SR0) / sqrt(variance_term))``, ``SR0 = E[max Z] * spread``.
 
@@ -201,13 +207,17 @@ def dsr(
             chain_head_sha256=chain_head_sha256,
             standard_error=se,
             cross_section=cross,
+            cross_section_count=len(candidate_sharpes),
             dispersion_used=used,  # type: ignore[arg-type]
         )
 
     if emz is None:
         return result(f"the trial count N is {n}, which has no expected maximum")
     if horizon_days is None:
-        return result("the declared holding horizon is not known, so DSR cannot be formed")
+        return result(
+            "the declared holding horizon is not known"
+            + (f": {horizon_reason}" if horizon_reason else ", so DSR cannot be formed")
+        )
     if horizon_days != 1:
         return result(
             f"horizon {horizon_days} days: multi-day non-overlap handling is not implemented"

@@ -35,6 +35,7 @@ from trading_house.research.evidence import EvidenceBundle
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     EvidenceSealedPayload,
+    HoldoutState,
     LedgerEvent,
     LedgerEventType,
     LedgerRecord,
@@ -275,6 +276,18 @@ def refuse_edited_protocol(registered: TrialProtocol, supplied: TrialProtocol) -
         )
 
 
+def is_research_run(bundle: EvidenceBundle) -> bool:
+    """Whether a bundle is a run on the research window.
+
+    A bundle whose holdout was OPENED or CONSUMED when it was sealed ran on the
+    locked data: it is a different experiment, like a compounding rerun, and the
+    constant-notional baseline, the cost grid and every statistic over them must
+    not see it. Every selection of a trial's bundles applies this one predicate.
+    """
+
+    return bundle.provenance.holdout_state not in {HoldoutState.OPENED, HoldoutState.CONSUMED}
+
+
 def refuse_other_attempts(
     sealed: Sequence[tuple[str, EvidenceBundle]],
     *,
@@ -294,7 +307,7 @@ def refuse_other_attempts(
     """
 
     for _, bundle in sealed:
-        if bundle.sizing is not sizing:
+        if bundle.sizing is not sizing or not is_research_run(bundle):
             continue
         multiplier = bundle.result.cost_model.stress_multiplier
         attempt_id = allowed(multiplier)
@@ -324,6 +337,7 @@ def sealed_levels(
         bundle.result.cost_model.stress_multiplier: digest
         for digest, bundle in sealed
         if bundle.sizing is sizing
+        and is_research_run(bundle)
         and allowed(bundle.result.cost_model.stress_multiplier) == bundle.attempt_id
     }
 
@@ -443,7 +457,9 @@ def scenario_report(
     # of the same trial is sealed at the same multiplier and would otherwise read
     # as a level sealed twice; it is ignored here, and ``compounding_report`` is
     # the read that consumes it.
-    sealed = [(d, b) for d, b in sealed if b.sizing is SizingMode.CONSTANT_NOTIONAL]
+    sealed = [
+        (d, b) for d, b in sealed if b.sizing is SizingMode.CONSTANT_NOTIONAL and is_research_run(b)
+    ]
     refuse_reportable(trial_id, sealed)
 
     grid = declared_grid(protocol)

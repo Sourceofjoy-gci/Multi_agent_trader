@@ -24,16 +24,24 @@ from tests.unit.ops.test_scenarios import _protocol
 from tests.unit.research.test_evidence import _bundle
 from tests.unit.research.validation.test_series import _trade
 from trading_house.core.errors import ScenarioEvidenceError, StatisticalInputError
+from trading_house.ops.scenarios import baseline_at
 from trading_house.ops.validate import (
     ValidationInputs,
     _optional,
-    horizon_seconds_of,
+    horizon_of,
     statistical_evidence,
 )
 from trading_house.research.backtest.mark import EquityObservation, EquitySeries
 from trading_house.research.backtest.sizing import SizingMode
+from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import DailyReturnPoint, EvidenceBundle
-from trading_house.research.trial_ledger import ReturnSeriesBasis, TrialCounters, TrialProtocol
+from trading_house.research.trial_ledger import (
+    HoldoutState,
+    ReturnSeriesBasis,
+    TrialCounters,
+    TrialProtocol,
+)
+from trading_house.research.validation.drawdown import NOT_MARKED
 from trading_house.research.validation.montecarlo import mc_seed
 from trading_house.strategies.impl.session_momentum import SESSION_MOMENTUM_ID
 
@@ -92,8 +100,18 @@ def _equity(*equities: str) -> EquitySeries:
     )
 
 
+def _spec(trial: str) -> str:
+    """The digest a run of ``trial`` must declare: ``canonical_sha256`` of its candidate."""
+
+    protocol = _protocol((trial,))
+    return canonical_sha256(protocol.candidates[0])
+
+
 def _make(
     *,
+    level: str = "1",
+    tamper: dict[str, Any] | None = None,
+    holdout: HoldoutState | None = None,
     trades: tuple[Any, ...] | None = None,
     days: int = 60,
     basis: ReturnSeriesBasis = ReturnSeriesBasis.MARK_TO_MARKET,
@@ -105,11 +123,27 @@ def _make(
 ) -> EvidenceBundle:
     bundle = _bundle()
     chosen = _trades() if trades is None else trades
-    result = bundle.result.model_copy(update={"trades": chosen})
+    protocol = _protocol((trial,))
+    result = bundle.result.model_copy(
+        update={
+            "trades": chosen,
+            "strategy_id": protocol.strategy_id,
+            "strategy_version": protocol.strategy_version,
+            "start": protocol.data.start,
+            "end": protocol.data.end,
+            "cost_model": baseline_at(protocol, Decimal(level)),
+            **(tamper or {}),
+        }
+    )
+    provenance = bundle.provenance
+    if holdout is not None:
+        provenance = provenance.model_copy(update={"holdout_state": holdout})
     returns = values if values is not None else _wave(days)
     return bundle.model_copy(
         update={
             "result": result,
+            "provenance": provenance,
+            "spec_sha256": _spec(trial),
             "trial_id": trial,
             "attempt_id": attempt,
             "daily_returns": tuple(
@@ -203,7 +237,7 @@ def test_the_identity_basis_series_and_chain_facts_are_the_inputs() -> None:
     evidence = statistical_evidence(_inputs())
 
     assert evidence.trial_id == "trial-1"
-    assert evidence.spec_sha256 == "d" * 64
+    assert evidence.spec_sha256 == _spec("trial-1")
     assert evidence.attempt_id == "attempt-1"
     assert evidence.basis_is_mark_to_market is True
     assert evidence.counters == COUNTERS
@@ -249,16 +283,16 @@ def test_the_bootstrap_and_the_monte_carlo_are_seeded_from_the_baseline_attempt(
     evidence = statistical_evidence(_inputs())
 
     # sha256(b"<d*64>|attempt-1|8c-sb-1")[:8] big-endian, computed outside with hashlib
-    expected = hashlib.sha256(("d" * 64 + "|attempt-1|8c-sb-1").encode()).digest()[:8]
+    expected = hashlib.sha256((_spec("trial-1") + "|attempt-1|8c-sb-1").encode()).digest()[:8]
     assert evidence.bootstrap.seed == int.from_bytes(expected, "big")
-    expected_mc = hashlib.sha256(("d" * 64 + "|attempt-1|8c-mc-1").encode()).digest()[:8]
+    expected_mc = hashlib.sha256((_spec("trial-1") + "|attempt-1|8c-mc-1").encode()).digest()[:8]
     assert evidence.monte_carlo.seed == int.from_bytes(expected_mc, "big")
-    assert evidence.monte_carlo.seed == mc_seed("d" * 64, "attempt-1")
+    assert evidence.monte_carlo.seed == mc_seed(_spec("trial-1"), "attempt-1")
     assert evidence.bootstrap.policy_version == "8c-sb-1"
     assert evidence.monte_carlo.policy_version == "8c-mc-1"
     assert evidence.monte_carlo.seed != evidence.bootstrap.seed
     other = statistical_evidence(_inputs(baseline=(BASELINE_DIGEST, _make(attempt="attempt-2"))))
-    assert other.monte_carlo.seed == mc_seed("d" * 64, "attempt-2")
+    assert other.monte_carlo.seed == mc_seed(_spec("trial-1"), "attempt-2")
     assert other.monte_carlo.seed != evidence.monte_carlo.seed
     assert other.bootstrap.seed != evidence.bootstrap.seed
 
@@ -306,9 +340,12 @@ def test_the_registered_strategys_horizon_is_read_without_a_run() -> None:
         update={"strategy_id": SESSION_MOMENTUM_ID, "strategy_version": "1"}
     )
 
-    assert horizon_seconds_of(protocol) == 32_400
-    assert horizon_seconds_of(protocol.model_copy(update={"strategy_version": "2"})) is None
-    assert horizon_seconds_of(_protocol_for()) is None  # "toy" is not a registered strategy
+    assert horizon_of(protocol) == (32_400, None)
+    assert horizon_of(protocol.model_copy(update={"strategy_version": "2"})) == (
+        None,
+        "registered strategy session_momentum_eurusd is version 1, not the protocol's 2",
+    )
+    assert horizon_of(_protocol_for()) == (None, "strategy toy is not registered")
 
 
 # --- the optional runs -------------------------------------------------------------
@@ -364,8 +401,8 @@ def test_the_baseline_and_compounding_drawdowns_come_from_their_own_series() -> 
     assert evidence.max_drawdown_compounding.value == pytest.approx(0.10)
 
 
-def test_a_baseline_without_an_equity_series_has_an_undefined_baseline_drawdown() -> None:
-    bare = _make(equities=None, basis=ReturnSeriesBasis.REALIZED_CLOSED_TRADES)
+def test_a_marked_baseline_without_an_equity_series_has_an_undefined_baseline_drawdown() -> None:
+    bare = _make(equities=None)  # the basis says marked; the series is absent
 
     evidence = statistical_evidence(_inputs(baseline=(BASELINE_DIGEST, bare)))
 
@@ -375,10 +412,44 @@ def test_a_baseline_without_an_equity_series_has_an_undefined_baseline_drawdown(
     )
 
 
+def test_a_realized_trades_bundle_has_no_drawdown_even_when_an_equity_series_is_present() -> None:
+    """The series is there but the basis says closed trades: nothing may be taken from it.
+    The baseline drawdown and all five CPCV path drawdowns are UNDEFINED, with the reason
+    (not merely flagged non-marked)."""
+
+    realized = _make(basis=ReturnSeriesBasis.REALIZED_CLOSED_TRADES, equities=("100000", "90000"))
+
+    evidence = statistical_evidence(_inputs(baseline=(BASELINE_DIGEST, realized)))
+
+    undefined = [evidence.max_drawdown_baseline, *evidence.max_drawdown_cpcv_paths]
+    assert len(undefined) == 6
+    for item in undefined:
+        assert item.value is None, item.name
+        assert item.undefined_reason == NOT_MARKED
+        assert item.basis_is_mark_to_market is False
+        assert item.evidence_sha256 == (BASELINE_DIGEST,)
+
+
+def test_a_compounding_run_on_another_basis_carries_its_own_basis_flag() -> None:
+    realized = _make(
+        sizing=SizingMode.COMPOUNDING,
+        basis=ReturnSeriesBasis.REALIZED_CLOSED_TRADES,
+        equities=("100000", "90000"),
+    )
+
+    evidence = statistical_evidence(_inputs(compounding=("c" * 64, realized)))
+
+    assert evidence.max_drawdown_baseline.basis_is_mark_to_market is True
+    assert evidence.max_drawdown_compounding.basis_is_mark_to_market is False
+    assert evidence.max_drawdown_compounding.value is None
+
+
 def test_stressed_runs_are_measured_over_their_own_full_sealed_samples() -> None:
     # 1.5x: net P&L [2, 4] -> 3.0 ; 2.0x: [-6, 2] -> -2.0 ; the baseline's own mean is 1.0.
-    one_five = _make(trades=_trades([2.0, 4.0]))
-    two = _make(trades=_trades([-6.0, 2.0]), basis=ReturnSeriesBasis.REALIZED_CLOSED_TRADES)
+    one_five = _make(trades=_trades([2.0, 4.0]), level="1.5")
+    two = _make(
+        trades=_trades([-6.0, 2.0]), basis=ReturnSeriesBasis.REALIZED_CLOSED_TRADES, level="2"
+    )
 
     evidence = statistical_evidence(
         _inputs(stressed={Decimal("1.5"): ("e" * 64, one_five), Decimal(2): ("f" * 64, two)})
@@ -416,12 +487,8 @@ def test_an_optional_run_sealed_twice_is_refused_and_one_or_none_is_read() -> No
     assert _optional([one], "trial-1", SizingMode.CONSTANT_NOTIONAL, None) is None
 
 
-def _at_level(level: str, sizing: SizingMode = SizingMode.CONSTANT_NOTIONAL) -> EvidenceBundle:
-    bundle = _make(sizing=sizing)
-    cost = bundle.result.cost_model.model_copy(update={"stress_multiplier": Decimal(level)})
-    return bundle.model_copy(
-        update={"result": bundle.result.model_copy(update={"cost_model": cost})}
-    )
+def _at_level(level: str) -> EvidenceBundle:
+    return _make(level=level)
 
 
 def test_an_optional_constant_run_is_found_by_its_stress_level_and_no_other() -> None:
@@ -454,18 +521,22 @@ def test_each_cpcv_paths_drawdown_is_measured_on_that_paths_own_series(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A path's series is the whole series today (returns are not purged), so a stand-in that
-    holds -1% every day proves the drawdowns are read from what ``path_return_series`` hands
-    back: 1 - 0.99**60 = 0.4529 (ln 0.99 = -0.0100503; x60 = -0.60302; exp = 0.5471)."""
+    depends on the ``path`` and ``folds`` it is handed proves the drawdowns are read from what
+    ``path_return_series`` returns for each path: path ``i`` holds -(i + 1) / 1000 every day,
+    whose drawdown over 60 days is 1 - (1 - (i + 1) / 1000) ** 60. It raises unless it is
+    handed the six ten-day folds of the series."""
 
     import numpy as np
 
     import trading_house.ops.validate as module
     from trading_house.research.validation.series import ReturnSeries
 
-    def stand_in(series: ReturnSeries, folds: object, path: object) -> ReturnSeries:
+    def stand_in(series: ReturnSeries, folds: Any, path: Any) -> ReturnSeries:
+        if [fold.days for fold in folds] != [10] * 6 or folds[0].start != series.days[0]:
+            raise AssertionError("the stand-in was not handed the series' own folds")
         return ReturnSeries(
             days=series.days,
-            values=np.full(len(series.days), -0.01),
+            values=np.full(len(series.days), -(path.index + 1) / 1000),
             basis=series.basis,
             evidence_sha256=series.evidence_sha256,
         )
@@ -474,7 +545,9 @@ def test_each_cpcv_paths_drawdown_is_measured_on_that_paths_own_series(
 
     evidence = statistical_evidence(_inputs())
 
-    assert [m.value for m in evidence.max_drawdown_cpcv_paths] == [pytest.approx(1 - 0.99**60)] * 5
+    assert [m.value for m in evidence.max_drawdown_cpcv_paths] == [
+        pytest.approx(1 - (1 - (i + 1) / 1000) ** 60) for i in range(5)
+    ]
 
 
 # --- candidates, PBO and the DSR cross-section --------------------------------------
@@ -647,3 +720,230 @@ def test_the_document_carries_no_gate_or_decision_key() -> None:
     assert "basis_is_mark_to_market" in found
     assert "promotion_grade" not in found
     assert not [k for k in found if any(w in k for w in ("threshold", "verdict", "pass", "fail"))]
+
+
+# --- the DSR cross-section and the horizon reason ----------------------------------------
+
+
+def _two_point(first: str, second: str) -> list[Decimal]:
+    """Thirty repetitions of a pair of daily returns: 60 days."""
+
+    return [Decimal(first), Decimal(second)] * 30
+
+
+def test_the_cross_section_is_the_sample_std_of_the_candidates_per_day_sharpes() -> None:
+    """Thirty repeats of the pair (a, b): the mean is (a + b) / 2 and the deviations are
+    +/-(a - b) / 2, so the ddof=1 std is (|a - b| / 2) * sqrt(60 / 59) and the per-day Sharpe
+    is ((a + b) / |a - b|) * sqrt(59 / 60). With k = sqrt(59 / 60):
+    candidate 1 is (0.003, 0.001): 0.004 / 0.002 = 2, Sharpe 2k;
+    candidate 0 is (0.004, 0.002): 0.006 / 0.002 = 3, Sharpe 3k.
+    The sample (ddof=1) std of two numbers is their difference over sqrt(2): k / sqrt(2) =
+    sqrt(59 / 120) = 0.70119... (no annualisation: nothing is multiplied by sqrt(365))."""
+
+    base = (BASELINE_DIGEST, _make(values=_two_point("0.003", "0.001")))
+    other = ("o" * 64, _make(trial="trial-0", values=_two_point("0.004", "0.002")))
+
+    evidence = statistical_evidence(
+        _inputs(
+            protocol=_protocol_for("trial-1", "trial-0"),
+            baseline=base,
+            candidates={"trial-1": base, "trial-0": other},
+        )
+    )
+
+    assert evidence.dsr.cross_section == pytest.approx(0.7011893, abs=1e-6)
+    assert evidence.dsr.cross_section_count == 2
+
+
+def test_a_constant_series_candidate_is_not_counted_in_the_cross_section_but_is_ranked() -> None:
+    base = (BASELINE_DIGEST, _make(values=_two_point("0.003", "0.001")))
+    other = ("o" * 64, _make(trial="trial-0", values=_two_point("0.004", "0.002")))
+    flat = ("f" * 64, _make(trial="trial-2", values=[Decimal(0)] * 60))
+
+    evidence = statistical_evidence(
+        _inputs(
+            protocol=_protocol_for("trial-1", "trial-0", "trial-2"),
+            baseline=base,
+            candidates={"trial-1": base, "trial-0": other, "trial-2": flat},
+        )
+    )
+
+    assert evidence.dsr.cross_section_count == 2
+    assert evidence.dsr.cross_section == pytest.approx(0.7011893, abs=1e-6)
+    assert evidence.pbo.candidates == ("trial-0", "trial-1", "trial-2")
+    assert evidence.evidence.pbo_candidates == ("o" * 64, BASELINE_DIGEST, "f" * 64)
+
+
+def test_one_candidate_enters_no_cross_section() -> None:
+    evidence = statistical_evidence(_inputs())
+
+    assert evidence.dsr.cross_section is None
+    assert evidence.dsr.cross_section_count == 1
+
+
+def test_an_unreadable_horizon_says_why_in_the_dsr_reason() -> None:
+    unregistered = statistical_evidence(
+        _inputs(horizon_seconds=None, horizon_reason="strategy toy is not registered")
+    )
+    wrong_version = statistical_evidence(
+        _inputs(
+            horizon_seconds=None,
+            horizon_reason="registered strategy x is version 1, not the protocol's 2",
+        )
+    )
+
+    assert unregistered.dsr.dsr.undefined_reason == (
+        "the declared holding horizon is not known: strategy toy is not registered"
+    )
+    assert "is version 1, not the protocol's 2" in (wrong_version.dsr.dsr.undefined_reason or "")
+
+
+# --- the trade and basis facts of the CPCV measurements ----------------------------------
+
+
+def test_the_cpcv_p5_and_the_coverage_say_how_much_of_the_run_they_hold() -> None:
+    whole = statistical_evidence(_inputs())
+    crossing = statistical_evidence(
+        _inputs(baseline=(BASELINE_DIGEST, _make(trades=_trades(crosser=True))))
+    )
+
+    assert whole.cpcv_p5.closed_trades == 12
+    assert whole.cpcv_p5.all_trades_kept is True
+    assert whole.coverage.closed_trades == 12
+    assert whole.coverage.all_trades_kept is True
+    assert whole.coverage.oos_trades.value == 12.0
+    assert crossing.cpcv_p5.closed_trades == 12
+    assert crossing.cpcv_p5.all_trades_kept is False  # four paths drop the crosser
+    assert crossing.coverage.closed_trades == 12
+    assert crossing.coverage.all_trades_kept is False
+    assert crossing.coverage.oos_trades.value == 11.0
+
+
+# --- fidelity: the same checks the sibling reports run -------------------------------------
+
+_TAMPERS = {
+    "strategy id": ({"strategy_id": "another"}, "strategy"),
+    "strategy version": ({"strategy_version": "9"}, "strategy"),
+    "window start": ({"start": datetime(2020, 1, 1, tzinfo=UTC)}, "ran ["),
+    "window end": ({"end": datetime(2020, 1, 2, tzinfo=UTC)}, "ran ["),
+}
+
+
+def _cost_tamper(multiplier: str) -> dict[str, Any]:
+    protocol = _protocol(("trial-1",))
+    other = baseline_at(protocol, Decimal(multiplier)).model_copy(
+        update={"commission_per_lot_per_side": Decimal("99")}
+    )
+    return {"cost_model": other}
+
+
+@pytest.mark.parametrize("name", sorted(_TAMPERS))
+def test_a_baseline_that_is_not_the_protocols_run_is_refused_per_clause(name: str) -> None:
+    tamper, fragment = _TAMPERS[name]
+    bad = (BASELINE_DIGEST, _make(tamper=tamper))
+
+    with pytest.raises(ScenarioEvidenceError) as error:
+        statistical_evidence(_inputs(baseline=bad))
+
+    assert fragment in str(error.value.__cause__)
+
+
+def test_a_baseline_whose_specification_digest_is_not_the_candidates_is_refused() -> None:
+    bundle = _make().model_copy(update={"spec_sha256": "e" * 64})
+
+    with pytest.raises(ScenarioEvidenceError) as error:
+        statistical_evidence(_inputs(baseline=(BASELINE_DIGEST, bundle)))
+
+    assert "declares spec" in str(error.value.__cause__)
+
+
+def test_a_baseline_with_other_costs_is_refused() -> None:
+    bad = (BASELINE_DIGEST, _make(tamper=_cost_tamper("1")))
+
+    with pytest.raises(ScenarioEvidenceError) as error:
+        statistical_evidence(_inputs(baseline=bad))
+
+    assert "the protocol's baseline at level 1" in str(error.value.__cause__)
+
+
+def test_a_ranked_candidate_that_is_not_its_protocols_run_is_refused() -> None:
+    base = (BASELINE_DIGEST, _make())
+    bad = ("o" * 64, _make(trial="trial-0", tamper=_cost_tamper("1")))
+
+    with pytest.raises(ScenarioEvidenceError) as error:
+        statistical_evidence(
+            _inputs(
+                protocol=_protocol_for("trial-1", "trial-0"),
+                baseline=base,
+                candidates={"trial-1": base, "trial-0": bad},
+            )
+        )
+
+    assert "the protocol's baseline at level 1" in str(error.value.__cause__)
+
+
+def test_a_candidate_whose_digest_is_another_candidates_is_refused() -> None:
+    base = (BASELINE_DIGEST, _make())
+    swapped = (
+        "o" * 64,
+        _make(trial="trial-0").model_copy(update={"spec_sha256": _spec("trial-1")}),
+    )
+
+    with pytest.raises(ScenarioEvidenceError) as error:
+        statistical_evidence(
+            _inputs(
+                protocol=_protocol_for("trial-1", "trial-0"),
+                baseline=base,
+                candidates={"trial-1": base, "trial-0": swapped},
+            )
+        )
+
+    assert "declares spec" in str(error.value.__cause__)
+
+
+def test_a_compounding_run_with_other_costs_is_refused() -> None:
+    bad = _make(sizing=SizingMode.COMPOUNDING, tamper=_cost_tamper("1"))
+
+    with pytest.raises(ScenarioEvidenceError) as error:
+        statistical_evidence(_inputs(compounding=("c" * 64, bad)))
+
+    assert "the protocol's baseline at level 1" in str(error.value.__cause__)
+
+
+def test_a_stressed_run_is_checked_against_the_baseline_at_its_own_level() -> None:
+    """A 1.5x run must carry the baseline costs at 1.5 (so it is not refused for not being
+    level 1), and one carrying other costs, or the level-1 costs, is refused."""
+
+    good = _make(level="1.5")
+    at_level_one = _make(level="1")
+    other_costs = _make(level="1.5", tamper=_cost_tamper("1.5"))
+
+    assert statistical_evidence(_inputs(stressed={Decimal("1.5"): ("e" * 64, good)}))
+    for bad in (at_level_one, other_costs):
+        with pytest.raises(ScenarioEvidenceError) as error:
+            statistical_evidence(_inputs(stressed={Decimal("1.5"): ("e" * 64, bad)}))
+        assert "the protocol's baseline at level 1.5" in str(error.value.__cause__)
+
+
+# --- runs on the locked data are a different experiment -------------------------------------
+
+
+def test_a_bundle_sealed_after_the_holdout_was_opened_is_not_a_research_run() -> None:
+    from trading_house.ops.compounding import sealed_baseline, sealed_rerun
+
+    base = (BASELINE_DIGEST, _make())
+    comp = ("c" * 64, _make(sizing=SizingMode.COMPOUNDING))
+    for state in (HoldoutState.OPENED, HoldoutState.CONSUMED):
+        opened_base = ("x" * 64, _make(holdout=state, attempt="opened"))
+        opened_comp = ("y" * 64, _make(holdout=state, sizing=SizingMode.COMPOUNDING))
+        opened_stress = ("z" * 64, _make(holdout=state, level="1.5"))
+        sealed = [base, opened_base, comp, opened_comp, opened_stress]
+
+        assert sealed_baseline(sealed, "trial-1") == base
+        assert sealed_rerun(sealed, "trial-1") == comp
+        assert _optional(sealed, "trial-1", SizingMode.COMPOUNDING, None) == comp
+        assert _optional(sealed, "trial-1", SizingMode.CONSTANT_NOTIONAL, Decimal("1.5")) is None
+    # a locked (not opened) holdout is still a research run: two baselines are then a refusal
+    locked = ("x" * 64, _make(holdout=HoldoutState.LOCKED, attempt="locked"))
+    with pytest.raises(ScenarioEvidenceError):
+        sealed_baseline([base, locked], "trial-1")

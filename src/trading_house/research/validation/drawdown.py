@@ -18,6 +18,10 @@ from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.validation.measurement import Measurement
 from trading_house.research.validation.series import ReturnSeries, _floats, refusal
 
+NOT_MARKED = (
+    "the series basis is not mark-to-market, and a drawdown is never taken from closed trades"
+)
+
 
 def max_drawdown_fraction(equity: npt.NDArray[np.float64]) -> float:
     """``max((peak - equity) / peak)`` over a strictly positive, finite equity curve."""
@@ -48,6 +52,13 @@ def equity_drawdown(
     """The drawdown of the initial equity followed by every bar's marked equity."""
 
     digests = (evidence_sha256,)
+    if not basis_is_mark_to_market:
+        return Measurement.undefined(
+            name,
+            NOT_MARKED,
+            evidence_sha256=digests,
+            basis_is_mark_to_market=False,
+        )
     if series is None:
         return Measurement.undefined(
             name,
@@ -68,11 +79,19 @@ def path_drawdown(path_returns: ReturnSeries, *, name: str) -> Measurement:
     """The drawdown of the path's daily returns compounded from 1.0.
 
     The path's own start is 1.0; the absolute P&L path is not reset between paths (7.3).
-    Undefined when compounding reaches zero or below, or overflows: there is then no
+    Undefined unless the series is mark-to-market, and when compounding reaches zero or
+    below, or overflows: there is then no
     positive equity to measure a fraction of.
     """
 
     digests, grade = (path_returns.evidence_sha256,), path_returns.promotion_grade
+    if not grade:
+        return Measurement.undefined(
+            name,
+            NOT_MARKED,
+            evidence_sha256=digests,
+            basis_is_mark_to_market=False,
+        )
     with np.errstate(all="ignore"):
         curve = np.concatenate(([1.0], np.cumprod(1.0 + path_returns.values)))
     if not bool(np.isfinite(curve).all()) or not bool((curve > 0.0).all()):

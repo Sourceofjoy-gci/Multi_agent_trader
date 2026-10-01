@@ -54,6 +54,7 @@ from trading_house.ops.scenarios import (
     ScenarioTotals,
     baseline_at,
     declared_grid,
+    is_research_run,
     refuse_other_attempts,
     refuse_reused_attempts,
     registered_protocol,
@@ -1172,6 +1173,59 @@ def test_a_level_the_run_does_not_seal_is_not_refused() -> None:
     sealed = _sealed(_protocol())
 
     refuse_other_attempts(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=lambda _: None)
+
+
+def _opened(
+    pair: tuple[str, EvidenceBundle], state: HoldoutState = HoldoutState.OPENED
+) -> tuple[str, EvidenceBundle]:
+    """The same run as it would be sealed once its holdout had been opened (a new digest)."""
+
+    digest, bundle = pair
+    provenance = bundle.provenance.model_copy(update={"holdout_state": state})
+    return digest[::-1], bundle.model_copy(update={"provenance": provenance})
+
+
+def test_only_a_bundle_sealed_with_an_opened_or_consumed_holdout_is_not_a_research_run() -> None:
+    (_, bundle), *_ = _sealed(_protocol())
+    expected = {
+        HoldoutState.NOT_DEFINED: True,
+        HoldoutState.LOCKED: True,
+        HoldoutState.CONTAMINATED: True,
+        HoldoutState.OPENED: False,
+        HoldoutState.CONSUMED: False,
+    }
+
+    for state, research in expected.items():
+        provenance = bundle.provenance.model_copy(update={"holdout_state": state})
+        assert is_research_run(bundle.model_copy(update={"provenance": provenance})) is research
+
+
+def test_a_bundle_run_on_an_opened_holdout_changes_nothing_in_the_grid_report() -> None:
+    """It sits at the 1.0x level beside the constant 1.0x, like a compounding rerun, and is
+    ignored rather than read as a level sealed twice -- at every level, for both states."""
+
+    protocol = _protocol()
+    sealed = _sealed(protocol)
+    plain = scenario_report(trial_id=_trial_id(protocol), protocol=protocol, sealed=sealed)
+
+    for state in (HoldoutState.OPENED, HoldoutState.CONSUMED):
+        for pair in sealed:
+            mixed = scenario_report(
+                trial_id=_trial_id(protocol),
+                protocol=protocol,
+                sealed=(*sealed, _opened(pair, state)),
+            )
+            assert mixed == plain
+
+
+def test_an_opened_holdout_bundle_is_neither_skipped_nor_refused_by_the_preflight() -> None:
+    sealed = _sealed(_protocol())
+    opened = tuple(_opened(pair) for pair in sealed)
+
+    # under another attempt id it would be refused; under this run's own it would be skipped
+    refuse_other_attempts(opened, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine("other"))
+    assert sealed_levels(opened, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine()) == {}
+    assert len(sealed_levels(sealed, sizing=SizingMode.CONSTANT_NOTIONAL, allowed=_mine())) == 3
 
 
 def test_the_started_attempts_are_the_start_events_attempt_ids_only() -> None:

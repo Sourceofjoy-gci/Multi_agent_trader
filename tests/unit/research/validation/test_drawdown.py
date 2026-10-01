@@ -16,6 +16,7 @@ from trading_house.core.errors import StatisticalInputError
 from trading_house.research.backtest.mark import EquityObservation, EquitySeries
 from trading_house.research.trial_ledger import ReturnSeriesBasis
 from trading_house.research.validation.drawdown import (
+    NOT_MARKED,
     equity_drawdown,
     max_drawdown_fraction,
     path_drawdown,
@@ -141,27 +142,43 @@ def test_the_name_the_digest_and_the_basis_are_the_callers() -> None:
     series = _series(_obs(9, "0", "0", 0))
 
     result = equity_drawdown(
-        series, name="max_drawdown_x", evidence_sha256="f" * 64, basis_is_mark_to_market=False
+        series, name="max_drawdown_x", evidence_sha256="f" * 64, basis_is_mark_to_market=True
     )
 
     assert (result.name, result.evidence_sha256, result.basis_is_mark_to_market) == (
         "max_drawdown_x",
         ("f" * 64,),
-        False,
+        True,
     )
     assert result.value == 0.0
 
 
+def test_a_series_on_a_closed_trades_basis_has_no_drawdown_even_though_it_is_present() -> None:
+    series = _series(_obs(9, "0", "-100", 1))  # a 10% dip, were it read
+
+    result = equity_drawdown(
+        series, name="max_drawdown_x", evidence_sha256="f" * 64, basis_is_mark_to_market=False
+    )
+
+    assert result.value is None
+    assert result.undefined_reason == NOT_MARKED
+    assert (result.name, result.evidence_sha256, result.basis_is_mark_to_market) == (
+        "max_drawdown_x",
+        ("f" * 64,),
+        False,
+    )
+
+
 def test_a_bundle_without_an_equity_series_has_no_drawdown_and_never_a_trades_one() -> None:
     result = equity_drawdown(
-        None, name="max_drawdown_baseline", evidence_sha256=DIGEST, basis_is_mark_to_market=False
+        None, name="max_drawdown_baseline", evidence_sha256=DIGEST, basis_is_mark_to_market=True
     )
 
     assert result.value is None
     assert result.undefined_reason == "the bundle carries no mark-to-market equity series"
     assert result.name == "max_drawdown_baseline"
     assert result.evidence_sha256 == (DIGEST,)
-    assert result.basis_is_mark_to_market is False
+    assert result.basis_is_mark_to_market is True
 
 
 def test_a_series_whose_equity_is_not_positive_is_refused() -> None:
@@ -212,13 +229,18 @@ def test_returns_compound_and_the_deepest_fall_from_the_running_peak_is_taken() 
     assert path_drawdown(_returns(_padded(-0.25, -0.25)), name="n").value == 0.4375
 
 
-def test_evidence_and_basis_ride_along() -> None:
+def test_a_path_on_a_closed_trades_basis_has_no_drawdown() -> None:
     realized = path_drawdown(
-        _returns(_padded(), ReturnSeriesBasis.REALIZED_CLOSED_TRADES), name="n"
+        _returns(_padded(-0.5), ReturnSeriesBasis.REALIZED_CLOSED_TRADES), name="n"
     )
 
+    assert realized.value is None
+    assert realized.undefined_reason == NOT_MARKED
     assert realized.evidence_sha256 == (DIGEST,)
     assert realized.basis_is_mark_to_market is False
+
+
+def test_evidence_and_basis_ride_along() -> None:
     assert path_drawdown(_returns(_padded()), name="n").basis_is_mark_to_market is True
 
 

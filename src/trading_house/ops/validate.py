@@ -19,9 +19,10 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from trading_house.core.errors import ConfigurationError, ScenarioEvidenceError
-from trading_house.ops.compounding import sealed_baseline
+from trading_house.ops.compounding import refuse_unfaithful, sealed_baseline
 from trading_house.ops.scenarios import (
     declared_grid,
+    is_research_run,
     refuse_reportable,
     registered_protocol,
     sealed_bundles,
@@ -30,7 +31,12 @@ from trading_house.ops.splits import splits_report
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
-from trading_house.research.trial_ledger import ReturnSeriesBasis, TrialCounters, TrialProtocol
+from trading_house.research.trial_ledger import (
+    ReturnSeriesBasis,
+    TrialCounters,
+    TrialProtocol,
+    trial_counters,
+)
 from trading_house.research.validation.bootstrap import block_length, bootstrap_mean
 from trading_house.research.validation.capacity import capacity_diagnostic
 from trading_house.research.validation.coverage import (
@@ -78,23 +84,29 @@ class ValidationInputs:
     chain_head_sha256: str
     horizon_seconds: int | None
     """The registered strategy's declared holding horizon; ``None`` if it cannot be read."""
+    horizon_reason: str | None = None
+    """Why the horizon could not be read: the strategy is unregistered or its version differs."""
 
 
-def horizon_seconds_of(protocol: TrialProtocol) -> int | None:
-    """The declared holding horizon of the strategy the protocol names, if code still holds it.
+def horizon_of(protocol: TrialProtocol) -> tuple[int | None, str | None]:
+    """``(horizon_seconds, None)`` of the strategy the protocol names, or ``(None, reason)``.
 
-    Read from the strategy registry's own object (no run is constructed). ``None`` when the
-    strategy is not registered or its version is not the one the protocol declares: the
-    code then is not what ran, so its horizon is not evidence of the run's.
+    Read from the strategy registry's own object (no run is constructed). Unknown when
+    the strategy is not registered or its version is not the one the protocol declares:
+    the code then is not what ran, so its horizon is not evidence of the run's. The reason
+    says which.
     """
 
     try:
         strategy = registered(protocol.strategy_id)
     except ConfigurationError:
-        return None
+        return None, f"strategy {protocol.strategy_id} is not registered"
     if strategy.version != protocol.strategy_version:
-        return None
-    return strategy.horizon_seconds
+        return None, (
+            f"registered strategy {protocol.strategy_id} is version {strategy.version}, "
+            f"not the protocol's {protocol.strategy_version}"
+        )
+    return strategy.horizon_seconds, None
 
 
 def _optional(
@@ -104,6 +116,7 @@ def _optional(
         item
         for item in sealed
         if item[1].sizing is sizing
+        and is_research_run(item[1])
         and (multiplier is None or item[1].result.cost_model.stress_multiplier == multiplier)
     ]
     if len(found) > 1:
@@ -119,7 +132,11 @@ def read_validation_inputs(
 ) -> ValidationInputs:
     """Read a trial's sealed runs, its protocol's other candidates, and the chain's state."""
 
-    protocol = registered_protocol(ledger.replay(), trial_id)
+    # One read of the chain: the counters, the head and the protocol describe the same chain.
+    events, head = ledger.snapshot()
+    if head is None:
+        raise ScenarioEvidenceError() from ValueError("the chain holds no event")
+    protocol = registered_protocol(events, trial_id)
     sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
     baseline = sealed_baseline(sealed, trial_id)
     candidates: dict[str, Sealed] = {trial_id: baseline}
@@ -140,6 +157,7 @@ def read_validation_inputs(
         )
         if found is not None:
             stressed[level] = found
+    horizon = horizon_of(protocol)
     return ValidationInputs(
         trial_id=trial_id,
         protocol=protocol,
@@ -148,9 +166,10 @@ def read_validation_inputs(
         stressed=stressed,
         candidates=candidates,
         excluded=tuple(excluded),
-        counters=ledger.counters(),
-        chain_head_sha256=ledger.events()[-1].event_hash,
-        horizon_seconds=horizon_seconds_of(protocol),
+        counters=trial_counters(events),
+        chain_head_sha256=head,
+        horizon_seconds=horizon[0],
+        horizon_reason=horizon[1],
     )
 
 
@@ -170,6 +189,11 @@ def statistical_evidence(inputs: ValidationInputs) -> StatisticalEvidence:
         raise refusal("the trial's own baseline is not among the ranked candidates")
     for candidate_id, entry in inputs.candidates.items():
         refuse_reportable(candidate_id, [entry])
+        refuse_unfaithful(candidate_id, protocol, entry[1])
+    if inputs.compounding is not None:
+        refuse_unfaithful(trial_id, protocol, inputs.compounding[1])
+    for level, (_, stressed_bundle) in inputs.stressed.items():
+        refuse_unfaithful(trial_id, protocol, stressed_bundle, level)
 
     # Refuses a bundle that is not a usable series, or a policy the series cannot honour.
     report = splits_report(trial_id=trial_id, protocol=protocol, sealed=inputs.baseline)
@@ -301,6 +325,7 @@ def statistical_evidence(inputs: ValidationInputs) -> StatisticalEvidence:
             horizon_days=horizon_days,
             chain_head_sha256=inputs.chain_head_sha256,
             candidate_sharpes=sharpes,
+            horizon_reason=inputs.horizon_reason,
         ),
         pbo=pbo(
             ranked,
@@ -338,12 +363,14 @@ def statistical_evidence(inputs: ValidationInputs) -> StatisticalEvidence:
         cpcv_p5=cpcv_p5(
             path_samples,
             paths_differ=report.cpcv.paths_differ,
+            closed_trades=len(trades),
             evidence_sha256=digests,
             basis_is_mark_to_market=grade,
         ),
         coverage=oos_coverage(
             path_samples,
             protocol.regimes.labels,
+            closed_trades=len(trades),
             evidence_sha256=digests,
             basis_is_mark_to_market=grade,
         ),

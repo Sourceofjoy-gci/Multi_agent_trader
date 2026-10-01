@@ -5,9 +5,10 @@ Phase 8C3 (umbrella 7.3, 7.7, 7.8). Measurements only; none is compared with any
 The CPCV 5th-percentile measurement is ALWAYS computed (spec section 7, amended
 2026-10-01). It is not blocked when ``paths_differ`` is false: for an intraday strategy
 no trade straddles a fold start, the paths are then identical, and each path's expectancy
-is the sample's own net expectancy, a real quantity (is out-of-sample net expectancy
-positive?). ``paths_differ`` is carried beside it as a plain fact, so a reader of the
-number knows whether it came from one path or from a spread of them.
+is the net expectancy of the full sealed research-window sample, a real quantity. For a
+fixed-parameter candidate (nothing is refit) that sample is IN-SAMPLE on the research
+window, not out-of-sample evidence, and the output says so by carrying ``paths_differ``,
+``closed_trades`` and ``all_trades_kept`` beside the number.
 
 ``expectancy`` everywhere is the mean net P&L per closed trade, the one primary metric.
 """
@@ -89,7 +90,12 @@ class CpcvP5Result(CanonicalModel):
     """The 1-based nearest rank read from the ascending expectancies; ``None`` if undefined."""
     paths_differ: bool
     """Whether the paths kept different trade sets. When false the paths are one path and
-    ``p5`` is that path's expectancy, the aggregate out-of-sample net expectancy."""
+    ``p5`` is the net expectancy of the full sealed research-window sample: in-sample on
+    the research window for a fixed-parameter candidate, not out-of-sample evidence."""
+    closed_trades: NonNegativeInt
+    """The closed trades of the sealed baseline run, kept or not."""
+    all_trades_kept: bool
+    """Whether every path kept every closed trade (the sample is then the whole run)."""
     paths: tuple[PathExpectancy, ...]
 
 
@@ -97,6 +103,7 @@ def cpcv_p5(
     paths: Sequence[TradeSample],
     *,
     paths_differ: bool,
+    closed_trades: int,
     evidence_sha256: Sequence[str],
     basis_is_mark_to_market: bool,
 ) -> CpcvP5Result:
@@ -121,6 +128,8 @@ def cpcv_p5(
             quantile=CPCV_P5_QUANTILE,
             rank=rank,
             paths_differ=paths_differ,
+            closed_trades=closed_trades,
+            all_trades_kept=bool(paths) and all(len(sample) == closed_trades for sample in paths),
             paths=rows,
         )
 
@@ -139,17 +148,22 @@ class CoverageResult(CanonicalModel):
     regimes_represented: Measurement
     declared_labels: tuple[NonEmptyStr, ...]
     oos_path_index: NonNegativeInt | None
-    """The path whose kept trades are the out-of-sample sample: the one with the fewest."""
+    """The path whose kept trades are the coverage sample: the one with the fewest."""
+    closed_trades: NonNegativeInt
+    """The closed trades of the sealed baseline run; ``oos_trades`` equal to it means the
+    coverage sample is the whole run, in-sample on the research window."""
+    all_trades_kept: bool
 
 
 def oos_coverage(
     paths: Sequence[TradeSample],
     declared_labels: Sequence[str],
     *,
+    closed_trades: int,
     evidence_sha256: Sequence[str],
     basis_is_mark_to_market: bool,
 ) -> CoverageResult:
-    """Trade count and regimes represented in the out-of-sample sample.
+    """Trade count and regimes represented in the CPCV-kept sample (not a holdout).
 
     The sample is the path with the FEWEST kept trades (the lowest index among ties):
     conservative, since coverage that holds there holds on every path. Regimes are
@@ -161,6 +175,7 @@ def oos_coverage(
     labels = tuple(declared_labels)
 
     def result(trades: float | str, regimes: float | str, index: int | None) -> CoverageResult:
+        kept = index is not None and len(paths[index]) == closed_trades
         return CoverageResult(
             oos_trades=_measurement("oos_trades", trades, evidence_sha256, basis_is_mark_to_market),
             regimes_represented=_measurement(
@@ -168,6 +183,8 @@ def oos_coverage(
             ),
             declared_labels=labels,
             oos_path_index=index,
+            closed_trades=closed_trades,
+            all_trades_kept=kept,
         )
 
     if not paths:

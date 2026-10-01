@@ -23,7 +23,12 @@ from pydantic import NonNegativeInt
 
 from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
-from trading_house.ops.scenarios import baseline_at, refuse_reportable, required_candidate
+from trading_house.ops.scenarios import (
+    baseline_at,
+    is_research_run,
+    refuse_reportable,
+    required_candidate,
+)
 from trading_house.research.backtest.engine import BacktestRequest
 from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.backtest.result import BacktestResult
@@ -91,7 +96,7 @@ def compounding_report(
     a, b = constant[1], compounding[1]
     _refuse_sizing(a, b)
     for bundle in (a, b):
-        _refuse_unfaithful(trial_id, protocol, bundle)
+        refuse_unfaithful(trial_id, protocol, bundle)
     refuse_other_replay(replay_inputs(a.result), b.result, what="the compounding run")
     if a.result.bars_seen != b.result.bars_seen:
         raise ScenarioEvidenceError() from ValueError(
@@ -184,6 +189,7 @@ def _only(
         (d, b)
         for d, b in sealed
         if b.sizing is sizing
+        and is_research_run(b)
         and (multiplier is None or b.result.cost_model.stress_multiplier == multiplier)
     ]
     if len(found) != 1:
@@ -226,13 +232,26 @@ def _refuse_sizing(constant: EvidenceBundle, compounding: EvidenceBundle) -> Non
             )
 
 
-def _refuse_unfaithful(trial_id: str, protocol: TrialProtocol, bundle: EvidenceBundle) -> None:
+def refuse_unfaithful(
+    trial_id: str,
+    protocol: TrialProtocol,
+    bundle: EvidenceBundle,
+    multiplier: Decimal = Decimal(1),
+) -> None:
+    """Refuse a bundle that is not the protocol's candidate on the protocol's terms.
+
+    Costs equal the protocol's baseline at ``multiplier`` (level 1 unless a stressed
+    run is being checked), the window is the protocol's, the strategy id and version
+    are the protocol's, and the specification digest is the one of the protocol's
+    candidate for ``trial_id``. Shared by the compounding report and ``validate``.
+    """
+
     result = bundle.result
-    declared = baseline_at(protocol, Decimal(1))
+    declared = baseline_at(protocol, multiplier)
     if result.cost_model != declared:
         raise ScenarioEvidenceError() from ValueError(
             f"the {bundle.sizing.value} run declares {result.cost_model}; "
-            f"the protocol's baseline at level 1 is {declared}"
+            f"the protocol's baseline at level {multiplier} is {declared}"
         )
     window = (protocol.data.start, protocol.data.end)
     if (result.start, result.end) != window:

@@ -516,6 +516,21 @@ class PostgresTrialLedger:
             _raise_trial_ledger_append_error()
         return _rows_mapped(rows, _event_from_row)
 
+    def snapshot(self) -> tuple[tuple[LedgerEvent, ...], str | None]:
+        """The chain as validated events and the last row's event hash, from ONE read.
+
+        A reader that needs the events and the chain head to describe the same chain
+        takes both from here: two reads are two transactions, and a row appended
+        between them would make the head name an event the events do not hold.
+        ``None`` is an empty chain.
+        """
+
+        rows = _read_rows(self._connection_factory, _ALL_EVENTS_SQL, None)
+        if isinstance(rows, _OperationFailure):
+            _raise_trial_ledger_append_error()
+        head = bytes(rows[-1][14]).hex() if rows else None
+        return _rows_mapped(rows, _event_from_row), head
+
     def counters(self) -> TrialCounters:
         """The deflation denominator, counted from the chain rather than kept."""
 
