@@ -647,14 +647,20 @@ def test_a_grid_whose_runs_disagree_about_the_specification_is_refused_on_identi
     the window the declared one. Only the specification the runs were pinned to
     disagrees, and nothing above check 6 can see that.
 
+    Every start carries the honest digest, because the ledger now refuses a start
+    whose digest its trial never declared (Phase 8A.1). The drift is therefore in
+    the sealed bundle alone, which is the shape a bundle built against the wrong
+    candidate has: the ledger vouches for the start, and only the report-side
+    identity check can tie the bundle to it.
+
     All three levels are sealed by hand rather than by the orchestrator, because
     the orchestrator cannot produce this shape: it derives one digest for all
     three, which is the whole point of it, so a fourth document at an occupied
     level is the only way to introduce a second one and that is a completeness
     defect instead. The specification digest is operator-declared and unvouched
-    since Phase 8A -- the ledger records what it is told and counts the distinct
-    values -- so this is what an operator produces by starting one attempt from
-    the wrong candidate's digest, not a hand-built contrivance.
+    since Phase 8A for everything but a start -- so this is what an operator
+    produces by sealing one attempt's bundle against the wrong candidate's digest,
+    not a hand-built contrivance.
     """
 
     protocol = _protocol(seeded)
@@ -664,7 +670,7 @@ def test_a_grid_whose_runs_disagree_about_the_specification_is_refused_on_identi
     for multiplier, spec_sha256 in (("1", honest), ("1.5", drifted), ("2", honest)):
         attempt_id = f"grid-{multiplier}"
         assert (
-            _start(trial_id=TRIAL_ID, attempt_id=attempt_id, spec_sha256=spec_sha256).exit_code
+            _start(trial_id=TRIAL_ID, attempt_id=attempt_id, spec_sha256=honest).exit_code
             == cli.ExitCode.OK
         )
         _record(

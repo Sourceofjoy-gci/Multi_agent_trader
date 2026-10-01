@@ -700,10 +700,9 @@ def _refuse_identity(
     refused here rather than reported.
 
     A grid whose three levels all declare the *same* wrong digest is refused too:
-    it agrees with itself, and agreement is not authority. What none of this can do
-    is stop a wrong digest being *written* in the first place -- the ledger's
-    unvouched column is 8A's surface, and the README says so in full. What 8B2b
-    does is stop one being *read as a report*.
+    it agrees with itself, and agreement is not authority. The ledger now
+    refuses a wrong digest on a *start* at append time (8A.1); this still stops one
+    being *read as a report* from a bundle, and from a start that predates it.
 
     ``attempt_id`` is deliberately *not* here. It names an attempt rather than a
     candidate, and the report prints it on every row; pinning it would assert

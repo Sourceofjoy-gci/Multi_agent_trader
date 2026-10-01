@@ -1037,16 +1037,16 @@ uv run trading-house research trial verify
 
 ### What Phase 8A does not implement
 
-**`effective_specifications` is a count of supplied digests, not a verified
-match.** It is a `len(set())` over the `spec_sha256` each started attempt carries,
-and nothing in this phase compares that digest against a preregistered
-declaration — `ExecutionStartedPayload` does not carry one, and a protocol seals
-its whole candidate family inside a single event, so there is no per-candidate
-digest in the chain to compare against. The ledger therefore *preserves* the
-digest and cannot *vouch* for it, and `start`'s `--spec-sha256` is operator-
-supplied for that reason. Read the third number as "how many distinct
-specification digests this operator claimed", not as "how many distinct
-specifications were tried".
+**`effective_specifications` is vouched for at append time for one event type
+only.** It is a `len(set())` over the `spec_sha256` each started attempt carries.
+Since Phase 8A.1 the ledger refuses an `EXECUTION_STARTED` of a preregistered
+trial whose digest is not the `canonical_sha256` of a candidate that some
+`PREREGISTERED` event declares under that trial id (see *Phase 8A.1*). It does
+**not** vouch for `LEGACY_IMPORTED` events, whose digest is whatever the importer
+derived and which have nothing declared to compare with, and it does not vouch
+for `EVIDENCE_SEALED`, `RESULT_RECORDED` or `FAILED`, whose digests remain
+client-asserted. A start already in a chain from before 8A.1 was never judged and
+is not re-judged: past drift is history, counted as written.
 
 **It imports evidence; it does not analyse it.** There is no walk-forward
 analysis, no Deflated Sharpe Ratio, no Probability of Backtest Overfitting, no
@@ -1119,7 +1119,7 @@ uv run trading-house backtest run --mark-to-market \
 |---|---|---|
 | `--trial-id` | `--trial-id trial-1` | The declared candidate this run belongs to. `record` checks it against the bundle, and refuses a trial no preregistered protocol declared. |
 | `--attempt-id` | `--attempt-id attempt-1` | The started attempt. Checked against the bundle the same way. |
-| `--spec-sha256` | `--spec-sha256 1a2b3c4d5e6f7081...` | The preregistered specification digest, as the trial declares it. **Recorded, not vouched for** — nothing in 8B1 compares it to the sealed `PREREGISTERED` event; see *What Phase 8A does not implement* above, which says the same about the counters. |
+| `--spec-sha256` | `--spec-sha256 1a2b3c4d5e6f7081...` | The preregistered specification digest, as the trial declares it. **Recorded in the bundle, not checked by `backtest run`**, which holds no ledger connection. The ledger vouches for it at `research trial start`, which refuses a digest the trial never declared; see *Phase 8A.1*. |
 | `--agent-run-id` | `--agent-run-id run-2026-03-01` | The agent run that produced the candidate. `backtest run` holds no ledger connection, so it cannot read the authoritative value and does not pretend to. |
 | `--occurred-at` | `--occurred-at 2026-03-01T12:30:00` | When the run happened, as declared provenance. |
 | `--registered-at` | `--registered-at 2026-03-01T13:00:00` | When the attempt was registered. Not the same instant as `occurred_at`: a run happens before it is recorded, and defaulting one to the other would assert they were simultaneous. |
@@ -1522,9 +1522,11 @@ those three runs are probing. Measured on two fresh candidates: `8/5/4` →
   non-default multiplier into the id (see *Phase 8B3*); every 1.0x id is
   unchanged. The report still prints `source_result_sha256` and the document
   address on every row.
-- **`spec_sha256` is still unvouched *in the ledger*.** The ledger preserves the
-  digest and cannot *vouch* for it — see *What Phase 8A does not implement* above.
-  The report is a different matter: it holds the sealed protocol, and
+- **`spec_sha256` was unvouched *in the ledger* when 8B2b shipped.** Since 8A.1
+  the ledger vouches for it on `EXECUTION_STARTED` of preregistered trials at
+  append time — not for `LEGACY_IMPORTED`, not for other event types, and past
+  drift is history (see *Phase 8A.1*). The report remains the check that ties a
+  bundle to a candidate: it holds the sealed protocol, and
   `canonical_sha256` over a `TrialSpec` is deterministic, so the identity check
   compares each level's declared digest against the registration and refuses a
   grid that names a specification no candidate has. That includes a grid whose
@@ -1700,8 +1702,33 @@ as `scenario-report` refuses it.
   return derivation refuses non-positive equity; that is fail-closed and stated.
 - **Compounding at 1.5x and 2.0x is not run.** One rerun at the baseline is what
   the umbrella design asks for.
-- **`spec_sha256` is still unvouched in the ledger** (see *What Phase 8A does not
-  implement*).
+- **`spec_sha256` vouching is partial.** Since 8A.1 the ledger vouches for the
+  digest of an `EXECUTION_STARTED` of a preregistered trial at append time; it does
+  not vouch for `LEGACY_IMPORTED` or other event types (see *Phase 8A.1*).
+
+## Phase 8A.1 - ledger-level specification vouching
+
+`research trial start` and every other writer reach the ledger through one append
+transaction, and that transaction now refuses an `EXECUTION_STARTED` whose
+`spec_sha256` is not the `canonical_sha256` of a `TrialSpec` that some
+`PREREGISTERED` event declares under the start's trial id. The refusal is the
+ledger's existing single error (`TrialLedgerAppendError`, exit 15 from the CLI),
+appends no row, and names no digest.
+
+- **Set, not first match.** A trial registered by two protocols declaring
+  different specifications accepts either declared digest, and refuses a third.
+- **Legacy-only trials are exempt.** A trial declared only by `LEGACY_IMPORTED`
+  has no registration to compare with, so its start is not checked.
+- **Same transaction.** The declared candidates are read on the append's own
+  cursor, so the check reads the chain the row is about to extend.
+- **Retries still succeed.** A retry of an already-appended start carries a digest
+  that was declared when it first passed; the chain is append-only, so it passes
+  again and the append function then recognises it by event id.
+- **History is not re-judged.** `replay`, `verify` and `count` read what is in the
+  chain; a drifted start appended before 8A.1 still verifies and is still counted.
+- **What is not vouched.** `LEGACY_IMPORTED` and `EVIDENCE_SEALED`,
+  `RESULT_RECORDED` and `FAILED` digests remain client-asserted; only starts feed
+  `trial_counters`. No migration and no new event type were added.
 
 ## Operator commands
 

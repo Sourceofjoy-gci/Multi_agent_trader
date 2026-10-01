@@ -1613,10 +1613,10 @@ def research_trial_start(
     is: an execution nobody declared is still a draw from the search space, and
     admitting one would let the denominator be widened by whoever cares to.
 
-    ``--spec-sha256`` is the operator's word, not a lookup. The preregistration
-    seals a whole protocol and does not publish a per-candidate digest, so the
-    chain preserves what it is given and ``count`` counts distinct digests. That
-    is stated in the README rather than left to be discovered.
+    ``--spec-sha256`` is the ``canonical_sha256`` of the declared ``TrialSpec``,
+    not of the protocol. The ledger refuses (exit 15, nothing written) a digest
+    that no preregistration declares for the trial; a trial declared only by a
+    legacy import is not checked. See the README's "Phase 8A.1".
 
     ``--started-at`` is the operator's declared start time, for the same reason
     and with the same caveat as a bundle's ``registered_at``: it is provenance,
@@ -1784,10 +1784,10 @@ def research_trial_count() -> None:
     count without being a new lottery, and that distinction is the reason these
     are three numbers rather than one.
 
-    The specification count is a set of the ``spec_sha256`` values callers
-    supplied, and the chain preserves them without vouching that any of them
-    matches a candidate the protocol actually declared. Read it as a label the
-    ledger keeps, not a verdict.
+    The specification count is a set of the ``spec_sha256`` values the chain's
+    starts carry. The ledger vouches for a start of a preregistered trial at
+    append time (Phase 8A.1), but not for a legacy import, not for other event
+    types, and not for a start appended before 8A.1.
     """
 
     def operation() -> dict[str, JsonValue]:

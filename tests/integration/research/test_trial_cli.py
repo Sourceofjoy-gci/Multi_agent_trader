@@ -201,6 +201,18 @@ def _protocol() -> TrialProtocol:
     )
 
 
+def declared_spec_sha256(trial_id: str = "trial-1") -> str:
+    """The digest a start for this trial must carry: its declared candidate's.
+
+    The one place a test takes a start's digest from, because the ledger refuses
+    any other (Phase 8A.1). It is the ``TrialSpec``'s digest and not the
+    protocol's: a protocol's digest is a different kind of address.
+    """
+
+    (candidate,) = (c for c in _protocol().candidates if c.trial_id == trial_id)
+    return canonical_sha256(candidate)
+
+
 def _bundle(trial_id: str, attempt_id: str, result: BacktestResult) -> EvidenceBundle:
     return EvidenceBundle(
         result_schema_version=1,
@@ -292,8 +304,8 @@ def _start(
     """``start`` as an operator runs it, with no assertion on the outcome.
 
     Returned rather than asserted so the refusal and the retry cases can read the
-    exit code themselves. ``--spec-sha256`` defaults to the registered protocol's
-    own digest, which is the value an operator copying the README will type, and
+    exit code themselves. ``--spec-sha256`` defaults to the trial's declared
+    candidate digest, which is the only value the ledger accepts, and
     ``--started-at`` is left off entirely unless the case is about the declared
     clock -- the default-clock invocation is the one most operators will run.
     """
@@ -307,7 +319,7 @@ def _start(
         "--attempt-id",
         attempt_id,
         "--spec-sha256",
-        spec_sha256 or canonical_sha256(_protocol()),
+        spec_sha256 or declared_spec_sha256(trial_id),
     ]
     if started_at is not None:
         argv += ["--started-at", started_at]
@@ -427,10 +439,44 @@ def test_start_refuses_a_trial_the_protocol_never_declared(
     _register(tmp_path)
     before = len(_ledger(research_ledger_dsn).events())
 
-    result = _start(trial_id="trial-never-declared", attempt_id="attempt-9")
+    result = _start(
+        trial_id="trial-never-declared",
+        attempt_id="attempt-9",
+        spec_sha256=declared_spec_sha256(),
+    )
 
     assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND
     assert len(_ledger(research_ledger_dsn).events()) == before
+    assert _verify().exit_code == cli.ExitCode.OK
+
+
+def test_start_refuses_a_digest_its_trial_never_declared_and_writes_nothing(
+    tmp_path: Path, research_env: Path, research_ledger_dsn: str
+) -> None:
+    """Phase 8A.1: the ledger vouches for the digest, and the CLI inherits the refusal.
+
+    The digest is a real one -- the protocol's own, and the other candidate's --
+    so what is refused is that *this trial* never declared it, not that it is
+    malformed. Exit 15 is the ledger's existing append-refusal code, and the
+    event count and counters afterwards are what separate "refused" from "wrote
+    something the operator cannot see".
+    """
+
+    _register(tmp_path)
+    before = _ledger(research_ledger_dsn).events()
+
+    for digest in (canonical_sha256(_protocol()), declared_spec_sha256("trial-2"), "d" * 64):
+        result = _start(spec_sha256=digest)
+        assert result.exit_code == cli.ExitCode.TRIAL_LEDGER_APPEND, result.stderr
+        assert result.stdout == ""
+        assert json.loads(result.stderr) == {
+            "status": "error",
+            "detail": "trial ledger append failed",
+        }
+
+    assert _ledger(research_ledger_dsn).events() == before
+    counters = runner.invoke(cli.app, ["research", "trial", "count"])
+    assert json.loads(counters.stdout)["effective_specifications"] == 0
     assert _verify().exit_code == cli.ExitCode.OK
 
 

@@ -52,10 +52,10 @@ from tests.integration.marketdata.conftest import seed
 # root -- is this directory's ``research_env`` fixture, in ``conftest.py``.
 from tests.integration.research.test_trial_cli import (
     _ledger,
-    _protocol,
     _register,
     _start,
     _store,
+    declared_spec_sha256,
 )
 from tests.unit.research.backtest.conftest import _contract
 from trading_house import cli
@@ -171,12 +171,10 @@ def _identity_options(trial_id: str = TRIAL_ID, attempt_id: str = ATTEMPT_ID) ->
     return {
         "--trial-id": trial_id,
         "--attempt-id": attempt_id,
-        # The registered protocol's own digest, which is what an operator
-        # copying the README types. Nothing in 8B1 compares it to a
-        # preregistration -- ``trial record`` checks the bundle's trial and
-        # attempt ids and no more -- so the bundle carries what the operator
-        # declared, recorded rather than verified.
-        "--spec-sha256": canonical_sha256(_protocol()),
+        # The trial's declared candidate digest: the start this flow appends is
+        # vouched for against the preregistration (Phase 8A.1), and a digest the
+        # trial never declared is refused before anything is written.
+        "--spec-sha256": declared_spec_sha256(trial_id),
         "--agent-run-id": "run-evidence",
         "--occurred-at": OCCURRED_AT,
         "--registered-at": REGISTERED_AT,

@@ -127,6 +127,14 @@ SELECT EXISTS (
        OR (event_type = 'preregistered' AND event_json @> %s::pg_catalog.jsonb)
 )
 """
+# The registrations that declare a trial, as their canonical bytes: the candidate
+# family is parsed from the chain's own representation, like every other reader.
+# The containment document is ``_lineage_parameters``' second argument, so this
+# read and ``_LINEAGE_SQL`` ask about the same set of events.
+_DECLARING_PROTOCOLS_SQL = (
+    "SELECT canonical_event FROM research.trial_ledger_events "
+    "WHERE event_type = 'preregistered' AND event_json @> %s::pg_catalog.jsonb"
+)
 # ponytail: the containment arm is a sequential scan of a chain that is one row per
 # trial, not per candidate. A GIN index on event_json turns it into a lookup; do that
 # when a chain is large enough to measure, not before.
@@ -166,6 +174,10 @@ class _StaleHead(_OperationFailure):
 
 class _UnregisteredTrial(Exception):
     """Internal marker: the trial this outcome names was never declared."""
+
+
+class _UnvouchedSpecification(Exception):
+    """Internal marker: a start's digest is not one its trial's registrations declare."""
 
 
 _OPERATION_FAILED = _OperationFailure()
@@ -277,6 +289,38 @@ def _is_registered(cursor: psycopg.Cursor[tuple[Any, ...]], trial_id: str) -> bo
     return bool(row is not None and row[0])
 
 
+def _start_digest_is_vouched(
+    cursor: psycopg.Cursor[tuple[Any, ...]], trial_id: str, spec_sha256: str
+) -> bool:
+    """Whether a start's digest is one some registration declares for its trial.
+
+    The set of digests across *every* registration naming the trial, because a
+    trial may be registered by more than one protocol and the honest reading of
+    that is "any declared specification", not "the first one found". A trial
+    declared only by a legacy import has no registration to compare with and is
+    exempt. Runs on the append's own cursor, so it reads the chain the row is
+    about to extend. A stored protocol that does not parse raises, which the
+    caller turns into a refused append rather than a pass.
+    """
+
+    cursor.execute(_DECLARING_PROTOCOLS_SQL, (_lineage_parameters(trial_id)[1],))
+    rows = cursor.fetchall()
+    if not rows:
+        return True
+    declared = {
+        canonical_sha256(candidate)
+        for row in rows
+        for candidate in _preregistered_candidates(_event_from_canonical(bytes(row[0])))
+        if candidate.trial_id == trial_id
+    }
+    return spec_sha256 in declared
+
+
+def _preregistered_candidates(event: LedgerEvent) -> tuple[TrialSpec, ...]:
+    payload = event.payload
+    return payload.protocol.candidates if isinstance(payload, PreregisteredPayload) else ()
+
+
 def _tail_hash(cursor: psycopg.Cursor[tuple[Any, ...]]) -> bytes:
     cursor.execute(_TAIL_HASH_SQL)
     row = cursor.fetchone()
@@ -305,6 +349,15 @@ def _append_operation(
             )
             if unregistered:
                 raise _UnregisteredTrial()
+            # The one event type whose digest feeds ``trial_counters`` is vouched
+            # for here, where the row is written. Events already in the chain are
+            # never re-judged: replay and verify do not come through this path.
+            if (
+                event.event_type is LedgerEventType.EXECUTION_STARTED
+                and event.trial_id is not None
+                and not _start_digest_is_vouched(cursor, event.trial_id, event.spec_sha256)
+            ):
+                raise _UnvouchedSpecification()
             expected_previous_hash = _tail_hash(cursor)
             cursor.execute(
                 "SELECT * FROM research.append_trial_ledger_event(%s, %s, %s, %s)",

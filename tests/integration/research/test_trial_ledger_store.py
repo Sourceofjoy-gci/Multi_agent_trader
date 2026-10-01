@@ -33,6 +33,7 @@ import trading_house.research.ledger_store as ledger_store
 from trading_house.core.errors import TrialLedgerAppendError, TrialLedgerIntegrityError
 from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.models import Timeframe
+from trading_house.ops.ledger import execution_started_event
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.canonical import canonical_bytes, canonical_sha256
 from trading_house.research.ledger_store import (
@@ -146,6 +147,7 @@ def _attempt_event(
     *,
     event_type: LedgerEventType,
     payload: LedgerEventPayload,
+    spec_sha256: str = "d" * 64,
 ) -> LedgerEvent:
     return LedgerEvent(
         event_id=uuid5(NAMESPACE_URL, f"test:{event_type.value}:{trial_id}"),
@@ -154,16 +156,39 @@ def _attempt_event(
         event_type=event_type,
         trial_id=trial_id,
         attempt_id=f"attempt-{trial_id}",
-        spec_sha256="d" * 64,
+        spec_sha256=spec_sha256,
         occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
         payload=payload,
     )
 
 
-def _execution_started_event(trial_id: str) -> LedgerEvent:
+def _declared_spec(trial_id: str) -> TrialSpec:
+    """The candidate ``_declared`` seals for a trial id."""
+
+    return TrialSpec(
+        trial_id=trial_id,
+        spec_id=f"spec-{trial_id}",
+        rationale="declared before execution",
+        parameter_space=(("window", trial_id),),
+    )
+
+
+def _real_digest(trial_id: str) -> str:
+    """The digest a start for this trial must carry: its declared candidate's.
+
+    The one place a test start gets its digest. ``trial-N`` is the default
+    protocol's candidate; any other id is the shape ``_declared`` seals.
+    """
+
+    by_id = {candidate.trial_id: candidate for candidate in _protocol().candidates}
+    return canonical_sha256(by_id.get(trial_id) or _declared_spec(trial_id))
+
+
+def _execution_started_event(trial_id: str, spec_sha256: str | None = None) -> LedgerEvent:
     return _attempt_event(
         trial_id,
         event_type=LedgerEventType.EXECUTION_STARTED,
+        spec_sha256=spec_sha256 or _real_digest(trial_id),
         payload=ExecutionStartedPayload(
             event_type=LedgerEventType.EXECUTION_STARTED,
             attempt_id=f"attempt-{trial_id}",
@@ -235,17 +260,7 @@ def _declared(*trial_ids: str) -> LedgerEvent:
     """
 
     return _preregistered_event(
-        _protocol(
-            tuple(
-                TrialSpec(
-                    trial_id=trial_id,
-                    spec_id=f"spec-{trial_id}",
-                    rationale="declared before execution",
-                    parameter_space=(("window", trial_id),),
-                )
-                for trial_id in trial_ids
-            )
-        )
+        _protocol(tuple(_declared_spec(trial_id) for trial_id in trial_ids))
     )
 
 
@@ -683,7 +698,9 @@ def test_events_for_replay_and_counters_read_one_chain(
     assert ledger.counters() == TrialCounters(
         audit_attempts=2,
         selection_lotteries=2,
-        effective_specifications=1,
+        # Two trials, each started with its own declared digest -- the ledger no
+        # longer admits the single arbitrary digest this test used to share.
+        effective_specifications=2,
     )
 
 
@@ -1062,3 +1079,184 @@ def test_every_kind_of_tampering_is_reported_rather_than_raised(
     assert not report.valid
     assert report.reason == reason
     assert report.checked_events == 1
+
+
+# --- Phase 8A.1: a start's digest is vouched for at append time ------------------
+
+STARTED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+UNDECLARED = "d" * 64
+
+
+def _start(trial_id: str, attempt_id: str, digest: str) -> LedgerEvent:
+    return execution_started_event(trial_id, attempt_id, digest, STARTED_AT)
+
+
+def _variant(trial_id: str, window: str) -> TrialProtocol:
+    """A second protocol declaring the same trial id under a different specification."""
+
+    spec = TrialSpec(
+        trial_id=trial_id,
+        spec_id=f"spec-{window}",
+        rationale="declared before execution",
+        parameter_space=(("window", window),),
+    )
+    return _protocol((spec,))
+
+
+def test_a_start_carrying_the_declared_digest_is_appended(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    candidate = trial_protocol.candidates[0]
+
+    record = ledger.append(_start(candidate.trial_id, "a-1", canonical_sha256(candidate)))
+
+    assert record.event_type is LedgerEventType.EXECUTION_STARTED
+    assert record.spec_sha256 == canonical_sha256(candidate)
+    assert ledger.verify().valid
+
+
+def test_a_start_whose_digest_no_registration_declares_is_refused_and_appends_nothing(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    trial_id = trial_protocol.candidates[0].trial_id
+    before = ledger.events()
+
+    # The *other* candidate's digest and the protocol's own digest are both real
+    # digests in this chain, and neither is this trial's specification.
+    for digest in (
+        UNDECLARED,
+        canonical_sha256(trial_protocol.candidates[1]),
+        canonical_sha256(trial_protocol),
+    ):
+        with pytest.raises(TrialLedgerAppendError) as refused:
+            ledger.append(_start(trial_id, "a-1", digest))
+        assert research_ledger_dsn not in "".join(traceback.format_exception(refused.value))
+
+    assert ledger.events() == before
+    assert ledger.counters().effective_specifications == 0
+
+
+def test_every_registration_of_a_trial_is_a_declaration_and_a_third_digest_is_refused(
+    research_ledger_dsn: str,
+) -> None:
+    """V-2: the set across registrations, not the first one found."""
+
+    ledger = _ledger(research_ledger_dsn)
+    first, second = _variant("trial-x", "one"), _variant("trial-x", "two")
+    ledger.register(first)
+    ledger.register(second)
+    digest_one = canonical_sha256(first.candidates[0])
+    digest_two = canonical_sha256(second.candidates[0])
+
+    ledger.append(_start("trial-x", "a-1", digest_one))
+    ledger.append(_start("trial-x", "a-2", digest_two))
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(_start("trial-x", "a-3", UNDECLARED))
+
+    assert ledger.counters().effective_specifications == 2
+    assert ledger.verify().valid
+
+
+def test_a_trial_declared_only_by_a_legacy_import_keeps_its_start_unchecked(
+    research_ledger_dsn: str,
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_legacy_event("trial-legacy"))
+
+    record = ledger.append(_start("trial-legacy", "a-1", UNDECLARED))
+
+    assert record.spec_sha256 == UNDECLARED
+    assert ledger.verify().valid
+
+
+def test_retrying_an_appended_start_succeeds_and_adds_nothing(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    candidate = trial_protocol.candidates[0]
+    event = _start(candidate.trial_id, "a-1", canonical_sha256(candidate))
+
+    first = ledger.append(event)
+    # A later registration must not turn the first start into something the
+    # retry path refuses: the digest that passed once is still declared.
+    ledger.register(_variant(candidate.trial_id, "later"))
+    second = ledger.append(event)
+
+    assert second == first
+    assert [record.event_type for record in ledger.events()] == [
+        LedgerEventType.PREREGISTERED,
+        LedgerEventType.EXECUTION_STARTED,
+        LedgerEventType.PREREGISTERED,
+    ]
+    assert ledger.verify().valid
+
+
+def test_history_holding_a_drifted_start_still_replays_and_verifies(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    """Events already in the chain are never re-judged.
+
+    The drifted row is written through the database's own append function, which
+    is the path every row took before the store checked anything, so this is the
+    local chain's ``att-b2`` shape rather than a forged one.
+    """
+
+    ledger = _ledger(research_ledger_dsn)
+    ledger.register(trial_protocol)
+    trial_id = trial_protocol.candidates[0].trial_id
+    ledger.append(_start(trial_id, "a-1", canonical_sha256(trial_protocol.candidates[0])))
+    drifted = _start(trial_id, "a-2", UNDECLARED)
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(drifted)
+    tail = bytes.fromhex(ledger.events()[-1].event_hash)
+
+    with open_runtime_connection(SecretStr(research_ledger_dsn)) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM research.append_trial_ledger_event(%s, %s, %s, %s)",
+                (
+                    canonical_bytes(drifted),
+                    Jsonb(drifted.model_dump(mode="json")),
+                    tail,
+                    bytes.fromhex(canonical_sha256(drifted.payload)),
+                ),
+            )
+        connection.commit()
+
+    report = ledger.verify()
+    assert report.valid
+    assert report.checked_events == 3
+    assert len(ledger.replay()) == 3
+    assert ledger.counters().effective_specifications == 2
+
+
+def test_vouching_reads_on_the_connection_the_append_runs_on(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol
+) -> None:
+    """V-5: one connection per append, so the check and the row share a transaction.
+
+    A check made on a second connection would read a different snapshot from the
+    one the row is chained onto, and a registration landing between the two could
+    be missed or invented. Counting the connections the factory is asked for is
+    what makes "same transaction" a measured fact.
+    """
+
+    opened = []
+
+    def counting_factory() -> psycopg.Connection[Any]:
+        opened.append(1)
+        return open_runtime_connection(SecretStr(research_ledger_dsn))
+
+    ledger = PostgresTrialLedger(counting_factory)
+    ledger.register(trial_protocol)
+    candidate = trial_protocol.candidates[0]
+    opened.clear()
+
+    ledger.append(_start(candidate.trial_id, "a-1", canonical_sha256(candidate)))
+
+    assert len(opened) == 1

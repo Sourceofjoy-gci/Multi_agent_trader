@@ -289,7 +289,7 @@ def _execution_started() -> LedgerEvent:
         event_type=LedgerEventType.EXECUTION_STARTED,
         trial_id="trial-1",
         attempt_id="attempt-1",
-        spec_sha256=canonical_sha256(_protocol()),
+        spec_sha256=canonical_sha256(_protocol().candidates[0]),
         occurred_at=_REGISTERED_AT,
         payload=ExecutionStartedPayload(
             event_type=LedgerEventType.EXECUTION_STARTED,

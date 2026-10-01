@@ -134,10 +134,9 @@ def execution_started_event(
         event_type=LedgerEventType.EXECUTION_STARTED,
         trial_id=trial_id,
         attempt_id=attempt_id,
-        # Carried, not checked. Nothing in this phase can tell whether the digest
-        # names the candidate the preregistration declared, so the chain preserves
-        # what the operator supplied and ``count`` counts distinct supplied
-        # digests. See the README's "What Phase 8A does not implement".
+        # Vouched for by the ledger at append time (Phase 8A.1): the store refuses
+        # a start whose digest is not the ``canonical_sha256`` of a candidate some
+        # preregistration declares for this trial. Legacy-only trials are exempt.
         spec_sha256=spec_sha256,
         occurred_at=started_at,
         payload=ExecutionStartedPayload(
