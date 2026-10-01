@@ -1,0 +1,24 @@
+"""Constants fixed before any Phase 8C3 output exists (spec S-11).
+
+Each value is a literal that a test pins, so it cannot move after results do. They are
+what 8D reads. Phase 8C3's measurements compare against none of them except
+``MAX_DRAWDOWN``, the level at which the Monte Carlo counts a replicate as halted, and
+``CPCV_P5_QUANTILE``, the rank the 5th-percentile measurement reads; ``MC_POLICY_VERSION``
+seeds the Monte Carlo stream.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+DSR_MINIMUM: Final = 0.95
+PBO_MAXIMUM: Final = 0.50
+MAX_DRAWDOWN: Final = 0.10
+"""A drawdown at or beyond this fraction of the running peak halts a Monte Carlo replicate.
+A deterministic reading is strict (below this); the simulation counts ``>=`` as halted."""
+MIN_OOS_TRADES: Final = 30
+MIN_REGIMES: Final = 2
+CPCV_P5_QUANTILE: Final = 0.05
+MIN_WFA_FOLDS: Final = 1
+MC_POLICY_VERSION: Final = "8c-mc-1"
+"""Differs from the bootstrap's ``8c-sb-1`` so the two seeded streams are independent."""
