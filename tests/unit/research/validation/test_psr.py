@@ -415,6 +415,20 @@ def test_dsr_over_a_multi_day_horizon_is_undefined_and_says_why(horizon: int) ->
     assert result.horizon_days == horizon
 
 
+def test_dsr_with_an_unknown_horizon_is_undefined_and_never_assumes_one_day() -> None:
+    """Phase 8C3: the horizon may be unreadable (an unregistered strategy). It is then
+    unknown, which is not one day: DSR says so rather than computing."""
+
+    result = dsr(A, trials=_counters(3, 3), horizon_days=None, chain_head_sha256=HEAD)
+
+    assert result.dsr.value is None
+    assert result.dsr.undefined_reason == (
+        "the declared holding horizon is not known, so DSR cannot be formed"
+    )
+    assert result.horizon_days is None
+    assert dsr(A, trials=_counters(3, 3), horizon_days=1, chain_head_sha256=HEAD).dsr.value
+
+
 def test_dsr_with_an_unrepresentable_trial_count_is_undefined() -> None:
     result = dsr(A, trials=_counters(10**400, 1), horizon_days=1, chain_head_sha256=HEAD)
 

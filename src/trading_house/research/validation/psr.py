@@ -14,7 +14,7 @@ It reduces to PSR at ``N = 1`` (``E[max Z] = 0``).
 
 R-7: ``E[max Z]`` uses the published Euler-Mascheroni weights, not the umbrella's 1/N.
 
-Horizon: only ``horizon_days == 1`` is implemented; any other is undefined.
+Horizon: only ``horizon_days == 1`` is implemented; any other, or an unknown one, is undefined.
 """
 
 from __future__ import annotations
@@ -139,7 +139,8 @@ class DsrResult(CanonicalModel):
     trials: NonNegativeInt
     """``max(selection_lotteries, effective_specifications)``."""
     expected_max_z: FiniteFloat | None
-    horizon_days: int
+    horizon_days: int | None
+    """The declared holding horizon in days; ``None`` when it could not be read."""
     chain_head_sha256: NonEmptyStr
     """The digest of the chain's last record when the counters were read."""
     standard_error: NonNegativeFiniteFloat | None
@@ -173,7 +174,7 @@ def dsr(
     series: ReturnSeries,
     *,
     trials: TrialCounters,
-    horizon_days: int,
+    horizon_days: int | None,
     chain_head_sha256: str,
     candidate_sharpes: Sequence[float] = (),
 ) -> DsrResult:
@@ -205,6 +206,8 @@ def dsr(
 
     if emz is None:
         return result(f"the trial count N is {n}, which has no expected maximum")
+    if horizon_days is None:
+        return result("the declared holding horizon is not known, so DSR cannot be formed")
     if horizon_days != 1:
         return result(
             f"horizon {horizon_days} days: multi-day non-overlap handling is not implemented"

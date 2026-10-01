@@ -136,6 +136,7 @@ from trading_house.ops.scenarios import (
     started_attempts,
 )
 from trading_house.ops.splits import SplitsReport, splits_report
+from trading_house.ops.validate import read_validation_inputs, statistical_evidence
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
 from trading_house.research.backtest.sizing import SizingMode
@@ -2309,6 +2310,32 @@ def research_trial_splits(
     def operation() -> dict[str, JsonValue]:
         report = _splits_report_for(trial_id, _trial_ledger(), _evidence_store())
         return cast(dict[str, JsonValue], json.loads(report.model_dump_json()))
+
+    _run(operation)
+
+
+@trial_app.command("validate")
+def research_trial_validate(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Print every statistical measurement of one registered candidate's sealed evidence.
+
+    Reads the trial's one sealed constant-notional 1.0x run, its compounding run and its
+    1.5x and 2.0x runs where they are sealed, the other candidates of its protocol, and
+    the counters of the chain. Each measurement is a finite value or the reason there is
+    none, and names the digests of the sealed documents it came from. A level with no
+    sealed run is reported as undefined, never as zero. The bootstrap and the Monte Carlo
+    are seeded from the chain's own identifiers, so a second read prints the same bytes.
+
+    Read only. It states no decision about the candidate: what a figure means for the
+    candidate is for a later step to say.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        inputs = read_validation_inputs(trial_id, _trial_ledger(), _evidence_store())
+        return cast(
+            dict[str, JsonValue], json.loads(statistical_evidence(inputs).model_dump_json())
+        )
 
     _run(operation)
 
