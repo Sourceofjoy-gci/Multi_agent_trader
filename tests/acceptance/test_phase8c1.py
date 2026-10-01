@@ -188,7 +188,7 @@ def test_splits_over_a_real_sealed_run_prints_the_hand_derived_folds_and_paths(
         "last_day": "2026-10-26",
         "days": SERIES_DAYS,
         "basis": "mark_to_market",
-        "promotion_grade": True,
+        "basis_is_mark_to_market": True,
     }
     assert (payload["purge_days"], payload["embargo_days"]) == (1, 1)  # 16 hours, rounded up
     assert payload["wfa"] == {"folds": [], "undefined_reason": WFA_UNDEFINED}
@@ -240,13 +240,20 @@ def _five_year_points() -> tuple[DailyReturnPoint, ...]:
     )
 
 
-def _five_year_report() -> Any:
+def _with_hours(*, purge: int = 16, embargo: int = 16) -> Any:
     protocol = _unit_protocol()
-    bundle = _with_trades(
-        _trade(*_instants((2020, 10, 31), (2020, 11, 2)), "1", "a"),  # f0 -> f1, exits in f1
+    policy = protocol.validation.model_copy(update={"purge_hours": purge, "embargo_hours": embargo})
+    return protocol.model_copy(update={"validation": policy})
+
+
+def _five_year_report(protocol: Any = None, *, crosser: bool = True) -> Any:
+    protocol = protocol if protocol is not None else _unit_protocol()
+    inside = (
         _trade(*_instants((2020, 12, 1), (2020, 12, 1)), "2", "b"),  # wholly inside f1
         _trade(*_instants((2020, 3, 1), (2020, 3, 1)), "4", "c"),  # wholly inside f0
     )
+    a = _trade(*_instants((2020, 10, 31), (2020, 11, 2)), "1", "a")  # f0 -> f1, exits in f1
+    bundle = _with_trades(*((a, *inside) if crosser else inside))
     bundle = bundle.model_copy(update={"daily_returns": _five_year_points()})
     return splits_report(trial_id="trial-1", protocol=protocol, sealed=("d" * 64, bundle))
 
@@ -319,15 +326,12 @@ def test_the_splits_output_carries_no_decision_vocabulary(
     names = _names_and_text(document)
     assert names, "a document with no keys or values would pass vacuously"
     keys = _keys(document)
-    # ``promotion_grade`` is the spec's name (S-3) for a fact about the input's basis: true
-    # only for a mark-to-market series. It states no decision about a candidate, and it is
-    # the one key this sweep exempts, by name.
-    assert "promotion_grade" in keys
+    # No exemption: the output names the basis fact ``basis_is_mark_to_market`` (the series'
+    # own property keeps the spec's S-3 name), so every key is held to the whole vocabulary.
+    assert "basis_is_mark_to_market" in keys
+    assert "promotion_grade" not in keys
     assert [
-        key
-        for key in keys - {"promotion_grade"}
-        for word in (*_NO_VERDICT_HELP, "total")
-        if word in key.lower()
+        key for key in keys for word in (*_NO_VERDICT_HELP, "total") if word in key.lower()
     ] == []
     assert sorted(text for text in names for word in _NO_VERDICT if word in text.lower()) == []
 
@@ -450,12 +454,43 @@ def test_more_cpcv_folds_than_days_is_refused_as_a_statistical_input() -> None:
     assert "more folds than days" in str(error.value.__cause__)
 
 
+def test_the_per_path_counts_do_not_depend_on_the_embargo() -> None:
+    """The embargo reaches only the train sample, so no PathReport count may move with it."""
+
+    none = _five_year_report(_with_hours(embargo=0))
+    large = _five_year_report(_with_hours(embargo=24 * 365))
+
+    assert (none.embargo_days, large.embargo_days) == (0, 365)
+    assert none.cpcv.paths == large.cpcv.paths
+    assert none.cpcv.paths_differ is large.cpcv.paths_differ is True
+
+
+def test_paths_differ_is_true_only_when_the_purge_and_a_straddling_trade_make_them() -> None:
+    assert _five_year_report().cpcv.paths_differ is True  # a straddles fold 1's start
+    no_purge = _five_year_report(_with_hours(purge=0))
+    assert no_purge.purge_days == 0
+    assert [(p.trades_kept, p.trades_excluded) for p in no_purge.cpcv.paths] == [(3, 0)] * 5
+    assert no_purge.cpcv.paths_differ is False
+    nothing_straddles = _five_year_report(crosser=False)
+    assert [(p.trades_kept, p.trades_excluded) for p in nothing_straddles.cpcv.paths] == [
+        (2, 0)
+    ] * 5
+    assert nothing_straddles.cpcv.paths_differ is False
+
+
+def test_a_purge_beyond_the_ceiling_is_a_statistical_input_refusal_and_not_an_overflow() -> None:
+    with pytest.raises(StatisticalInputError) as error:
+        _five_year_report(_with_hours(purge=10**9))
+
+    assert "between 0 and" in str(error.value.__cause__)
+
+
 def test_the_series_basis_is_reported_as_the_bundle_declares_it() -> None:
     bundle = _with_trades().model_copy(update={"daily_returns": _five_year_points()})
     report = splits_report(trial_id="trial-1", protocol=_unit_protocol(), sealed=("d" * 64, bundle))
 
     assert report.series.basis is ReturnSeriesBasis.REALIZED_CLOSED_TRADES
-    assert report.series.promotion_grade is False
+    assert report.series.basis_is_mark_to_market is False
 
 
 # --- 5. the README -----------------------------------------------------------------
@@ -500,6 +535,17 @@ def test_the_readme_states_what_8c1_is_and_is_not() -> None:
         "the test-side clause uses `purge_days` only as an on/off switch",
         "A path's return series is the whole series.",
         "16 hours is 1 day",
+        "CPCV is a partition-and-exclude exercise, not a refit loop.",
+        "**not** out-of-sample robustness",
+        "must not be described as measuring generalisation",
+        "varying `embargo_hours` leaves every path count unchanged",
+        "`purge_hours` of 0 makes every path identical",
+        "`paths_differ`",
+        "whose own predecessor is a *test* fold is kept",
+        'so "24 months" of training is 24 months minus those days',
+        "(`searchsorted`, `isin`, `concatenate`)",
+        "A purge or embargo over 36,500 days is refused",
+        "`basis_is_mark_to_market`",
     ):
         assert sentence in section, sentence
     assert "| 20 | `sealed evidence is not a usable statistical input` |" in README

@@ -2301,7 +2301,7 @@ def research_trial_splits(
     its registered protocol declared. The folds are calendar arithmetic over the run's
     daily series; a series too short for one walk-forward fold is reported as undefined,
     with the reason. Each CPCV path also states how many closed trades its test samples
-    kept and dropped under the declared purge and embargo.
+    kept and dropped under the declared purge. The counts do not depend on the embargo.
 
     Read only. It computes no statistic and states no decision about the candidate.
     """

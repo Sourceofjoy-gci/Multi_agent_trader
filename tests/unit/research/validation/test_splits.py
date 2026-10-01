@@ -306,7 +306,33 @@ def test_a_negative_purge_is_refused() -> None:
     with pytest.raises(StatisticalInputError) as error:
         _wfa(_span(date(2020, 1, 1), date(2024, 12, 31)), purge=-1)
 
-    _refused(error, "purge cannot be negative")
+    _refused(error, "between 0 and")
+
+
+def test_a_purge_beyond_the_ceiling_is_refused_before_any_date_arithmetic() -> None:
+    """A purge of 10**9 hours is 41,666,667 days: ``timedelta`` would overflow (exit 1)."""
+
+    days = _span(date(2020, 1, 1), date(2024, 12, 31))
+
+    with pytest.raises(StatisticalInputError) as error:
+        _wfa(days, purge=hours_to_days(10**9))
+    _refused(error, "between 0 and")
+
+
+@pytest.mark.parametrize("which", ["unsorted", "gap", "repeat"])
+def test_walk_forward_days_must_be_contiguous_and_in_order(which: str) -> None:
+    days = list(_span(date(2020, 1, 1), date(2024, 12, 31)))
+    if which == "unsorted":
+        days[10], days[11] = days[11], days[10]
+    elif which == "gap":
+        del days[10]
+    else:
+        days[11] = days[10]
+
+    with pytest.raises(StatisticalInputError) as error:
+        _wfa(tuple(days))
+
+    _refused(error, "contiguous and in order")
 
 
 # --- CPCV folds ---------------------------------------------------------------

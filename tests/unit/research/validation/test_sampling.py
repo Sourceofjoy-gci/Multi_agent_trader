@@ -17,13 +17,13 @@ import pytest
 from trading_house.core.errors import StatisticalInputError
 from trading_house.research.trial_ledger import ReturnSeriesBasis
 from trading_house.research.validation.sampling import (
-    MAX_ZONE_DAYS,
     path_return_series,
     path_trade_sample,
     split_samples,
 )
 from trading_house.research.validation.series import ReturnSeries, TradeSample
 from trading_house.research.validation.splits import (
+    MAX_ZONE_DAYS,
     CpcvAssignment,
     CpcvFold,
     CpcvPath,

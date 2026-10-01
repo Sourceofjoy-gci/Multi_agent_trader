@@ -322,3 +322,99 @@ def test_a_pnl_array_of_the_wrong_length_is_refused() -> None:
         )
 
     _refused(error, "one value per entry")
+
+
+# --- hand-built inputs are normalised, not trusted ----------------------------
+
+
+def test_a_series_keeps_its_own_read_only_copy_and_a_tuple_of_days() -> None:
+    values = np.full(MIN_SERIES_DAYS, 0.001)
+
+    series = ReturnSeries(
+        days=list(_days(MIN_SERIES_DAYS)),  # type: ignore[arg-type]
+        values=values,
+        basis=ReturnSeriesBasis.MARK_TO_MARKET,
+        evidence_sha256=DIGEST,
+    )
+    values[0] = 9.0
+
+    assert isinstance(series.days, tuple)
+    assert series.values[0] == 0.001
+    assert series.values is not values
+    assert not series.values.flags.writeable
+    assert values.flags.writeable
+
+
+def test_series_values_that_are_not_an_array_are_refused_not_coerced() -> None:
+    with pytest.raises(StatisticalInputError) as error:
+        _series(values=[0.001] * MIN_SERIES_DAYS)
+
+    _refused(error, "must be a numpy array")
+
+
+@pytest.mark.parametrize(
+    ("days", "fragment"),
+    [
+        (30, "must be a sequence"),
+        (tuple(datetime(2026, 1, 1 + i, tzinfo=UTC) for i in range(30)), "must be dates"),
+        (("2026-01-01",) * 30, "must be dates"),
+    ],
+    ids=["not iterable", "datetimes", "strings"],
+)
+def test_series_days_that_are_not_dates_are_refused_not_a_bare_error(
+    days: object, fragment: str
+) -> None:
+    with pytest.raises(StatisticalInputError) as error:
+        _series(days=days)
+
+    _refused(error, fragment)
+
+
+def _sample_fields(**changes: object) -> dict[str, object]:
+    fields: dict[str, object] = {
+        "entry_day": (date(2026, 3, 1),),
+        "exit_day": (date(2026, 3, 1),),
+        "entry_at": (_at(1, 9),),
+        "exit_at": (_at(1, 10),),
+        "net_pnl": np.array([1.0]),
+        "session": ("london",),
+    }
+    return {**fields, **changes}
+
+
+def test_a_trade_sample_keeps_tuples_and_its_own_read_only_copy() -> None:
+    pnl = np.array([1.0])
+
+    sample = TradeSample(
+        **_sample_fields(  # type: ignore[arg-type]
+            entry_day=[date(2026, 3, 1)], entry_at=[_at(1, 9)], session=["london"], net_pnl=pnl
+        )
+    )
+    pnl[0] = 5.0
+
+    assert sample.entry_day == (date(2026, 3, 1),)
+    assert isinstance(sample.entry_at, tuple)
+    assert isinstance(sample.session, tuple)
+    assert sample.net_pnl.tolist() == [1.0]
+    assert not sample.net_pnl.flags.writeable
+
+
+@pytest.mark.parametrize(
+    ("changes", "fragment"),
+    [
+        ({"entry_day": (date(2026, 3, 2),)}, "entry day is not the day"),
+        ({"exit_day": (date(2026, 3, 2),)}, "exit day is not the day"),
+        ({"entry_at": ("2026-03-01",), "exit_at": ("2026-03-01",)}, "must be datetimes"),
+        ({"entry_day": ("2026-03-01",)}, "must be dates"),
+        ({"net_pnl": [1.0]}, "must be a numpy array"),
+        ({"session": 7}, "must be a sequence"),
+    ],
+    ids=["entry day", "exit day", "instants", "days", "pnl list", "not iterable"],
+)
+def test_a_hand_built_trade_sample_is_cross_checked(
+    changes: dict[str, object], fragment: str
+) -> None:
+    with pytest.raises(StatisticalInputError) as error:
+        TradeSample(**_sample_fields(**changes))  # type: ignore[arg-type]
+
+    _refused(error, fragment)

@@ -3,11 +3,13 @@
 Phase 8C1. Candidates are fixed-parameter -- nothing is refit -- so the returns of
 a test fold are the same in every CPCV split, and without something that makes a
 split's test sample depend on which folds were held out, every path would be the
-same full series and a gate on the spread of paths would be vacuous. R-3 is that
-something: a closed trade is dropped from a split's samples when its
-``[entry_day, exit_day]`` span reaches across a boundary between a test fold and
-a non-test fold, so paths differ by which neighbours were held out, which is
-what purging is for. The rules are specified in the design (section 3, R-3) and
+same full series. R-3 is that something: a test trade is dropped when it crosses
+the start of its own exit fold into a non-test fold, and a train trade when its span
+reaches the purge or embargo zone of a test fold. Paths then differ only by which
+single fold's boundary-crossing trades survive. That is bookkeeping about how many
+trades straddle fold starts, not a measure of out-of-sample robustness. The embargo
+affects only the train sample; per-path test counts depend on the purge alone. The
+rules are specified in the design (section 3, R-3) and
 restated on ``split_samples``.
 
 A trade belongs to the fold that contains its **exit** day. Days are compared as
@@ -24,10 +26,12 @@ import numpy as np
 import numpy.typing as npt
 
 from trading_house.research.validation.series import ReturnSeries, TradeSample, refusal
-from trading_house.research.validation.splits import CpcvFold, CpcvPath, CpcvSplit
-
-MAX_ZONE_DAYS = 36_500
-"""A purge or embargo longer than a century is a typo, not a policy."""
+from trading_house.research.validation.splits import (
+    CpcvFold,
+    CpcvPath,
+    CpcvSplit,
+    require_zone,
+)
 
 _ONE_DAY = timedelta(days=1)
 
@@ -80,12 +84,6 @@ def _require_path(
             raise refusal("a path takes a fold from a split that does not test it")
 
 
-def _require_zone(purge_days: int, embargo_days: int) -> None:
-    for days in (purge_days, embargo_days):
-        if days < 0 or days > MAX_ZONE_DAYS:
-            raise refusal(f"a purge or embargo must be between 0 and {MAX_ZONE_DAYS} days")
-
-
 def split_samples(
     trades: TradeSample,
     days: Sequence[date],
@@ -116,7 +114,7 @@ def split_samples(
     necessarily reaches the zone; the train side uses its length.
     """
 
-    _require_zone(purge_days, embargo_days)
+    require_zone(purge_days, embargo_days)
     _require_tiling(days, folds)
     tests = sorted(set(test_indices))
     if not tests or tests[0] < 0 or tests[-1] >= len(folds):

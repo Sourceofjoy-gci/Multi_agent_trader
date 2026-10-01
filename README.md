@@ -1713,9 +1713,11 @@ as `scenario-report` refuses it.
 builds the **input** the later statistics will read and the **splits** they will be
 cut by, and one read command, `research trial splits`, that prints both for a
 sealed candidate. It adds **no statistic, no verdict and no gate**, no migration,
-no event type and no command that writes. NumPy is the one new dependency, and it
-is held to the `float64` conversion at the boundary below (`pyproject.toml` names
-`numpy>=2,<3`; it was already in `uv.lock` as a transitive pin).
+no event type and no command that writes. NumPy is the one new dependency
+(`pyproject.toml` names `numpy>=2,<3`; it was already in `uv.lock` as a transitive
+pin). It carries the `float64` arrays, where `Decimal` becomes `float` once at the
+boundary below, and it also does the integer index arithmetic for the sampling
+(`searchsorted`, `isin`, `concatenate`).
 
 ### What exists
 
@@ -1742,12 +1744,17 @@ is held to the `float64` conversion at the boundary below (`pyproject.toml` name
 - **Purge and embargo sampling** (`research/validation/sampling.py`). Hours from the
   protocol's `ValidationSpec` become whole days by rounding up (16 hours is 1 day).
   `split_samples` applies the R-3 rule below, and `path_trade_sample` reports, per
-  path, which closed trades its test samples kept and which they dropped.
+  path, which closed trades its test samples kept and which they dropped. Those
+  per-path counts are test-side and driven by the purge alone: the embargo affects
+  only the train sample (which 8C2's PBO will use), and varying `embargo_hours`
+  leaves every path count unchanged.
 - **`research trial splits --trial-id T`.** Reads the trial's one sealed 1.0x
   constant-notional run and the validation policy its registered protocol
-  declared, and prints the series span, basis and `promotion_grade`, the walk-forward
+  declared, and prints the series span, basis and `basis_is_mark_to_market` (the
+  series' `promotion_grade` property), the walk-forward
   folds, the CPCV folds, the splits and the paths with the trade counts each kept
-  and dropped. It takes no option the protocol owns.
+  and dropped (under the declared purge), and `paths_differ`: whether the paths'
+  kept-trade sets are not all identical. It takes no option the protocol owns.
 
 ### The R-3 rule, and why
 
@@ -1779,6 +1786,26 @@ side uses its length), because a trade that crosses `s` necessarily reaches the 
   this repository's tests span days, and the policy needs three years, so the
   CPCV half is what such a run prints. A series under 30 days is refused outright
   (exit 20).
+- **CPCV here is not a robustness test.** For a fixed-parameter candidate CPCV is
+  a partition-and-exclude exercise, not a refit loop. Each path keeps
+  boundary-crossing trades at exactly one fold and drops them at every other fold,
+  so the paths differ only in which single fold's crossers survive. The spread
+  measures how many trades straddle fold starts, **not** out-of-sample robustness,
+  and a later 5th-percentile gate over the paths must not be described as measuring
+  generalisation.
+- **`purge_hours` of 0 makes every path identical,** because the test-side clause
+  is off when the purge is under a day. So does a run in which no trade straddles a
+  fold start (typical of intraday runs). `paths_differ` is `false` then, and a
+  measurement over the paths has nothing to say.
+- **A remaining gap in R-3.** A test trade that entered in a non-test fold two or
+  more folds back and exits in a test fold whose own predecessor is a *test* fold
+  is kept, because only its own exit fold's boundary is judged.
+- **The effective walk-forward training window is shorter than the declared
+  months.** The purge removes `purge_days` from the end of the training and the
+  validation windows, and month-end clamping moves a boundary by one to three
+  days, so "24 months" of training is 24 months minus those days.
+- **A purge or embargo over 36,500 days is refused** (exit 20) before any date
+  arithmetic, rather than overflowing.
 - **A path's return series is the whole series.** Returns are not purged, so
   `path_return_series` reproduces the full series for every path; paths differ in
   their trade samples.
@@ -1840,7 +1867,7 @@ uv run trading-house --help
 | `trading-house research trial scenario-report` | Check a candidate's sealed scenarios against the grid recovered from the chain's `PREREGISTERED` event, and report. States no verdict |
 | `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one, no 1.0x constant-notional baseline is sealed, the run's replay inputs differ from that baseline's, or the code's strategy version is not the registered one. Refuses an `--attempt-id` the trial has started and not sealed as this run's own rerun; an id already sealed as this run's rerun is a no-op skip. A run that stops after its start row spends its id: retry under a new `--attempt-id` (`audit_attempts` rises by one more) |
 | `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
-| `trading-house research trial splits` | Print the walk-forward folds and the CPCV folds, splits and paths of a registered candidate's one sealed 1.0x constant-notional run, with the closed trades each path kept and dropped under the declared purge and embargo. Read only; no statistic, no verdict. A series under 30 days, or a policy the series cannot honour, is refused with exit 20 |
+| `trading-house research trial splits` | Print the walk-forward folds and the CPCV folds, splits and paths of a registered candidate's one sealed 1.0x constant-notional run, with the closed trades each path's test samples kept and dropped (test-side, purge-driven; the embargo affects only the train sample) and `paths_differ`. Read only; no statistic, no verdict. A series under 30 days, or a policy the series cannot honour, is refused with exit 20 |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |

@@ -14,7 +14,7 @@ from __future__ import annotations
 import calendar
 from collections.abc import Sequence
 from datetime import date, timedelta
-from itertools import combinations
+from itertools import combinations, pairwise
 
 from pydantic import NonNegativeInt
 
@@ -25,6 +25,17 @@ WFA_STEP_MONTHS = 6
 """The fold step, fixed by umbrella 7.2 and not a protocol field."""
 
 MIN_CPCV_FOLDS = 3
+
+MAX_ZONE_DAYS = 36_500
+"""A purge or embargo longer than a century is a typo, not a policy."""
+
+
+def require_zone(purge_days: int, embargo_days: int) -> None:
+    """Refuse a purge or embargo outside ``0 .. MAX_ZONE_DAYS`` days, before any date arithmetic."""
+
+    for days in (purge_days, embargo_days):
+        if days < 0 or days > MAX_ZONE_DAYS:
+            raise refusal(f"a purge or embargo must be between 0 and {MAX_ZONE_DAYS} days")
 
 
 def add_months(day: date, months: int) -> date:
@@ -82,8 +93,9 @@ def walk_forward_folds(
         raise refusal("a walk-forward needs at least one day")
     if min(train_months, validation_months, test_months) < 1:
         raise refusal("every walk-forward window must span at least one month")
-    if purge_days < 0:
-        raise refusal("a purge cannot be negative")
+    require_zone(purge_days, 0)
+    if any(later - earlier != timedelta(days=1) for earlier, later in pairwise(days)):
+        raise refusal("the walk-forward days must be contiguous and in order")
     start, last = days[0], days[-1]
     one = timedelta(days=1)
     purge = timedelta(days=purge_days)

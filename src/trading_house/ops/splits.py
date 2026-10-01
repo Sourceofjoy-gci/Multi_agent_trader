@@ -3,7 +3,8 @@
 Phase 8C1. A read over one sealed constant-notional 1.0x bundle and the protocol
 that registered it. It states the calendar arithmetic of the protocol's declared
 validation policy over the bundle's own series, and how many closed trades each
-CPCV path keeps and drops under the declared purge and embargo. It computes no
+CPCV path's test samples keep and drop under the declared purge (the per-path counts
+do not depend on the embargo, which affects only the train sample). It computes no
 statistic and states no decision: whether any of this is good enough is not a
 question this module asks.
 
@@ -38,14 +39,15 @@ from trading_house.research.validation.splits import (
 
 
 class SeriesSummary(CanonicalModel):
-    """The series the splits were cut from. ``promotion_grade`` states the basis: it is
-    true only for a mark-to-market series and describes the input, not a candidate."""
+    """The series the splits were cut from. ``basis_is_mark_to_market`` states the
+    basis (the series' ``promotion_grade`` property) and describes the input, not a
+    candidate."""
 
     first_day: date
     last_day: date
     days: PositiveInt
     basis: ReturnSeriesBasis
-    promotion_grade: bool
+    basis_is_mark_to_market: bool
 
 
 class WalkForwardReport(CanonicalModel):
@@ -75,6 +77,9 @@ class CpcvReport(CanonicalModel):
     folds: tuple[CpcvFold, ...]
     splits: tuple[CpcvSplit, ...]
     paths: tuple[PathReport, ...]
+    paths_differ: bool
+    """Whether the paths' kept-trade sets are not all identical. False when the purge
+    is under a day or no trade straddles a fold start; the paths are then one path."""
 
 
 class SplitsReport(CanonicalModel):
@@ -128,6 +133,7 @@ def splits_report(
     folds = cpcv_folds(series.days, policy.cpcv_folds)
     splits = cpcv_splits(policy.cpcv_folds)
     paths: list[PathReport] = []
+    kept_sets: set[tuple[int, ...]] = set()
     for path in cpcv_paths(policy.cpcv_folds):
         kept, excluded = path_trade_sample(
             trades,
@@ -138,6 +144,7 @@ def splits_report(
             purge_days=purge_days,
             embargo_days=embargo_days,
         )
+        kept_sets.add(tuple(kept.tolist()))
         paths.append(
             PathReport(
                 index=path.index,
@@ -156,11 +163,13 @@ def splits_report(
             last_day=series.days[-1],
             days=len(series.days),
             basis=series.basis,
-            promotion_grade=series.promotion_grade,
+            basis_is_mark_to_market=series.promotion_grade,
         ),
         closed_trades=len(trades),
         purge_days=purge_days,
         embargo_days=embargo_days,
         wfa=WalkForwardReport(folds=wfa_folds, undefined_reason=reason),
-        cpcv=CpcvReport(folds=folds, splits=splits, paths=tuple(paths)),
+        cpcv=CpcvReport(
+            folds=folds, splits=splits, paths=tuple(paths), paths_differ=len(kept_sets) > 1
+        ),
     )

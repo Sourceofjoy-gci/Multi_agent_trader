@@ -90,7 +90,9 @@ equity dips mid-trade and recovers by the exit); regime and trade-count coverage
 
 ## 7. Known limits
 
-- CPCV for a fixed-parameter candidate is a partition-and-exclude exercise, not a refit loop (R-3).
+- CPCV for a fixed-parameter candidate is a partition-and-exclude exercise, not a refit loop (R-3). Each path keeps boundary-crossing trades at exactly one fold and drops them at every other fold, so the paths differ only in which single fold's crossers survive: the spread measures how many trades straddle fold starts, not out-of-sample robustness, and the CPCV p5 gate must not be described as measuring generalisation.
+- 8C1's splits output carries `paths_differ` (false when the purge is under a day or no trade straddles a fold start, since the paths are then identical). 8C3's CPCV p5 measurement must be `undefined` when `paths_differ` is false.
+- The 8C1 output names the basis fact `basis_is_mark_to_market`; `promotion_grade` (S-3) remains the property name on `ReturnSeries`.
 - DSR's `N` is chain-global, not per strategy family: conservative, and fail-closed.
 - Regime labels are recognised, not vouched (§3).
 - Capacity stays `UNAVAILABLE` (8B3); it is an input to 8D's ninth gate, not a statistic.
