@@ -11,6 +11,7 @@ from trading_house.core.errors import (
     NonDemoAccountError,
     SchemaValidationError,
     SignatureVerificationError,
+    StatisticalInputError,
     TimestampError,
     TradingHouseError,
     TrialLedgerAppendError,
@@ -40,6 +41,7 @@ def test_exit_codes_are_stable() -> None:
         (AuditIntegrityError, "audit integrity verification failed"),
         (TrialLedgerAppendError, "trial ledger append failed"),
         (TrialLedgerIntegrityError, "trial ledger integrity verification failed"),
+        (StatisticalInputError, "sealed evidence is not a usable statistical input"),
     ],
 )
 def test_errors_expose_only_canonical_public_messages(
@@ -62,6 +64,7 @@ def test_errors_expose_only_canonical_public_messages(
         AuditIntegrityError,
         TrialLedgerAppendError,
         TrialLedgerIntegrityError,
+        StatisticalInputError,
     ],
 )
 def test_errors_reject_secret_bearing_positional_details(

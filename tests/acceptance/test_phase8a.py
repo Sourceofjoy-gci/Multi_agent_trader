@@ -108,6 +108,7 @@ TRIAL_COMMANDS = (
     "compounding",
     "compounding-report",
     "capacity",
+    "splits",
     "verify",
 )
 

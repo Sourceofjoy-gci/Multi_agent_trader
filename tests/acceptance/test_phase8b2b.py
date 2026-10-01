@@ -835,6 +835,8 @@ def test_the_four_pinned_digests_are_still_exactly_these_literals() -> None:
         ["compounding"],
         ["compounding-report"],
         ["capacity"],
+        # 8C1: the read command that prints the folds and splits.
+        ["splits"],
     ],
 )
 def test_no_report_commands_help_text_claims_a_verdict(command: list[str]) -> None:

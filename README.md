@@ -1706,6 +1706,86 @@ as `scenario-report` refuses it.
   digest of an `EXECUTION_STARTED` of a preregistered trial at append time; it does
   not vouch for `LEGACY_IMPORTED` or other event types (see *Phase 8A.1*).
 
+## Phase 8C1 - the statistical input, walk-forward folds and CPCV splits
+
+8C1 is the first slice of the statistical-validation phase (design:
+`docs/superpowers/specs/2026-10-01-phase-8c-statistical-validation-design.md`). It
+builds the **input** the later statistics will read and the **splits** they will be
+cut by, and one read command, `research trial splits`, that prints both for a
+sealed candidate. It adds **no statistic, no verdict and no gate**, no migration,
+no event type and no command that writes. NumPy is the one new dependency, and it
+is held to the `float64` conversion at the boundary below (`pyproject.toml` names
+`numpy>=2,<3`; it was already in `uv.lock` as a transitive pin).
+
+### What exists
+
+- **The validated input** (`research/validation/series.py`). `ReturnSeries` holds a
+  bundle's daily returns as `float64` over contiguous, strictly increasing UTC
+  days, with the bundle's basis and the digest it was read under; `TradeSample`
+  holds its closed trades as parallel columns, with the entry session as the label.
+  `Decimal` becomes `float` once, there, and a value that is not finite is refused.
+  A series must hold at least `MIN_SERIES_DAYS` (30) days, and a basis of `MISSING`
+  is refused. `promotion_grade` is true only for a mark-to-market series. A trial
+  with zero closed trades is an empty sample, not an error.
+- **Walk-forward folds** (`research/validation/splits.py`). Expanding training from
+  the series' first day; fold `k` ends its training window `train_months + 6k`
+  calendar months after the start, then the validation and test windows follow with
+  no gap. Boundaries are each computed from the first day, so month-end clamping
+  never accumulates. The last `purge_days` of the training and of the validation
+  window are dropped, and a fold reports the windows left. A fold that does not fit
+  inside the series is **not created**.
+- **CPCV bookkeeping.** `cpcv_folds` cuts the series into contiguous blocks whose
+  sizes differ by at most a day (earlier blocks take the remainder), `cpcv_splits`
+  lists every pair of folds in lexicographic order (15 for six folds) and
+  `cpcv_paths` the `n - 1` paths, path `p` taking for each fold the `p`-th split
+  that holds it out.
+- **Purge and embargo sampling** (`research/validation/sampling.py`). Hours from the
+  protocol's `ValidationSpec` become whole days by rounding up (16 hours is 1 day).
+  `split_samples` applies the R-3 rule below, and `path_trade_sample` reports, per
+  path, which closed trades its test samples kept and which they dropped.
+- **`research trial splits --trial-id T`.** Reads the trial's one sealed 1.0x
+  constant-notional run and the validation policy its registered protocol
+  declared, and prints the series span, basis and `promotion_grade`, the walk-forward
+  folds, the CPCV folds, the splits and the paths with the trade counts each kept
+  and dropped. It takes no option the protocol owns.
+
+### The R-3 rule, and why
+
+A candidate here is fixed-parameter: nothing is refit, so a test fold's returns are
+the same in every CPCV split and, with no further rule, every path would be the
+identical full series. R-3 is what makes a split's samples depend on which folds
+were held out. A closed trade belongs to the fold containing its **exit** day. In
+a split, a **test** trade is dropped when it spans a boundary into a non-test
+predecessor fold: for a test fold starting on `s` whose previous day lies in a
+non-test fold, when `purge_days >= 1` and `entry_day <= s - 1`. A **train** trade
+is dropped when, for any test fold `[s, e]`, `entry_day <= e + embargo_days` and
+`exit_day >= s - purge_days`. The rule is applied exactly as the design states it, including two
+properties worth knowing: the test-side clause uses `purge_days` only as an on/off
+switch (the train side uses its length), and it applies to every test trade, so a
+test trade lying wholly inside an earlier test fold is also dropped by the boundary
+of a later, isolated test fold.
+
+### What 8C1 does not establish
+
+- **No statistic and no decision.** There is no Sharpe, no deflation, no
+  overfitting probability and no bootstrap here. Whether any candidate is good
+  enough is not asked, and the command's output carries no such field.
+- **Walk-forward with zero folds is reported as undefined, never as a short fold.**
+  The output then reads `"wfa": {"folds": [], "undefined_reason": ...}` with the
+  reason naming the months a fold needs. A real policy needs 36 months for one
+  fold.
+- **The live-data example will show zero walk-forward folds.** The sealed runs in
+  this repository's tests span days, and the policy needs three years, so the
+  CPCV half is what such a run prints. A series under 30 days is refused outright
+  (exit 20).
+- **A path's return series is the whole series.** Returns are not purged, so
+  `path_return_series` reproduces the full series for every path; paths differ in
+  their trade samples.
+- **The `splits` command does not repeat the grid report's identity checks.** It
+  requires the trial's one sealed 1.0x constant-notional bundle and that the bundle
+  names the trial; `scenario-report` is where cost, window and specification
+  fidelity are checked.
+
 ## Phase 8A.1 - ledger-level specification vouching
 
 `research trial start` and every other writer reach the ledger through one append
@@ -1759,6 +1839,7 @@ uv run trading-house --help
 | `trading-house research trial scenario-report` | Check a candidate's sealed scenarios against the grid recovered from the chain's `PREREGISTERED` event, and report. States no verdict |
 | `trading-house research trial compounding` | Run, seal and report the compounding rerun of a registered candidate at its baseline costs, as one attempt. Takes `scenarios`' options with `--attempt-id`; refuses before any write when the `--protocol` file is not the registered one, no 1.0x constant-notional baseline is sealed, the run's replay inputs differ from that baseline's, or the code's strategy version is not the registered one. Refuses an `--attempt-id` the trial has started and not sealed as this run's own rerun; an id already sealed as this run's rerun is a no-op skip. A run that stops after its start row spends its id: retry under a new `--attempt-id` (`audit_attempts` rises by one more) |
 | `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
+| `trading-house research trial splits` | Print the walk-forward folds and the CPCV folds, splits and paths of a registered candidate's one sealed 1.0x constant-notional run, with the closed trades each path kept and dropped under the declared purge and embargo. Read only; no statistic, no verdict. A series under 30 days, or a policy the series cannot honour, is refused with exit 20 |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
@@ -1854,6 +1935,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 17 | `evidence integrity verification failed` | A sealed bundle is missing, altered, unparseable, or not the canonical bytes its digest names | **Stop.** Do not re-seal. The path or parse failure stays on the private cause for a log reader; back up the evidence root and re-derive from the ledger |
 | 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series cannot be produced or reduced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, a requested daily range whose first day is after its last, or a day whose prior close is not strictly positive | **Do not record this run as evidence.** Narrow the window, use a coarser timeframe, or check the requested range, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader. A series that violates its own mark identity is *not* this code — that is a pydantic `ValidationError`, which the CLI reports as `configuration invalid`, exit 2 |
 | 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were or which specification they were pinned to, a trial no registration names, or a trial two registrations name | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. Which check fired is on the error's private cause for a log reader, and the remedy differs: a level never run is a new attempt through `research trial scenarios` at a fresh `--attempt-prefix`. A level run **twice** has no remedy — the second document is at that level and completeness refuses the candidate for good, because the only fix would be surgery on the evidence root and the chain. `scenarios` and `compounding` no longer produce that state: they skip a level already sealed under their own attempt id and refuse one sealed under another. Anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
+| 20 | `sealed evidence is not a usable statistical input` | A sealed run cannot be turned into a statistical input or cut as its protocol declares: no series, days that are not contiguous, a value that is not finite, fewer than 30 days, a missing basis, a trade that exits outside the series, or a policy that cannot be applied (for example more CPCV folds than days) | **Do not measure this run.** The evidence is intact and is the candidate's own; it is too short or malformed to measure. Which refusal fired is on the error's private cause. No default is substituted |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates

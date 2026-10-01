@@ -33,6 +33,7 @@ from trading_house.core.errors import (
     ScenarioEvidenceError,
     SchemaValidationError,
     SignatureVerificationError,
+    StatisticalInputError,
     TradingHouseError,
     TrialLedgerAppendError,
     TrialLedgerIntegrityError,
@@ -381,6 +382,18 @@ def test_scenario_evidence_error_maps_to_its_own_exit_code() -> None:
 
     assert cli.EXIT_CODES[ScenarioEvidenceError] is cli.ExitCode.SCENARIO_EVIDENCE
     assert int(cli.ExitCode.SCENARIO_EVIDENCE) == 19
+
+
+def test_statistical_input_error_maps_to_its_own_exit_code() -> None:
+    """The 20 an unusable statistical input earns, pinned as a number.
+
+    Distinct from 19 because the sealed set is the right set: the evidence is intact and
+    is the candidate's own, and it simply cannot be measured (too short, a gap, a value
+    that is not finite).
+    """
+
+    assert cli.EXIT_CODES[StatisticalInputError] is cli.ExitCode.STATISTICAL_INPUT
+    assert int(cli.ExitCode.STATISTICAL_INPUT) == 20
 
 
 _COMPOUNDING_OPTIONS = [

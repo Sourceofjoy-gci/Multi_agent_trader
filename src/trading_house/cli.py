@@ -61,6 +61,7 @@ from trading_house.core.errors import (
     ScenarioEvidenceError,
     SchemaValidationError,
     SignatureVerificationError,
+    StatisticalInputError,
     TimestampError,
     TradingHouseError,
     TrialLedgerAppendError,
@@ -134,6 +135,7 @@ from trading_house.ops.scenarios import (
     sealed_levels,
     started_attempts,
 )
+from trading_house.ops.splits import SplitsReport, splits_report
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
 from trading_house.research.backtest.sizing import SizingMode
@@ -202,6 +204,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     EvidenceIntegrityError: ExitCode.EVIDENCE_INTEGRITY,
     EquityEvidenceError: ExitCode.EQUITY_EVIDENCE,
     ScenarioEvidenceError: ExitCode.SCENARIO_EVIDENCE,
+    StatisticalInputError: ExitCode.STATISTICAL_INPUT,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --
     # but they are all "the run you asked for cannot be simulated honestly", and
@@ -2271,6 +2274,41 @@ def research_trial_capacity(
         # envelope's ``status`` key.
         diagnostic = json.loads(capacity_diagnostic(protocol).model_dump_json())
         return {"capacity": cast(JsonValue, diagnostic)}
+
+    _run(operation)
+
+
+def _splits_report_for(
+    trial_id: str, ledger: PostgresTrialLedger, store: EvidenceStore
+) -> SplitsReport:
+    """The trial's one sealed 1.0x constant-notional run, cut as its protocol declares."""
+
+    sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
+    return splits_report(
+        trial_id=trial_id,
+        protocol=registered_protocol(ledger.replay(), trial_id),
+        sealed=sealed_baseline(sealed, trial_id),
+    )
+
+
+@trial_app.command("splits")
+def research_trial_splits(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Print the walk-forward folds and the CPCV folds, splits and paths of one candidate.
+
+    Reads the trial's one sealed constant-notional 1.0x run and the validation policy
+    its registered protocol declared. The folds are calendar arithmetic over the run's
+    daily series; a series too short for one walk-forward fold is reported as undefined,
+    with the reason. Each CPCV path also states how many closed trades its test samples
+    kept and dropped under the declared purge and embargo.
+
+    Read only. It computes no statistic and states no decision about the candidate.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        report = _splits_report_for(trial_id, _trial_ledger(), _evidence_store())
+        return cast(dict[str, JsonValue], json.loads(report.model_dump_json()))
 
     _run(operation)
 

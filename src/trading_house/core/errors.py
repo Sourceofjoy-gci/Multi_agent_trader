@@ -23,6 +23,7 @@ class ExitCode(IntEnum):
     EVIDENCE_INTEGRITY = 17
     EQUITY_EVIDENCE = 18
     SCENARIO_EVIDENCE = 19
+    STATISTICAL_INPUT = 20
 
 
 class TradingHouseError(Exception):
@@ -134,6 +135,23 @@ class ScenarioEvidenceError(TradingHouseError):
     """
 
     public_message = "sealed scenarios do not match the declared cost grid"
+
+
+class StatisticalInputError(TradingHouseError):
+    """Raised when sealed evidence cannot be turned into a statistical input.
+
+    Phase 8C. Every way a series or trade sample, or a split over one, can be
+    unusable ends here: nothing to measure, days that are not contiguous, a value
+    that is not finite, fewer days than a measurement needs, a basis that says
+    there is no series, or a split request the series cannot honour. One remedy for
+    all of them -- do not measure this -- and no convenient default is substituted.
+
+    The specifics ride on the private cause so an operator reading a log can be
+    told which one they hit, while the public message stays as uninformative as
+    every other code here.
+    """
+
+    public_message = "sealed evidence is not a usable statistical input"
 
 
 class BrokerUnavailableError(TradingHouseError):
