@@ -25,6 +25,7 @@ from trading_house.core.errors import ScenarioEvidenceError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
 from trading_house.ops.scenarios import (
     baseline_at,
+    declared_window,
     is_research_run,
     refuse_reportable,
     required_candidate,
@@ -237,11 +238,14 @@ def refuse_unfaithful(
     protocol: TrialProtocol,
     bundle: EvidenceBundle,
     multiplier: Decimal = Decimal(1),
+    *,
+    opened: bool = False,
 ) -> None:
     """Refuse a bundle that is not the protocol's candidate on the protocol's terms.
 
     Costs equal the protocol's baseline at ``multiplier`` (level 1 unless a stressed
-    run is being checked), the window is the protocol's, the strategy id and version
+    run is being checked), the window is the protocol's (the research window, or with
+    ``opened`` the locked holdout's: never the other), the strategy id and version
     are the protocol's, and the specification digest is the one of the protocol's
     candidate for ``trial_id``. Shared by the compounding report and ``validate``.
     """
@@ -253,7 +257,7 @@ def refuse_unfaithful(
             f"the {bundle.sizing.value} run declares {result.cost_model}; "
             f"the protocol's baseline at level {multiplier} is {declared}"
         )
-    window = (protocol.data.start, protocol.data.end)
+    window = declared_window(protocol, opened=opened)
     if (result.start, result.end) != window:
         raise ScenarioEvidenceError() from ValueError(
             f"the {bundle.sizing.value} run ran [{result.start}, {result.end}]; "

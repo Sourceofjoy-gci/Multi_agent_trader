@@ -83,8 +83,10 @@ from trading_house.core.schemas import (
     Side,
 )
 from trading_house.core.values import (
+    AssetClass,
     BookId,
     CanonicalModel,
+    Horizon,
     IntentState,
     NonEmptyStr,
     TimeInForce,
@@ -114,20 +116,29 @@ from trading_house.ops.compounding import (
     sealed_baseline,
     sealed_rerun,
 )
-from trading_house.ops.decide import decide_trial, holdout_status, latest_report, verify_reports
+from trading_house.ops.decide import (
+    decide_trial,
+    holdout_status,
+    latest_report,
+    refuse_unopenable,
+    verify_reports,
+)
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
+from trading_house.ops.holdout import refuse_outside_coverage
 from trading_house.ops.ledger import (
     build_evidence_store,
     execution_started_event,
     research_ledger_dsn,
     seal_bundle,
 )
+from trading_house.ops.package import package_from_chain, verify_package
 from trading_house.ops.scenarios import (
     ScenarioReport,
     baseline_at,
     declared_candidate,
     declared_grid,
+    declared_window,
     refuse_edited_protocol,
     refuse_other_attempts,
     refuse_reused_attempts,
@@ -146,8 +157,10 @@ from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.legacy_import import import_phase7_artifact
+from trading_house.research.packages import PromotionStage, StrategyPackage
 from trading_house.research.trial_ledger import (
     EvidenceSealedPayload,
+    HoldoutState,
     LedgerRecord,
     LegacyImportedPayload,
     TrialProtocol,
@@ -235,6 +248,7 @@ guard_app = typer.Typer(no_args_is_help=True, help="Position-guard commands.")
 backtest_app = typer.Typer(no_args_is_help=True, help="Backtest commands.")
 research_app = typer.Typer(no_args_is_help=True, help="Research commands.")
 trial_app = typer.Typer(no_args_is_help=True, help="Trial-ledger commands.")
+package_app = typer.Typer(no_args_is_help=True, help="Strategy-package commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
@@ -244,6 +258,7 @@ app.add_typer(guard_app, name="guard")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(research_app, name="research")
 research_app.add_typer(trial_app, name="trial")
+research_app.add_typer(package_app, name="package")
 
 
 @app.callback()
@@ -1866,6 +1881,9 @@ class _RunInputs:
     atr_period: int
     spread_window: int
     defective_bar_tolerance: str
+    opening: bool = False
+    """True for the one-time holdout opening: the window is the protocol's holdout, the
+    bundles are sealed as OPENED, and nothing already sealed is a level to skip."""
 
 
 def _constitution() -> LoadedConstitution:
@@ -1880,6 +1898,7 @@ def _constitution() -> LoadedConstitution:
 def _request_for(run: _RunInputs, cost_model: CostModel, sizing: SizingMode) -> BacktestRequest:
     """One level's request, built from the protocol and the options, and nothing else."""
 
+    start, end = declared_window(run.parsed, opened=run.opening)
     return _backtest_request(
         # The strategy the registration names, the window it declared, and the
         # costs built from its baseline -- things the reports check against that
@@ -1888,8 +1907,8 @@ def _request_for(run: _RunInputs, cost_model: CostModel, sizing: SizingMode) -> 
         # state and therefore cannot contradict.
         strategy=run.parsed.strategy_id,
         exit_policy=run.exit_policy,
-        start=run.parsed.data.start,
-        end=run.parsed.data.end,
+        start=start,
+        end=end,
         firm_equity=_decimal(run.firm_equity),
         cost_model=cost_model,
         atr_period=run.atr_period,
@@ -1941,6 +1960,11 @@ def _seal_levels(
     no start event, no simulation, no seal. Re-running would derive a different
     bundle and seal a second document at that level.
 
+    ``run.opening`` is the one-time holdout opening (8D2): the window is the protocol's
+    holdout, the bundles are sealed as OPENED, no level counts as already done, and the
+    replay inputs must equal the research 1.0x baseline's (``sealed_baseline`` requires
+    exactly one).
+
     The reads above and the writes below are not one transaction. The slice
     assumes a single operator: two concurrent runs could both pass the pre-flight.
     Take a ledger lock if that assumption stops holding.
@@ -1964,13 +1988,19 @@ def _seal_levels(
             )
     records = run.ledger.events_for(run.trial_id)
     sealed = sealed_bundles(records, run.store.read)
-    refuse_other_attempts(sealed, sizing=sizing, allowed=attempts.get)
-    done = sealed_levels(sealed, sizing=sizing, allowed=attempts.get)
+    if run.opening:
+        # An opening is a different experiment from the grid whose levels sit sealed beside
+        # it, and the command has already refused any earlier opening: no level is "done",
+        # and the research attempt ids are not this run's to compare against.
+        done: dict[Decimal, str] = {}
+    else:
+        refuse_other_attempts(sealed, sizing=sizing, allowed=attempts.get)
+        done = sealed_levels(sealed, sizing=sizing, allowed=attempts.get)
     running = {m: a for m, a in attempts.items() if m not in done}
     refuse_reused_attempts(
         started_attempts(records), sealed, running=running, unsealed_retry=unsealed_retry
     )
-    if sizing is SizingMode.COMPOUNDING:
+    if sizing is SizingMode.COMPOUNDING or run.opening:
         baselines = [sealed_baseline(sealed, run.trial_id)[1]]
     else:
         baselines = [b for _, b in sealed if b.sizing is SizingMode.CONSTANT_NOTIONAL]
@@ -2010,6 +2040,9 @@ def _run_and_seal(run: _RunInputs, *, attempt_id: str, request: BacktestRequest)
         agent_run_id=run.agent_run_id,
         occurred_at=_as_utc(run.occurred_at),
         registered_at=_as_utc(run.registered_at),
+        # The declared holdout hash is recorded as declared: nothing here can compute one.
+        holdout_state=HoldoutState.OPENED if run.opening else HoldoutState.NOT_DEFINED,
+        dataset_sha256=run.parsed.holdout.dataset_sha256 if run.opening else None,
     )
     return seal_bundle(bundle, ledger=run.ledger, store=run.store)
 
@@ -2394,6 +2427,11 @@ def research_trial_decide(
     makes it seal a new report. It creates no package, changes no
     stage and takes no stage option. A policy that moved since the trial's first report
     is refused (exit 21), as is an undeclared trial (exit 19).
+
+    While the holdout is opened or consumed it also reads the opened 1.5x and 2.0x bundles
+    for gate 2, and refuses (exit 21, nothing written) unless each is sealed exactly once as
+    the protocol's candidate on the holdout window. Any decision recorded after an opening
+    consumes the holdout.
     """
 
     def operation() -> dict[str, JsonValue]:
@@ -2447,6 +2485,112 @@ def research_trial_holdout(
     _run(operation)
 
 
+@trial_app.command("open-holdout")
+def research_trial_open_holdout(
+    protocol: Annotated[
+        Path,
+        typer.Option(
+            "--protocol",
+            help=(
+                "Frozen TrialProtocol JSON. The holdout window, its costs and its strategy "
+                "all come from here; nothing about them is an option."
+            ),
+        ),
+    ],
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+    attempt_prefix: Annotated[
+        str,
+        typer.Option(
+            "--attempt-prefix",
+            help="Attempt ids are this prefix, the word holdout and the multiplier.",
+        ),
+    ],
+    started_at: Annotated[datetime, typer.Option("--started-at")],
+    occurred_at: Annotated[datetime, typer.Option("--occurred-at")],
+    registered_at: Annotated[datetime, typer.Option("--registered-at")],
+    agent_run_id: Annotated[str, typer.Option("--agent-run-id")],
+    exit_policy: Annotated[ExitPolicyName, typer.Option("--exit-policy")],
+    firm_equity: Annotated[str, typer.Option("--firm-equity")],
+    contract: Annotated[Path, typer.Option("--contract")],
+    atr_period: Annotated[int, typer.Option("--atr-period", min=1)],
+    spread_window: Annotated[int, typer.Option("--spread-window", min=1)],
+    defective_bar_tolerance: Annotated[str, typer.Option("--defective-bar-tolerance")] = "0",
+) -> None:
+    """Open the locked holdout ONCE: run the cost grid over it and seal three opened bundles.
+
+    Allowed only when the derived holdout is locked and the trial's latest decision is
+    RESEARCH_PASSED under the policy in force. Runs the protocol's grid (1.0x, 1.5x, 2.0x of
+    its baseline costs) over the protocol's holdout window as three attempts, and seals each
+    bundle with its provenance holdout state opened and the protocol's DECLARED holdout
+    dataset hash (recorded as declared; nothing here can hash a bar store). The window and
+    the costs are not options. The next step is ``decide``, which reads the opened 1.5x and
+    2.0x bundles for gate 2 and, by recording any decision after the opening, consumes the
+    holdout.
+
+    Everything that needs no simulation is refused before anything is written: a holdout
+    that is not locked (a second opening included), a latest decision other than
+    RESEARCH_PASSED, a window outside the stored bars, a ``--protocol`` file that is not the
+    registered one, an invalid option, and a run whose replay inputs differ from the
+    research baseline's. A run that stops after its start row leaves a partial opening,
+    which is final: ``decide`` refuses until both stressed bundles exist, and the opening
+    cannot be repeated.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        parsed = _load_json_model(protocol, TrialProtocol)
+        spec_sha256 = canonical_sha256(_declared_candidate(parsed, trial_id))
+        ledger = _trial_ledger()
+        store = _evidence_store()
+        registered = registered_protocol(ledger.replay(), trial_id)
+        refuse_unopenable(trial_id, registered, ledger=ledger, store=store)
+        start, end = declared_window(registered, opened=True)
+        refuse_outside_coverage(
+            start, end, _bar_store().coverage(_BACKTEST_INSTRUMENT, _BACKTEST_TIMEFRAME)
+        )
+        grid = declared_grid(parsed)
+        attempts = {m: f"{attempt_prefix}-holdout-{m}" for m in grid}
+        run = _RunInputs(
+            parsed=parsed,
+            trial_id=trial_id,
+            spec_sha256=spec_sha256,
+            ledger=ledger,
+            store=store,
+            constitution=_constitution(),
+            instrument_contract=_instrument_contract(contract),
+            started_at=started_at,
+            occurred_at=occurred_at,
+            registered_at=registered_at,
+            agent_run_id=agent_run_id,
+            exit_policy=exit_policy,
+            firm_equity=firm_equity,
+            atr_period=atr_period,
+            spread_window=spread_window,
+            defective_bar_tolerance=defective_bar_tolerance,
+            opening=True,
+        )
+        digests = _seal_levels(
+            run, sizing=SizingMode.CONSTANT_NOTIONAL, attempts=attempts, unsealed_retry=False
+        )
+        bundles: list[JsonValue] = [
+            {
+                "multiplier": str(multiplier),
+                "attempt_id": attempts[multiplier],
+                "evidence_sha256": digests[multiplier],
+            }
+            for multiplier in grid
+        ]
+        return {
+            "trial_id": trial_id,
+            "bundles": bundles,
+            "holdout": cast(
+                JsonValue,
+                json.loads(holdout_status(trial_id, ledger, store).model_dump_json()),
+            ),
+        }
+
+    _run(operation)
+
+
 @trial_app.command("verify")
 def research_trial_verify() -> None:
     """Verify the event chain, then re-read every file the chain points at.
@@ -2486,6 +2630,133 @@ def research_trial_verify() -> None:
         # "is this intact?" and is written to stdout so it can be piped into a
         # reporter, while the exit code stays the signal a script branches on.
         raise typer.Exit(code=int(ExitCode.TRIAL_LEDGER_INTEGRITY))
+
+
+class PackageStageName(StrEnum):
+    """The stages a package can be requested at. ``SANDBOX`` is not one: a decision alone
+    yields it, and a command that wrote it would grant nothing."""
+
+    PAPER = "paper"
+    LIVE = "live"
+
+
+_PACKAGE_STAGES = {
+    PackageStageName.PAPER: PromotionStage.PAPER,
+    PackageStageName.LIVE: PromotionStage.LIVE,
+}
+
+
+def _read_package(path: Path) -> StrategyPackage:
+    return _load_json_model(path, StrategyPackage)
+
+
+@package_app.command("create")
+def research_package_create(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+    stage: Annotated[PackageStageName, typer.Option("--stage", case_sensitive=False)],
+    authorization_ref: Annotated[
+        str,
+        typer.Option(
+            "--authorization-ref",
+            help="A reference to a person's paper authorization. Never checked, only recorded.",
+        ),
+    ],
+    book: Annotated[str, typer.Option("--book", help="The book id the strategy belongs to.")],
+    horizon: Annotated[Horizon, typer.Option("--horizon")],
+    asset_class: Annotated[
+        list[AssetClass],
+        typer.Option("--asset-class", help="An asset class the strategy trades; repeatable."),
+    ],
+    out: Annotated[
+        Path, typer.Option("--out", help="The package file to write. Never overwritten.")
+    ],
+    capital_authorization_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--capital-authorization-ref",
+            help="LIVE only: a separate capital authorization reference, not the paper one.",
+        ),
+    ] = None,
+    signature_sha256: Annotated[
+        str | None,
+        typer.Option("--signature-sha256", help="LIVE only: a reference to a person's signature."),
+    ] = None,
+    paper_package: Annotated[
+        Path | None,
+        typer.Option("--paper-package", help="LIVE only: the PAPER package file it continues."),
+    ] = None,
+) -> None:
+    """Write a strategy package for one trial's latest recorded decision, or refuse.
+
+    Reads the chain and writes ONE JSON file; it appends nothing to the ledger, changes no
+    stage and signs nothing. PAPER needs a latest decision of PAPER_APPROVED and an
+    authorization reference. LIVE needs the PAPER package it continues, a signature
+    reference, and a capital authorization reference that is not the paper one: a decision
+    never reaches LIVE by itself. The authorization and the signature are references; nothing
+    here checks that a person made either. The specification's id and hypothesis come from
+    the declared candidate; book, horizon and asset classes are options. A refused request
+    (exit 21) writes no file, and an existing ``--out`` is never overwritten.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        package = package_from_chain(
+            trial_id,
+            ledger=_trial_ledger(),
+            store=_evidence_store(),
+            stage=_PACKAGE_STAGES[stage],
+            book=book,
+            horizon=horizon,
+            asset_classes=asset_class,
+            authorization_ref=authorization_ref,
+            capital_authorization_ref=capital_authorization_ref,
+            signature_sha256=signature_sha256,
+            paper_package=None if paper_package is None else _read_package(paper_package),
+        )
+        try:
+            # Exclusive create: an existing ``--out`` is refused, never overwritten.
+            with out.open("x", encoding="utf-8") as stream:
+                stream.write(package.model_dump_json())
+        except OSError as error:
+            raise ConfigurationError() from error
+        return {
+            "package_id": package.package_id,
+            "stage": package.stage.value,
+            "out": str(out),
+            "package_sha256": canonical_sha256(package),
+        }
+
+    _run(operation)
+
+
+@package_app.command("verify")
+def research_package_verify(
+    file: Annotated[Path, typer.Option("--file", help="The package file to check.")],
+    paper_package: Annotated[
+        Path | None,
+        typer.Option("--paper-package", help="LIVE only: the PAPER package it continues."),
+    ] = None,
+) -> None:
+    """Re-check a package file against the chain. Read only: appends nothing and signs nothing.
+
+    The report digest the package names must be a readable report (an altered or missing
+    one exits 17), a ``VALIDATED`` event must name it, the trial's latest recorded decision
+    must name it and be PAPER_APPROVED (for PAPER and LIVE), the ledger reference must be
+    the hash of a row the chain holds, the source hash must be the protocol's strategy hash,
+    the specification must be the declared candidate's, and the stage rules must hold. Any
+    failure is exit 21. A LIVE package is checked against the PAPER package it continues.
+    Authorization and signature references are only checked for presence and distinctness.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        verified = verify_package(
+            _read_package(file),
+            ledger=_trial_ledger(),
+            store=_evidence_store(),
+            paper_package=None if paper_package is None else _read_package(paper_package),
+        )
+        return {"valid": True, **cast(dict[str, JsonValue], json.loads(verified.model_dump_json()))}
+
+    _run(operation)
 
 
 if __name__ == "__main__":  # pragma: no cover

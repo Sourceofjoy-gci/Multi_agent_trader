@@ -2139,8 +2139,8 @@ uv run trading-house research trial holdout --trial-id T
   ranking that includes a realized-basis candidate cannot pass gate 4 beside a marked
   baseline). It can neither pass nor fail. Gate 1 (a fold count) and gate 9 (capacity) read
   no return series and are exempt.
-- **`research trial decide`, `report` and `holdout` are the only trial commands whose help
-  may speak in decisions.** The no-verdict gate keeps every other report command under its
+- **`research trial decide`, `report`, `holdout` and (8D2) `open-holdout` are the only trial
+  commands whose help may speak in decisions.** The no-verdict gate keeps every other report command under its
   total ban, and fails if a command is in neither list.
 
 ### What 8D1 cannot say
@@ -2161,6 +2161,128 @@ uv run trading-house research trial holdout --trial-id T
 - **A concurrent opening and decision can race.** `decide` reads the chain twice (the
   holdout from one read, the evidence from another); an opening sealed between the two is
   seen by the next `decide`, not this one.
+
+## Phase 8D2 - the one-time holdout opening and the package contract
+
+Phase 8D2 adds the one-time opening of a locked holdout (`research trial open-holdout`), the
+authorization contract on `StrategyPackage`, and two commands that read the chain and write at most
+one JSON file (`research package create` and `research package verify`). It adds two `ops/` modules
+(`ops/holdout.py`, `ops/package.py`), the pure package rules in `research/promotion.py`, no ledger
+event type, no migration and no dependency.
+
+```bash
+uv run trading-house research trial open-holdout --protocol P.json --trial-id T --attempt-prefix A ...
+uv run trading-house research package create --trial-id T --stage paper --authorization-ref R \
+  --book fx_scalp --horizon scalp --asset-class fx --out package.json
+uv run trading-house research package verify --file package.json
+```
+
+- **Who may open the holdout.** `open-holdout` is allowed only when the holdout derived from the
+  chain is `LOCKED` and the trial's latest recorded decision is `RESEARCH_PASSED`, made under the
+  policy digest the constants in force recompute to. Anything else is refused with exit 21 before
+  any write, and so is a second invocation: an opened, consumed or contaminated holdout is not
+  locked. It takes `scenarios`' option set and no option for any value the protocol owns: the
+  window is `protocol.holdout`, the costs are `costs.baseline` at each grid level.
+- **What it does.** It runs the protocol's grid (1.0x, 1.5x, 2.0x of its baseline costs) over the
+  holdout window as three attempts (`<prefix>-holdout-<multiplier>`) through the same simulator and
+  the same `seal_bundle` as the research runs, and seals each bundle with provenance holdout state
+  `opened`. Before the first write it refuses a window outside the stored bars, a `--protocol` file
+  that is not the registered one, an invalid option, an attempt id the trial already started, and a
+  run whose replay inputs (`REPLAY_FIELDS`) differ from the research baseline's. The opening is
+  three attempts, so `audit_attempts` rises by three and the selection count does not.
+- **The holdout dataset hash is DECLARED, not computed.** The protocol states a dataset hash when
+  it locks the holdout, and the opening records that declared value in each opened bundle's
+  provenance. Nothing in this repository can hash a bar store, so umbrella section 10's "dataset
+  hash mismatch" check is not implemented and is not done: nothing compares the declared hash with
+  any data.
+- **One opening is three opened bundles.** The holdout derivation (8D1) counted every opened
+  bundle as an opening, which made the opening contaminate itself on its second bundle. A second
+  opening is now one that seals a bundle at a cost level an earlier opened bundle already ran;
+  the three levels of one opening are one opening, and `holdout` reports `opened_bundle_count` 3.
+- **`decide` after the opening.** `decide` reads the opened 1.5x and 2.0x bundles (each must be
+  sealed exactly once, as the protocol's candidate on the holdout window at the declared costs,
+  carrying the declared holdout hash) and feeds their net expectancies to gate 2, which then
+  evaluates. A decision after the opening consumes the holdout, so a `decide` that cannot supply
+  both expectancies would spend it for nothing: while the holdout is opened or consumed it refuses
+  with exit 21, before the report and both events, unless both stressed bundles are present exactly
+  once. A contaminated holdout cannot be consumed, so `decide` records it as `REJECTED` with the
+  reason instead. A rerun after consumption seals a second report that states the holdout as
+  consumed; a rerun after that appends nothing.
+- **A partial opening is final.** If a run stops after its first level, the holdout stays opened,
+  `decide` refuses until both stressed bundles exist, and the opening cannot be repeated.
+- **Opened bundles are a different experiment.** The 8B3 predicate that already excludes them
+  keeps them out of `scenario-report`, `splits`, `validate` and `compounding-report`, and a rerun
+  of `scenarios` skips every level as already sealed; the opened bundle is checked against the
+  holdout window and a research bundle against the research window, never the other way round.
+- **The package contract.** `StrategyPackage` gains `authorization_ref` (a person's paper
+  authorization) and `capital_authorization_ref`. `PAPER` requires `authorization_ref`; `LIVE`
+  requires both references and the existing `signature_sha256`; `SANDBOX` carries none of the
+  three. `create_package` (pure) yields `SANDBOX` unless asked for more: `PAPER` needs a
+  `PAPER_APPROVED` report whose nine gates pass with no blocking reason, and `LIVE` needs the
+  `PAPER` package it continues (same candidate, source and report, the same paper authorization),
+  a signature reference and a capital authorization reference that is not the paper one. A decision
+  never reaches `LIVE` by itself: every missing piece is a refusal (exit 21).
+- **`package create` reads the chain and writes one file.** It appends nothing to the ledger,
+  changes no stage and signs nothing; it refuses to overwrite `--out`, and a refused request
+  writes no file. The specification's id and hypothesis come from the declared candidate; book,
+  horizon and asset classes are options validated against their types; the source hash is the
+  protocol's strategy hash and the ledger reference is the chain head at creation.
+- **`package verify` re-derives the package against the chain.** The report digest must name a
+  readable report (a missing or altered one exits 17), a `VALIDATED` event must name it, the
+  trial's latest `GATE_DECIDED` must name it too, the decision must be `PAPER_APPROVED`, the ledger
+  reference must be the hash of a row the chain holds, the source hash must be the protocol's
+  strategy hash, the specification must be the declared candidate's, and the stage rules must
+  hold. A `LIVE` package is verified against the `PAPER` package it continues
+  (`--paper-package`). Any failure is exit 21.
+- **Nothing here signs anything or checks that a person made an authorization.** The
+  authorization, the capital authorization and the signature are references: the commands check
+  that each is present, that the capital one differs from the paper one, and that it is attached to
+  the stage that requires it.
+- **`open-holdout` is a named exception of the no-verdict help gate**, with `decide`, `report` and
+  `holdout`: its help names the decision that gates it. The two package commands are a named set
+  of their own, and the completeness test fails if a command is in none of the lists.
+
+### What 8D2 cannot do
+
+- **No real candidate can reach `RESEARCH_PASSED` or `PAPER_APPROVED` today.** Gate 9 (capacity)
+  is `UNAVAILABLE` for every candidate and is a research gate, so no real decision allows an
+  opening and no real opening exists. The opening and the package rules are proven by tests that
+  put a decision on the chain through a named test helper
+  (`tests/integration/research/synthetic_decision.py`): it builds a sealed report whose nine gates
+  are asserted, not measured, and appends a real `VALIDATED` and `GATE_DECIDED` through the real
+  ledger. It lives in `tests/` and is unreachable from any command.
+- **A stage is not a deployment.** A package is a file; nothing here executes, schedules or
+  trades it.
+
+## Phase 8 - what exists, what blocks promotion, what a human must supply
+
+**What exists.** A preregistered, append-only trial ledger and a content-addressed evidence
+store (8A); a mark-to-market equity series and separable cost attribution (8B1, 8B2a); the declared
+cost grid, the compounding rerun and the capacity state (8B2b, 8B3); walk-forward and CPCV splits and
+every statistical measurement (8C1 to 8C3); the nine gates, the immutable validation report and the
+decision (8D1); and the one-time holdout opening and the package contract (8D2). Every
+candidate this repository holds has been judged by the same code, and the one candidate that
+motivated it, Session Momentum, is recorded `REJECTED` with stage `SANDBOX` and all six reasons.
+
+**What blocks promotion.** No candidate can currently be promoted. Three things are missing, and
+each lives outside this repository:
+
+1. **A capacity model.** Gate 9 needs a declared volume-to-lots model, and no protocol can declare
+   one; capacity is `UNAVAILABLE` for every candidate, so none reaches `RESEARCH_PASSED`.
+2. **A real locked holdout with a computable dataset hash.** No holdout has ever been collected for
+   any candidate, and no code here can hash a bar store, so the declared holdout hash cannot be
+   checked against data. Every `backtest run` also seals no dataset hash, which is its own blocking
+   reason.
+3. **Human authorizations and signatures.** A package is created only from a `PAPER_APPROVED`
+   decision with an authorization reference, and `LIVE` needs a separate capital authorization and
+   a signature reference. Those are references to acts only a person can perform; nothing here
+   performs, verifies or fabricates them.
+
+**What a human must supply.** The capacity model (a volume-to-lots declaration in a new
+protocol, which needs a new trial), a collected and locked holdout window with its dataset hash,
+and the authorization, capital authorization and signature references, in that order. Until all
+three exist the framework answers as it was built to: `REJECTED`, stage `SANDBOX`, with the
+reasons.
 
 ## Phase 8A.1 - ledger-level specification vouching
 
@@ -2220,11 +2342,14 @@ uv run trading-house --help
 | `trading-house research trial decide` | Evaluate the nine gates for a declared trial (a prospective one over its sealed evidence, a legacy one over its sealed bundle), seal the validation report and append `VALIDATED` then `GATE_DECIDED`. Takes `--trial-id` and a required `--occurred-at`; no threshold, stage or package option. A rerun on an unchanged chain appends nothing. Refuses an undeclared trial or unusable evidence with 19 or 20, a moved policy or a legacy-and-registered trial with 21 |
 | `trading-house research trial report` | Print the validation report the trial's last recorded decision names, re-read from the evidence store. Read only; 17 if the report is missing or altered, 21 if no decision is recorded |
 | `trading-house research trial holdout` | Print the holdout state derived from the chain for a declared trial: not defined, locked, opened, consumed or contaminated, with the reason. Read only |
+| `trading-house research trial open-holdout` | Open the locked holdout once: run the protocol's cost grid over its holdout window as three attempts and seal three bundles whose provenance says the holdout was opened, with the protocol's declared holdout dataset hash recorded as declared (never computed). Takes `scenarios`' options and no window or cost option. Refuses before any write unless the derived holdout is locked and the latest decision is the research pass (21), a window outside the stored bars, an edited `--protocol` file, other replay inputs than the research baseline's, or an invalid option (19 or 2). A second invocation is refused. `decide` then reads the opened 1.5x and 2.0x bundles |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
 | `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |
 | `trading-house research trial verify` | Re-derive the chain hashes, then re-read every sealed bundle and every validation report the chain names |
+| `trading-house research package create` | Write a strategy package for a trial's latest recorded decision to `--out`, or refuse (21). Reads the chain, appends nothing, signs nothing, never overwrites. `--stage` is paper or live: paper needs the latest decision `PAPER_APPROVED` and `--authorization-ref`; live also needs `--paper-package`, `--signature-sha256` and a `--capital-authorization-ref` that is not the paper one. The references are recorded, never checked as a person's act |
+| `trading-house research package verify` | Re-derive a package file against the chain: the report digest is named by a `VALIDATED` event and by the latest `GATE_DECIDED`, the decision is `PAPER_APPROVED`, the ledger reference is a row of the chain, the source hash is the protocol's strategy hash, and the stage rules hold. Read only; a LIVE package takes `--paper-package`. 17 if the report is missing or altered, 21 for any other failure |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on

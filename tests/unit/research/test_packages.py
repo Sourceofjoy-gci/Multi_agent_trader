@@ -24,21 +24,68 @@ def _package(**overrides: object) -> dict[str, object]:
         "validation_report_sha256": "report-hash",
         "signature_sha256": None,
         "stage": PromotionStage.PAPER,
+        "authorization_ref": "paper-auth-1",
     }
     payload.update(overrides)
     return payload
 
 
+def _live(**overrides: object) -> dict[str, object]:
+    return _package(
+        **{
+            "stage": PromotionStage.LIVE,
+            "signature_sha256": "a-real-signature",
+            "capital_authorization_ref": "capital-auth-1",
+            **overrides,
+        }
+    )
+
+
 def test_a_package_cannot_reach_live_without_a_signature() -> None:
     with pytest.raises(ValidationError, match="signature"):
-        StrategyPackage(**_package(stage=PromotionStage.LIVE, signature_sha256=None))
+        StrategyPackage(**_live(signature_sha256=None))
 
 
-def test_a_signed_package_can_reach_live() -> None:
-    package = StrategyPackage(
-        **_package(stage=PromotionStage.LIVE, signature_sha256="a-real-signature")
-    )
+def test_a_signed_and_authorized_package_can_reach_live() -> None:
+    package = StrategyPackage(**_live())
     assert package.stage is PromotionStage.LIVE
+
+
+def test_a_package_cannot_reach_live_without_a_capital_authorization() -> None:
+    with pytest.raises(ValidationError, match="capital authorization"):
+        StrategyPackage(**_live(capital_authorization_ref=None))
+
+
+@pytest.mark.parametrize("stage", [PromotionStage.PAPER, PromotionStage.LIVE])
+def test_a_paper_or_live_package_needs_the_paper_authorization(stage: PromotionStage) -> None:
+    overrides = _live() if stage is PromotionStage.LIVE else _package()
+
+    with pytest.raises(ValidationError, match="paper authorization"):
+        StrategyPackage(**{**overrides, "authorization_ref": None})
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {"authorization_ref": "paper-auth-1"},
+        {"capital_authorization_ref": "capital-auth-1"},
+        {"signature_sha256": "a-real-signature"},
+    ],
+)
+def test_a_sandbox_package_carries_no_authorization_and_no_signature(
+    claim: dict[str, object],
+) -> None:
+    clean = _package(stage=PromotionStage.SANDBOX, authorization_ref=None)
+    assert StrategyPackage(**clean).stage is PromotionStage.SANDBOX
+
+    with pytest.raises(ValidationError, match="sandbox"):
+        StrategyPackage(**{**clean, **claim})
+
+
+def test_a_package_survives_its_own_json_round_trip() -> None:
+    package = StrategyPackage(**_live())
+
+    assert StrategyPackage.model_validate_json(package.model_dump_json()) == package
 
 
 def test_an_unsigned_package_can_reach_paper() -> None:

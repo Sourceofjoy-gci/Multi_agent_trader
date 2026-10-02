@@ -788,8 +788,8 @@ def test_the_readme_states_the_gates_the_decision_the_reasons_and_the_limits() -
         "`research trial verify` re-reads every report",
         "The report is a second document kind in the existing evidence store",
         "The append guard covers `VALIDATED` and `GATE_DECIDED`",
-        "`research trial decide`, `report` and `holdout` are the only trial commands whose help "
-        "may speak in decisions",
+        "`research trial decide`, `report`, `holdout` and (8D2) `open-holdout` are the only trial "
+        "commands whose help may speak in decisions",
     ):
         assert sentence in section, sentence
 

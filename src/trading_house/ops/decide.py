@@ -21,6 +21,12 @@ Three properties are deliberate, and each is a place a shorter version would bre
 * **The first report pins the policy.** A trial that already has a report is evaluated
   under the policy digest that report names. If the constants in force have since moved,
   ``evaluate_gates`` refuses: a threshold may not change after a result exists.
+* **An opened holdout is read, not guessed.** While the derived holdout is OPENED or CONSUMED,
+  ``decide`` supplies gate 2 with the opened 1.5x and 2.0x expectancies and REFUSES (before
+  the report and both events) unless each level is sealed exactly once and faithful. Any
+  ``GATE_DECIDED`` after an opening consumes the holdout, so a decision that could not supply
+  them would spend it for nothing. A CONTAMINATED holdout cannot be consumed and is decided
+  (REJECTED) without them.
 * **Declared trials only.** The ledger vouches for no ``VALIDATED`` or ``GATE_DECIDED``
   row (``_REQUIRES_REGISTRATION`` omits both, and the append function checks no spec
   digest), so this module refuses a trial no registration or legacy import declares.
@@ -31,16 +37,19 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
+from typing import NamedTuple
 
 from trading_house.core.errors import EvidenceIntegrityError, PromotionRefusedError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
+from trading_house.ops.holdout import holdout_expectancies
 from trading_house.ops.ledger import gate_decided_event, validated_event
-from trading_house.ops.scenarios import declared_candidate, registered_protocol
+from trading_house.ops.scenarios import declared_candidate, registered_protocol, sealed_bundles
 from trading_house.ops.validate import read_validation_inputs, statistical_evidence
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.promotion import (
+    Decision,
     EvidenceFacts,
     GateInputs,
     GateResult,
@@ -65,6 +74,7 @@ from trading_house.research.trial_ledger import (
     ValidatedPayload,
 )
 from trading_house.research.validation.evidence import StatisticalEvidence
+from trading_house.research.validation.measurement import Measurement
 
 DECISION_EVENT_TYPES = frozenset({LedgerEventType.VALIDATED, LedgerEventType.GATE_DECIDED})
 
@@ -96,18 +106,30 @@ def _legacy_import(events: Sequence[LedgerEvent], trial_id: str) -> LegacyImport
     return None
 
 
-def _sealed_holdout_states(
-    events: Sequence[LedgerEvent], trial_id: str, store: EvidenceStore
-) -> dict[str, HoldoutState]:
-    """The provenance holdout state of every bundle the chain seals for this trial."""
+class _SealedHoldout(NamedTuple):
+    states: dict[str, HoldoutState]
+    levels: dict[str, Decimal]
 
-    return {
-        event.payload.evidence_sha256: store.read(
-            event.payload.evidence_sha256
-        ).provenance.holdout_state
-        for event in events
-        if event.trial_id == trial_id and isinstance(event.payload, EvidenceSealedPayload)
-    }
+
+def _sealed_holdout(
+    events: Sequence[LedgerEvent], trial_id: str, store: EvidenceStore
+) -> _SealedHoldout:
+    """The provenance holdout state and the cost level of every bundle the chain seals here."""
+
+    states: dict[str, HoldoutState] = {}
+    levels: dict[str, Decimal] = {}
+    for event in events:
+        if event.trial_id == trial_id and isinstance(event.payload, EvidenceSealedPayload):
+            digest = event.payload.evidence_sha256
+            bundle = store.read(digest)
+            states[digest] = bundle.provenance.holdout_state
+            levels[digest] = bundle.result.cost_model.stress_multiplier
+    return _SealedHoldout(states, levels)
+
+
+def _derived(events: Sequence[LedgerEvent], trial_id: str, store: EvidenceStore) -> HoldoutStatus:
+    sealed = _sealed_holdout(events, trial_id, store)
+    return derive_holdout(trial_id, events, sealed.states, sealed.levels)
 
 
 def holdout_status(
@@ -118,7 +140,38 @@ def holdout_status(
     events, _ = ledger.snapshot()
     if _legacy_import(events, trial_id) is None:
         registered_protocol(events, trial_id)
-    return derive_holdout(trial_id, events, _sealed_holdout_states(events, trial_id, store))
+    return _derived(events, trial_id, store)
+
+
+def refuse_unopenable(
+    trial_id: str,
+    protocol: TrialProtocol,
+    *,
+    ledger: PostgresTrialLedger,
+    store: EvidenceStore,
+) -> None:
+    """Refuse a holdout opening this chain does not allow. Reads only; nothing is written.
+
+    Two refusals, both ``PromotionRefusedError``: the derived holdout is not ``LOCKED`` (which
+    is also how a second opening is refused, since an opened, consumed or contaminated
+    holdout is not locked), and the trial's latest recorded decision is not ``RESEARCH_PASSED``
+    over a report made under the policy digest the protocol's constants recompute to.
+    """
+
+    status = holdout_status(trial_id, ledger, store)
+    if status.state is not HoldoutState.LOCKED:
+        raise PromotionRefusedError() from ValueError(
+            f"the holdout is {status.state.value}, not locked: {status.reason}"
+        )
+    _, report = latest_report(trial_id, ledger, store)
+    if report.decision is not Decision.RESEARCH_PASSED:
+        raise PromotionRefusedError() from ValueError(
+            f"the latest decision is {report.decision.value}, not RESEARCH_PASSED"
+        )
+    if report.policy_sha256 != policy_sha256(protocol.validation):
+        raise PromotionRefusedError() from ValueError(
+            "the decision was made under another policy digest than the one in force"
+        )
 
 
 def _facts(bundle: EvidenceBundle, digest: str) -> EvidenceFacts:
@@ -185,7 +238,15 @@ def decide_trial(
         head = evidence.evidence.chain_head
 
     spec = None if protocol is None else protocol.validation
-    holdout = derive_holdout(trial_id, events, _sealed_holdout_states(events, trial_id, store))
+    holdout = _derived(events, trial_id, store)
+    expectancies: tuple[Measurement | None, Measurement | None] = (None, None)
+    if protocol is not None and holdout.state in {HoldoutState.OPENED, HoldoutState.CONSUMED}:
+        # An OPENED holdout is consumed by ANY decision that follows, so a decision that
+        # cannot supply gate 2's two expectancies would spend it for nothing. It refuses
+        # here, before the report and both events: nothing is written.
+        expectancies = holdout_expectancies(
+            trial_id, protocol, sealed_bundles(ledger.events_for(trial_id), store.read)
+        )
     facts = _facts(bundle, digest)
     results = evaluate_gates(
         GateInputs(
@@ -194,8 +255,8 @@ def decide_trial(
             validation_spec=spec,
             evidence=evidence,
             holdout=holdout,
-            holdout_expectancy_1_5=None,
-            holdout_expectancy_2_0=None,
+            holdout_expectancy_1_5=expectancies[0],
+            holdout_expectancy_2_0=expectancies[1],
             facts=facts,
         )
     )

@@ -23,14 +23,16 @@ model). ``FAIL`` is a *measured* value on the wrong side of its threshold. Both 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
 from enum import Enum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, NoReturn, Self
 
-from pydantic import Field, NonNegativeInt, model_validator
+from pydantic import Field, NonNegativeInt, ValidationError, model_validator
 
 from trading_house.core.errors import PromotionRefusedError
 from trading_house.core.values import CanonicalModel, FiniteFloat, NonEmptyStr
 from trading_house.research.canonical import canonical_sha256
+from trading_house.research.packages import PromotionStage, StrategyPackage, StrategySpec
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     EvidenceSealedPayload,
@@ -174,6 +176,7 @@ def derive_holdout(
     trial_id: str,
     events: Sequence[LedgerEvent],
     sealed_holdout_states: Mapping[str, HoldoutState],
+    sealed_levels: Mapping[str, Decimal],
 ) -> HoldoutStatus:
     """The holdout state of one trial, replayed from the chain (P-8). Never stored.
 
@@ -181,12 +184,19 @@ def derive_holdout(
     consumes a holdout only if it follows the opening. ``sealed_holdout_states`` maps an
     evidence digest to the ``provenance.holdout_state`` of the bundle it names, which the
     caller has read; a sealed digest it does not hold is a refusal, never a guess.
+    ``sealed_levels`` maps the same digests to the cost multiplier each bundle ran at.
 
     Rules, in the order they bind: legacy evidence is contaminated (§5.7); a protocol that
     registers a spent state is contaminated; two registrations that are not one protocol
     are contaminated; a sealed bundle that says it was opened without a locked holdout, or
-    says it is contaminated, contaminates; a second opened bundle contaminates; one opened
-    bundle is OPENED, and OPENED followed by any decision of the trial is CONSUMED.
+    says it is contaminated, contaminates; a second opened bundle AT AN ALREADY OPENED COST
+    LEVEL contaminates; opened bundles are OPENED, and OPENED followed by any decision of the
+    trial is CONSUMED.
+
+    One opening is the cost grid run over the locked window (8D2: three bundles, 1.0x, 1.5x
+    and 2.0x, all opened). The 8D1 text counted every opened bundle as an opening, which made
+    that opening contaminate itself on its second bundle; a second opening is one that runs
+    a cost level the first already ran.
     """
 
     registered: list[tuple[str, HoldoutState]] = []
@@ -219,7 +229,7 @@ def derive_holdout(
             "before the research gates is an inspection before lock",
         )
 
-    opened: list[str] = []
+    opened: dict[str, Decimal] = {}
     consumed = False
     for event in events:
         if event.trial_id != trial_id:
@@ -246,13 +256,18 @@ def derive_holdout(
                         len(opened),
                     )
                 if digest not in opened:
-                    opened.append(digest)
-                if len(opened) > 1:
-                    return _status(
-                        HoldoutState.CONTAMINATED,
-                        "a second bundle was opened on the holdout",
-                        len(opened),
-                    )
+                    if digest not in sealed_levels:
+                        raise PromotionRefusedError() from ValueError(
+                            f"sealed evidence {digest} has no cost level to derive from"
+                        )
+                    level = sealed_levels[digest]
+                    if level in opened.values():
+                        return _status(
+                            HoldoutState.CONTAMINATED,
+                            f"a second bundle was opened on the holdout at the {level}x level",
+                            len(opened) + 1,
+                        )
+                    opened[digest] = level
         elif isinstance(payload, GateDecidedPayload) and opened:
             consumed = True
     if consumed:
@@ -749,3 +764,107 @@ class ValidationReport(CanonicalModel):
 
     def digest(self) -> str:
         return canonical_sha256(self)
+
+
+# --- the package ---------------------------------------------------------------------------
+
+
+def _refuse(reason: str) -> NoReturn:
+    """A package refusal: opaque in public, the reason on the private cause."""
+
+    raise PromotionRefusedError() from ValueError(reason)
+
+
+def require_paper_approved(report: ValidationReport, report_sha256: str) -> None:
+    """The report is the one named, and it is a full approval: the only ground for a package.
+
+    The decision is checked AND the nine gates and the blocking reasons it rests on, so a
+    report whose own validator was bypassed cannot stand in for an approval.
+    """
+
+    if report.digest() != report_sha256:
+        _refuse("the report is not the one the digest names")
+    if report.decision is not Decision.PAPER_APPROVED:
+        _refuse(f"the decision is {report.decision.value}, not PAPER_APPROVED")
+    if [gate.gate for gate in report.gates] != list(range(1, GATE_COUNT + 1)) or any(
+        gate.status is not GateStatus.PASS for gate in report.gates
+    ):
+        _refuse("an approval needs all nine gates to pass")
+    if report.blocking_reasons:
+        _refuse("an approval stands under no blocking reason")
+
+
+def check_package(
+    package: StrategyPackage,
+    report: ValidationReport,
+    report_sha256: str,
+    *,
+    paper: StrategyPackage | None = None,
+) -> None:
+    """Refuse a package that its report and (for LIVE) its paper package do not support.
+
+    Pure. ``SANDBOX`` grants nothing and rests on no approval; ``PAPER`` and ``LIVE`` rest on a
+    full approval whose digest the package names. ``LIVE`` needs a valid ``PAPER`` package of
+    the same candidate and report, carries that paper authorization, and its capital
+    authorization is a different reference. A reference is not a signature and nothing here
+    checks that a person made it.
+    """
+
+    if package.validation_report_sha256 != report_sha256:
+        _refuse("the package names another report than the one supplied")
+    if package.stage is PromotionStage.SANDBOX:
+        return
+    require_paper_approved(report, report_sha256)
+    if package.stage is not PromotionStage.LIVE:
+        return
+    if paper is None:
+        _refuse("a LIVE package needs the PAPER package it continues")
+    if paper.stage is not PromotionStage.PAPER:
+        _refuse("the package offered as the paper package is not a PAPER package")
+    check_package(paper, report, report_sha256)
+    if (paper.spec, paper.source_sha256) != (package.spec, package.source_sha256):
+        _refuse("the paper package is of another candidate or source")
+    if package.authorization_ref != paper.authorization_ref:
+        _refuse("a LIVE package carries the paper authorization it continues")
+    if package.capital_authorization_ref == paper.authorization_ref:
+        _refuse("the capital authorization must differ from the paper authorization")
+
+
+def create_package(
+    report: ValidationReport,
+    report_sha256: str,
+    *,
+    package_id: str,
+    spec: StrategySpec,
+    source_sha256: str,
+    trial_ledger_reference: str,
+    stage: PromotionStage = PromotionStage.SANDBOX,
+    authorization_ref: str | None = None,
+    capital_authorization_ref: str | None = None,
+    signature_sha256: str | None = None,
+    paper_package: StrategyPackage | None = None,
+) -> StrategyPackage:
+    """Build a package from a decision, or refuse. Pure; signs nothing.
+
+    The default and only stage a decision alone yields is ``SANDBOX``. ``PAPER`` needs a
+    ``PAPER_APPROVED`` report and an authorization reference. ``LIVE`` needs the paper
+    package, a signature reference and a capital authorization that is not the paper one: a
+    decision never reaches ``LIVE`` by itself, and every missing piece is a refusal.
+    """
+
+    try:
+        package = StrategyPackage(
+            package_id=package_id,
+            spec=spec,
+            source_sha256=source_sha256,
+            trial_ledger_reference=trial_ledger_reference,
+            validation_report_sha256=report_sha256,
+            signature_sha256=signature_sha256,
+            stage=stage,
+            authorization_ref=authorization_ref,
+            capital_authorization_ref=capital_authorization_ref,
+        )
+    except ValidationError as error:
+        raise PromotionRefusedError() from error
+    check_package(package, report, report_sha256, paper=paper_package)
+    return package

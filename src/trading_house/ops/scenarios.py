@@ -20,6 +20,7 @@ it here would fix a threshold after seeing how the numbers came out.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal
 from typing import cast
 
@@ -154,6 +155,24 @@ def baseline_at(protocol: TrialProtocol, multiplier: Decimal) -> CostModel:
     """
 
     return protocol.costs.baseline.model_copy(update={"stress_multiplier": multiplier})
+
+
+def declared_window(protocol: TrialProtocol, *, opened: bool = False) -> tuple[datetime, datetime]:
+    """The window a run of this protocol must have covered.
+
+    The research window (``protocol.data``) for a research run; the locked holdout's
+    (``protocol.holdout``) for an opened one. The two are different experiments, and a bundle
+    is faithful only to the window of its own kind: a research bundle on the holdout's window
+    and an opened bundle on the research window are both refused by the check that reads this.
+    A protocol with no holdout window has none to give.
+    """
+
+    if not opened:
+        return (protocol.data.start, protocol.data.end)
+    holdout = protocol.holdout
+    if holdout.start is None or holdout.end is None:
+        raise ScenarioEvidenceError() from ValueError("the protocol declares no holdout window")
+    return (holdout.start, holdout.end)
 
 
 def declared_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec | None:

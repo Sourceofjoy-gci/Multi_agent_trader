@@ -17,6 +17,7 @@ import ast
 import hashlib
 import json
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from itertools import count
 from pathlib import Path
 from typing import Any
@@ -287,10 +288,14 @@ def _decided(trial_id: str = TRIAL) -> LedgerEvent:
 
 
 O1, O2, W = "1" * 64, "2" * 64, "3" * 64
+O15, O20, ORPHAN = "a" * 64, "b" * 64, "c" * 64
 OPENED = HoldoutState.OPENED
 STATES = {
     O1: HoldoutState.OPENED,
     O2: HoldoutState.OPENED,
+    O15: HoldoutState.OPENED,
+    O20: HoldoutState.OPENED,
+    ORPHAN: HoldoutState.OPENED,
     W: HoldoutState.LOCKED,
     "4" * 64: HoldoutState.CONSUMED,
     "5" * 64: HoldoutState.CONTAMINATED,
@@ -298,8 +303,18 @@ STATES = {
 }
 
 
+LEVELS = {
+    "4" * 64: Decimal(1),
+    O1: Decimal(1),
+    O2: Decimal("1.0"),
+    O15: Decimal("1.5"),
+    O20: Decimal(2),
+}
+"""O1 and O2 ran the SAME level (1x, spelled two ways); O15 and O20 are the other two."""
+
+
 def _derive(*events: LedgerEvent, trial_id: str = TRIAL) -> HoldoutStatus:
-    return derive_holdout(trial_id, events, STATES)
+    return derive_holdout(trial_id, events, STATES, LEVELS)
 
 
 def test_legacy_evidence_is_contaminated_whatever_else_the_chain_says() -> None:
@@ -374,6 +389,32 @@ def test_another_trials_opening_and_decision_do_not_touch_this_trial() -> None:
     assert status.state is HoldoutState.LOCKED
 
 
+def test_the_three_bundles_of_one_opening_are_one_opening() -> None:
+    """The opening runs the grid, so its three opened bundles are at three levels: one opening."""
+
+    opened = (_registered(HoldoutState.LOCKED), _sealed(O1), _sealed(O15), _sealed(O20))
+
+    status = _derive(*opened)
+    consumed = _derive(*opened, _decided())
+
+    assert (status.state, status.opened_bundle_count) == (HoldoutState.OPENED, 3)
+    assert (consumed.state, consumed.opened_bundle_count) == (HoldoutState.CONSUMED, 3)
+
+
+def test_a_bundle_at_an_already_opened_level_is_a_second_opening_after_a_whole_one() -> None:
+    again = _derive(
+        _registered(HoldoutState.LOCKED), _sealed(O1), _sealed(O15), _sealed(O20), _sealed(O2)
+    )
+
+    assert (again.state, again.opened_bundle_count) == (HoldoutState.CONTAMINATED, 4)
+    assert "second bundle" in again.reason
+
+
+def test_an_opened_bundle_with_no_known_cost_level_is_refused_not_guessed() -> None:
+    with pytest.raises(PromotionRefusedError):
+        derive_holdout(TRIAL, (_registered(HoldoutState.LOCKED), _sealed(ORPHAN)), STATES, LEVELS)
+
+
 def test_a_second_opened_bundle_contaminates_and_it_never_heals() -> None:
     twice = _derive(_registered(HoldoutState.LOCKED), _sealed(O1), _sealed(O2))
     after_consumption = _derive(
@@ -423,7 +464,7 @@ def test_the_same_registration_twice_is_one_registration() -> None:
 
 def test_sealed_evidence_with_no_known_holdout_state_is_refused_not_guessed() -> None:
     with pytest.raises(PromotionRefusedError):
-        derive_holdout(TRIAL, (_registered(HoldoutState.LOCKED), _sealed("7" * 64)), STATES)
+        derive_holdout(TRIAL, (_registered(HoldoutState.LOCKED), _sealed("7" * 64)), STATES, LEVELS)
 
 
 # --- the gates ----------------------------------------------------------------------------

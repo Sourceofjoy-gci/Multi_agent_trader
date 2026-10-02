@@ -141,6 +141,8 @@ def mark_to_market_bundle(
     agent_run_id: str,
     occurred_at: datetime,
     registered_at: datetime,
+    holdout_state: HoldoutState = HoldoutState.NOT_DEFINED,
+    dataset_sha256: str | None = None,
 ) -> EvidenceBundle:
     """The bundle ``research trial record`` seals for one mark-to-market run.
 
@@ -162,7 +164,10 @@ def mark_to_market_bundle(
     ``dataset_sha256`` is None rather than a digest of the bar store. 8B1 does
     not compute one, and an unavailable hash is the honest record; fabricating
     one from a query the store cannot reproduce is what the legacy importer
-    refuses to do.
+    refuses to do. The two provenance parameters keep those defaults, so no
+    existing digest moves; only the holdout opening passes them, and what it
+    passes for the hash is the protocol's DECLARED holdout hash, recorded as
+    declared and not computed from any bar store.
 
     ``source_artifact_sha256`` is the domain-separated canonical digest of the
     result, not of a file: ``backtest run`` builds this bundle in memory and
@@ -217,10 +222,10 @@ def mark_to_market_bundle(
         provenance=EvidenceProvenance(
             agent_run_id=agent_run_id,
             source_artifact_sha256=canonical_sha256(result),
-            dataset_sha256=None,
+            dataset_sha256=dataset_sha256,
             registered_at=registered_at,
             occurred_at=occurred_at,
             registration_state=RegistrationState.PROSPECTIVE,
-            holdout_state=HoldoutState.NOT_DEFINED,
+            holdout_state=holdout_state,
         ),
     )

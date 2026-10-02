@@ -826,13 +826,15 @@ def test_the_four_pinned_digests_are_still_exactly_these_literals() -> None:
 # --- 9. the operator-facing text ----------------------------------------------
 
 
-DECISION_COMMANDS = frozenset({"decide", "report", "holdout"})
+DECISION_COMMANDS = frozenset({"decide", "report", "holdout", "open-holdout"})
 """The only trial commands whose help may speak in decisions, and why.
 
 Phase 8D1 is the first slice that judges a candidate, and the three commands that exist to
 say what was judged cannot describe themselves without the vocabulary: ``decide`` records
 a decision, ``report`` prints the report of the last one, and ``holdout`` prints the state
-a decision's gate two reads. This is a NAMED exception, not a loosening: every other trial
+a decision's gate two reads. Phase 8D2 adds ``open-holdout``: its help must name the decision
+that gates it and the holdout state it creates, which is the same vocabulary. This is a NAMED
+exception, not a loosening: every other trial
 command stays under the total ban below, and ``test_every_trial_command_is_banned_a_named_
 decision_command_or_a_ledger_one`` fails when a command is in neither list,
 so a new command cannot slip out from under the rule by being forgotten."""

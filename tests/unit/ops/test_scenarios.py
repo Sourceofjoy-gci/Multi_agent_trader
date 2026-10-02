@@ -313,8 +313,12 @@ def _bundle_at(
     *,
     trial_id: str,
     sizing: SizingMode = SizingMode.CONSTANT_NOTIONAL,
+    **provenance: Any,
 ) -> EvidenceBundle:
     """One scenario, from a real run at one multiplier, sealed the way the chain seals it.
+
+    ``provenance`` is forwarded to ``mark_to_market_bundle`` (8D2: the holdout opening's
+    ``holdout_state`` and ``dataset_sha256``); without it the bundle is the 8B one, byte for byte.
 
     The cost model is the protocol's own baseline with the multiplier set --
     built through ``CostModel``'s constructor so it validates rather than
@@ -351,6 +355,7 @@ def _bundle_at(
         agent_run_id=AGENT_RUN_ID,
         occurred_at=OCCURRED_AT,
         registered_at=REGISTERED_AT,
+        **provenance,
     )
 
 
