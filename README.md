@@ -2104,7 +2104,8 @@ uv run trading-house research trial holdout --trial-id T
   starts there; one that registers it opened, consumed or contaminated is `CONTAMINATED`. One
   sealed bundle whose provenance holdout state is opened or consumed makes it `OPENED`; a
   decision of the trial after that makes it `CONSUMED`; a decision before it does not. A
-  second opened bundle is `CONTAMINATED` and nothing heals it. An opening with no locked
+  second opened bundle at an already opened cost level, or an opening by another trial that
+  declares the same holdout (both 8D2), is `CONTAMINATED` and nothing heals it. An opening with no locked
   holdout, and a sealed bundle that says its holdout was contaminated, also contaminate.
 - **A decision moves no stage and creates no package.** `decide` seals the report, then
   appends `VALIDATED` and `GATE_DECIDED` naming its digest, in that order; it takes no stage
@@ -2208,8 +2209,10 @@ uv run trading-house research package verify --file package.json
   once. A contaminated holdout cannot be consumed, so `decide` records it as `REJECTED` with the
   reason instead. A rerun after consumption seals a second report that states the holdout as
   consumed; a rerun after that appends nothing.
-- **A partial opening is final.** If a run stops after its first level, the holdout stays opened,
-  `decide` refuses until both stressed bundles exist, and the opening cannot be repeated.
+- **A partial opening is final.** If a run stops after its first sealed bundle, the holdout stays
+  opened, `decide` refuses until both stressed bundles exist, and the opening cannot be repeated.
+  A simulator refusal at 1.0x seals nothing: the holdout stays locked and a new `--attempt-prefix`
+  can retry.
 - **Opened bundles are a different experiment.** The 8B3 predicate that already excludes them
   keeps them out of `scenario-report`, `splits`, `validate` and `compounding-report`, and a rerun
   of `scenarios` skips every level as already sealed; the opened bundle is checked against the
@@ -2232,8 +2235,29 @@ uv run trading-house research package verify --file package.json
   trial's latest `GATE_DECIDED` must name it too, the decision must be `PAPER_APPROVED`, the ledger
   reference must be the hash of a row the chain holds, the source hash must be the protocol's
   strategy hash, the specification must be the declared candidate's, and the stage rules must
-  hold. A `LIVE` package is verified against the `PAPER` package it continues
-  (`--paper-package`). Any failure is exit 21.
+  hold. The ledger reference must also be a row at or after the trial's latest `GATE_DECIDED`,
+  and a `PAPER` or `LIVE` package is refused while the holdout derives as `CONTAMINATED` now, so a
+  stale report does not license a package. A `LIVE` package is verified against the `PAPER`
+  package it continues (`--paper-package`). Any failure is exit 21.
+- **`research trial record` cannot seal an opening.** A bundle whose provenance says the holdout
+  was opened, consumed or locked is refused (exit 21) before any write: only `open-holdout` seals
+  an opened bundle, after its own checks. Opened-bundle contents are verified only for provenance,
+  window, declared dataset hash and costs when `decide` reads them; the trades inside are never
+  re-simulated.
+- **A holdout opens at most once across trials.** Trials whose registered protocols declare the
+  same holdout (same start, end and dataset hash) share it: once any of them has an opened or
+  consumed bundle the others derive as `CONTAMINATED` ("this holdout was opened by trial X"), so
+  candidates of one protocol cannot each open it and a re-registration under a new trial id
+  cannot reopen a spent one. A trial's own three-level opening is not counted against it, and a
+  different window or hash is a different holdout.
+- **What `package verify` cannot detect.** `package_id`, book, horizon, asset classes, the
+  authorization references and the signature reference carry no digest and are not derived from
+  the chain: hand-editing any of them is undetectable. A `SANDBOX` package verifies without a
+  `PAPER_APPROVED` decision (the decision is required for `PAPER` and `LIVE` only). A `PAPER`
+  package may carry neither a capital authorization nor a signature reference, and the validator
+  refuses one that does. Rerunning `decide` after the holdout is consumed seals a newer report,
+  which invalidates a package already created, because `verify` requires the latest report; that
+  fails closed and is intended.
 - **Nothing here signs anything or checks that a person made an authorization.** The
   authorization, the capital authorization and the signature are references: the commands check
   that each is present, that the capital one differs from the paper one, and that it is attached to
@@ -2260,9 +2284,9 @@ uv run trading-house research package verify --file package.json
 store (8A); a mark-to-market equity series and separable cost attribution (8B1, 8B2a); the declared
 cost grid, the compounding rerun and the capacity state (8B2b, 8B3); walk-forward and CPCV splits and
 every statistical measurement (8C1 to 8C3); the nine gates, the immutable validation report and the
-decision (8D1); and the one-time holdout opening and the package contract (8D2). Every
-candidate this repository holds has been judged by the same code, and the one candidate that
-motivated it, Session Momentum, is recorded `REJECTED` with stage `SANDBOX` and all six reasons.
+decision (8D1); and the one-time holdout opening and the package contract (8D2). The same code
+judges any trial a ledger declares, a legacy import included: a Phase 7 artifact decides
+`REJECTED`, stage `SANDBOX`, with every reason its evidence supports (a test shows all six).
 
 **What blocks promotion.** No candidate can currently be promoted. Three things are missing, and
 each lives outside this repository:
@@ -2277,6 +2301,17 @@ each lives outside this repository:
    decision with an authorization reference, and `LIVE` needs a separate capital authorization and
    a signature reference. Those are references to acts only a person can perform; nothing here
    performs, verifies or fabricates them.
+
+**What a human must read before accepting a package.** The statistics under the gates were
+built with several umbrella clauses resolved in the stricter direction, listed in section 3 of the
+8C design (`docs/superpowers/specs/2026-10-01-phase-8c-statistical-validation-design.md`) for the
+human to confirm: R-2 (the deflated Sharpe uses the per-day Sharpe, not the annualised one) and
+R-7 (the published expected-maximum weight, not the umbrella's) are stricter than the umbrella's
+literal text, R-1 (PBO rank direction) corrects a contradiction in it, and R-3 and R-5 were amended
+after review. Regime labels are recognised, not vouched. DSR is defined only for a one-day holding
+horizon and is otherwise unavailable. A holdout is shared by every trial that declares the same
+window and hash, and opens once across them. Opened-bundle contents are never re-simulated. The
+declared holdout dataset hash is never computed from any data.
 
 **What a human must supply.** The capacity model (a volume-to-lots declaration in a new
 protocol, which needs a new trial), a collected and locked holdout window with its dataset hash,
@@ -2349,11 +2384,12 @@ uv run trading-house --help
 | `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |
 | `trading-house research trial verify` | Re-derive the chain hashes, then re-read every sealed bundle and every validation report the chain names |
 | `trading-house research package create` | Write a strategy package for a trial's latest recorded decision to `--out`, or refuse (21). Reads the chain, appends nothing, signs nothing, never overwrites. `--stage` is paper or live: paper needs the latest decision `PAPER_APPROVED` and `--authorization-ref`; live also needs `--paper-package`, `--signature-sha256` and a `--capital-authorization-ref` that is not the paper one. The references are recorded, never checked as a person's act |
-| `trading-house research package verify` | Re-derive a package file against the chain: the report digest is named by a `VALIDATED` event and by the latest `GATE_DECIDED`, the decision is `PAPER_APPROVED`, the ledger reference is a row of the chain, the source hash is the protocol's strategy hash, and the stage rules hold. Read only; a LIVE package takes `--paper-package`. 17 if the report is missing or altered, 21 for any other failure |
+| `trading-house research package verify` | Re-derive a package file against the chain: the report digest is named by a `VALIDATED` event and by the latest `GATE_DECIDED`, the decision is `PAPER_APPROVED`, the ledger reference is a row of the chain at or after the latest decision, the source hash is the protocol's strategy hash, and the stage rules hold. Read only; a LIVE package takes `--paper-package`. 17 if the report is missing or altered, 21 for any other failure |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on
-stderr. No command prints a path, credential, or key.
+stderr. No command prints a credential or key, and the only path one prints is the `--out`
+file `research package create` was asked to write, echoed back.
 
 ### Verify the constitution
 

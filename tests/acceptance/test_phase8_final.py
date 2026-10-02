@@ -297,6 +297,16 @@ def test_the_readme_states_what_the_opening_and_the_package_commands_do_and_do_n
         "No real candidate can reach `RESEARCH_PASSED` or `PAPER_APPROVED` today.",
         "`tests/integration/research/synthetic_decision.py`",
         "It lives in `tests/` and is unreachable from any command.",
+        "`research trial record` cannot seal an opening.",
+        "the trades inside are never re-simulated",
+        "A holdout opens at most once across trials.",
+        "this holdout was opened by trial X",
+        "hand-editing any of them is undetectable",
+        "A `SANDBOX` package verifies without a `PAPER_APPROVED` decision",
+        "the validator refuses one that does",
+        "which invalidates a package already created",
+        "a stale report does not license a package",
+        "A simulator refusal at 1.0x seals nothing",
     ):
         assert sentence in section, sentence
 
@@ -313,6 +323,14 @@ def test_the_readme_closes_phase_8_by_saying_no_candidate_can_be_promoted() -> N
         "**Human authorizations and signatures.**",
         "**What a human must supply.**",
         "`REJECTED`, stage `SANDBOX`, with the reasons",
+        "**What a human must read before accepting a package.**",
+        "R-2 (the deflated Sharpe uses the per-day Sharpe",
+        "R-7 (the published expected-maximum weight",
+        "2026-10-01-phase-8c-statistical-validation-design.md",
+        "Regime labels are recognised, not vouched.",
+        "DSR is defined only for a one-day holding horizon",
+        "Opened-bundle contents are never re-simulated.",
+        "The declared holdout dataset hash is never computed from any data.",
     ):
         assert sentence in closing, sentence
 

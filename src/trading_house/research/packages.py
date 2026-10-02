@@ -61,4 +61,8 @@ class StrategyPackage(CanonicalModel):
             raise ValueError(f"stage {self.stage.value!r} requires a paper authorization reference")
         if self.stage is PromotionStage.LIVE and self.capital_authorization_ref is None:
             raise ValueError("stage 'live' requires a capital authorization reference")
+        if self.stage is PromotionStage.PAPER and (
+            self.capital_authorization_ref is not None or self.signature_sha256 is not None
+        ):
+            raise ValueError("a paper package carries no capital authorization and no signature")
         return self

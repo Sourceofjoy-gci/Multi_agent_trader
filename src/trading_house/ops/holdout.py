@@ -9,6 +9,12 @@ The holdout's dataset hash is DECLARED, never computed. The protocol states one 
 the holdout, the opening records that declared value in each bundle's provenance, and nothing
 in this repository can hash a bar store to compare it with. Umbrella 10's "dataset hash
 mismatch" check therefore does not exist, and this module does not pretend to it.
+
+Opened-bundle contents are verified only for provenance, window, dataset hash and costs, at
+``decide`` time (``holdout_expectancies``). The trades inside an opened bundle are never
+re-simulated: nothing here can replay the holdout again, so the bundle's trades are taken as
+sealed. What keeps a fabricated opened bundle out is that ``record`` refuses to seal one
+(``refuse_forged_holdout_provenance``) and ``open-holdout`` is the only sealer.
 """
 
 from __future__ import annotations
@@ -27,6 +33,27 @@ from trading_house.research.trial_ledger import HoldoutState, ReturnSeriesBasis,
 from trading_house.research.validation.coverage import scenario_expectancy
 from trading_house.research.validation.measurement import Measurement
 from trading_house.research.validation.series import TradeSample
+
+FORBIDDEN_TO_RECORD = frozenset({HoldoutState.OPENED, HoldoutState.CONSUMED, HoldoutState.LOCKED})
+"""Holdout states no bundle handed to ``record`` may claim. Only ``open-holdout`` seals an opened
+bundle, after its own checks; nothing produces a bundle that ran while the holdout was merely
+locked. A bundle claiming one of these was not made by the commands that may make it."""
+
+
+def refuse_forged_holdout_provenance(bundle: EvidenceBundle) -> None:
+    """Refuse, before any write, a bundle whose provenance claims an opening it never had.
+
+    ``research trial record`` seals whatever bundle it is given, so without this an operator
+    could seal an opened bundle with no locked holdout, no decision, no policy check and
+    fabricated trades. ``open-holdout`` seals through ``seal_bundle`` directly and is unaffected.
+    """
+
+    if bundle.provenance.holdout_state in FORBIDDEN_TO_RECORD:
+        raise PromotionRefusedError() from ValueError(
+            f"a bundle claiming its holdout was {bundle.provenance.holdout_state.value} "
+            "cannot be recorded; only open-holdout seals one"
+        )
+
 
 HOLDOUT_LEVELS = (Decimal("1.5"), Decimal(2))
 """The two stressed levels gate 2 reads on the opened window."""

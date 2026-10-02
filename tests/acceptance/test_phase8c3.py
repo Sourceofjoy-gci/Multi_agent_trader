@@ -58,8 +58,10 @@ from tests.integration.research.test_trial_cli import _ledger, _start, _store
 from tests.unit.ops.test_scenarios import _NO_VERDICT
 from trading_house import cli
 from trading_house.core.errors import ScenarioEvidenceError
+from trading_house.ops.ledger import seal_bundle
 from trading_house.ops.validate import read_validation_inputs, statistical_evidence
 from trading_house.research.canonical import canonical_sha256
+from trading_house.research.evidence import EvidenceBundle
 
 runner = CliRunner()
 
@@ -382,7 +384,13 @@ def test_a_bundle_run_on_an_opened_holdout_changes_nothing_for_any_read(
     payload = json.loads(document.read_text(encoding="utf-8"))
     payload["bundle"]["provenance"]["holdout_state"] = "opened"
     document.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    _record(document, attempt_id="foreign-1.0")
+    # ``record`` now refuses an opened bundle (8D2 review), so it is sealed through the lower-level
+    # ``seal_bundle`` that ``open-holdout`` itself uses: a named test path, not a command.
+    seal_bundle(
+        EvidenceBundle.model_validate_json(json.dumps(payload["bundle"])),
+        ledger=_ledger(research_ledger_dsn),
+        store=_store(research_env),
+    )
     assert len(_store(research_env).read(_ledger_digests(research_ledger_dsn)[-1]).daily_returns)
 
     after = [runner.invoke(cli.app, ["research", "trial", *argv]) for argv in reads]

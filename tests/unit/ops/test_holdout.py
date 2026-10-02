@@ -28,6 +28,7 @@ from trading_house.ops.compounding import refuse_unfaithful
 from trading_house.ops.holdout import (
     HOLDOUT_LEVELS,
     holdout_expectancies,
+    refuse_forged_holdout_provenance,
     refuse_outside_coverage,
 )
 from trading_house.ops.scenarios import declared_window
@@ -314,6 +315,21 @@ def test_an_opened_bundle_with_other_costs_than_the_declared_baseline_is_refused
 
     with pytest.raises(ScenarioEvidenceError):
         holdout_expectancies(TRIAL, PROTOCOL, forged)
+
+
+# --- record may not seal an opening -------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", [HoldoutState.OPENED, HoldoutState.CONSUMED, HoldoutState.LOCKED])
+def test_a_bundle_claiming_an_opening_it_never_had_cannot_be_recorded(state: HoldoutState) -> None:
+    bundle = _bundle(ONE, opened=True, holdout_state=state)
+
+    assert "only open-holdout seals one" in _cause(lambda: refuse_forged_holdout_provenance(bundle))
+
+
+@pytest.mark.parametrize("state", [HoldoutState.NOT_DEFINED, HoldoutState.CONTAMINATED])
+def test_a_bundle_claiming_no_opening_may_be_recorded(state: HoldoutState) -> None:
+    refuse_forged_holdout_provenance(_bundle(ONE, opened=True, holdout_state=state))
 
 
 # --- the coverage pre-flight ---------------------------------------------------------------

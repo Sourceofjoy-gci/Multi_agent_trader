@@ -17,13 +17,23 @@ from collections.abc import Sequence
 
 from trading_house.core.errors import PromotionRefusedError
 from trading_house.core.values import AssetClass, CanonicalModel, Horizon, NonEmptyStr
-from trading_house.ops.decide import latest_report
+from trading_house.ops.decide import holdout_status, latest_report
 from trading_house.ops.scenarios import registered_protocol, required_candidate
 from trading_house.research.evidence import EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.packages import PromotionStage, StrategyPackage, StrategySpec
 from trading_house.research.promotion import check_package, create_package, require_paper_approved
-from trading_house.research.trial_ledger import LedgerEventType, ValidatedPayload
+from trading_house.research.trial_ledger import HoldoutState, LedgerEventType, ValidatedPayload
+
+
+def _refuse_contaminated(trial_id: str, ledger: PostgresTrialLedger, store: EvidenceStore) -> None:
+    """A stale report must not license a package: the holdout is re-derived now."""
+
+    status = holdout_status(trial_id, ledger, store)
+    if status.state is HoldoutState.CONTAMINATED:
+        raise PromotionRefusedError() from ValueError(
+            f"the holdout is contaminated now: {status.reason}"
+        )
 
 
 class VerifiedPackage(CanonicalModel):
@@ -59,6 +69,8 @@ def package_from_chain(
     report_sha256, report = latest_report(trial_id, ledger, store)
     if stage is not PromotionStage.SANDBOX:
         require_paper_approved(report, report_sha256)
+    if stage is not PromotionStage.SANDBOX:
+        _refuse_contaminated(trial_id, ledger, store)
     protocol = registered_protocol(ledger.replay(), trial_id)
     candidate = required_candidate(protocol, trial_id)
     _, head = ledger.snapshot()
@@ -97,7 +109,9 @@ def verify_package(
 
     The report digest must name a readable report (an altered one is an integrity failure);
     the chain must hold a ``VALIDATED`` event naming it and its trial's LATEST ``GATE_DECIDED``
-    must name it too; ``trial_ledger_reference`` must be the hash of a row the chain holds;
+    must name it too; ``trial_ledger_reference`` must be the hash of a row the chain holds at
+    or after that latest decision; a PAPER or LIVE package is refused while the holdout derives
+    as CONTAMINATED;
     ``source_sha256`` must be the registered protocol's strategy hash; the specification must be
     the declared candidate's; and the stage rules of ``check_package`` must hold. A ``LIVE``
     package is verified only against the ``PAPER`` package it continues.
@@ -118,8 +132,21 @@ def verify_package(
         raise PromotionRefusedError() from ValueError(
             "the trial's latest decision names another report"
         )
-    if package.trial_ledger_reference not in {record.event_hash for record in ledger.events()}:
+    chain = ledger.events()
+    referenced = [r.sequence for r in chain if r.event_hash == package.trial_ledger_reference]
+    if not referenced:
         raise PromotionRefusedError() from ValueError("the ledger reference is not in the chain")
+    decided = [
+        r.sequence
+        for r in ledger.events_for(trial_id)
+        if r.event_type is LedgerEventType.GATE_DECIDED
+    ]
+    if referenced[0] < max(decided):
+        raise PromotionRefusedError() from ValueError(
+            "the ledger reference precedes the trial's latest decision"
+        )
+    if package.stage is not PromotionStage.SANDBOX:
+        _refuse_contaminated(trial_id, ledger, store)
     protocol = registered_protocol(ledger.replay(), trial_id)
     if package.source_sha256 != protocol.strategy_sha256:
         raise PromotionRefusedError() from ValueError("the source hash is not the protocol's")

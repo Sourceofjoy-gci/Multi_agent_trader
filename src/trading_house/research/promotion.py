@@ -43,6 +43,7 @@ from trading_house.research.trial_ledger import (
     PreregisteredPayload,
     RegistrationState,
     ReturnSeriesBasis,
+    TrialProtocol,
     ValidationSpec,
 )
 from trading_house.research.validation.capacity import CapacityStatus
@@ -172,6 +173,43 @@ def _status(state: HoldoutState, reason: str, opened: int = 0) -> HoldoutStatus:
     return HoldoutStatus(state=state, reason=reason, opened_bundle_count=opened)
 
 
+HoldoutKey = tuple[object, object, str]
+"""A declared holdout's identity: its start, its end and its dataset hash."""
+
+
+def _holdout_key(protocol: TrialProtocol) -> HoldoutKey | None:
+    """The identity of a declared holdout; ``None`` if the protocol declares no dates or hash."""
+
+    spec = protocol.holdout
+    if spec.start is None or spec.end is None or spec.dataset_sha256 is None:
+        return None
+    return (spec.start, spec.end, spec.dataset_sha256)
+
+
+def holdout_sharing_trials(trial_id: str, events: Sequence[LedgerEvent]) -> frozenset[str]:
+    """The OTHER trials whose registered protocol declares this trial's holdout.
+
+    The same holdout is the same start, end and dataset hash. A holdout opens at most once
+    however many candidates or registrations name it, so ``derive_holdout`` reads these trials'
+    sealed bundles too (amended 2026-10-02 after the 8D2 review). Pure over ``events``.
+    """
+
+    own: set[HoldoutKey] = set()
+    declared: dict[str, set[HoldoutKey]] = {}
+    for event in events:
+        payload = event.payload
+        if not isinstance(payload, PreregisteredPayload):
+            continue
+        key = _holdout_key(payload.protocol)
+        if key is None:
+            continue
+        for candidate in payload.protocol.candidates:
+            declared.setdefault(candidate.trial_id, set()).add(key)
+            if candidate.trial_id == trial_id:
+                own.add(key)
+    return frozenset(other for other, keys in declared.items() if other != trial_id and keys & own)
+
+
 def derive_holdout(
     trial_id: str,
     events: Sequence[LedgerEvent],
@@ -185,6 +223,8 @@ def derive_holdout(
     evidence digest to the ``provenance.holdout_state`` of the bundle it names, which the
     caller has read; a sealed digest it does not hold is a refusal, never a guess.
     ``sealed_levels`` maps the same digests to the cost multiplier each bundle ran at.
+    ``sealed_holdout_states`` must also hold the digests sealed by every trial in
+    ``holdout_sharing_trials`` (the caller reads only those).
 
     Rules, in the order they bind: legacy evidence is contaminated (§5.7); a protocol that
     registers a spent state is contaminated; two registrations that are not one protocol
@@ -192,6 +232,11 @@ def derive_holdout(
     says it is contaminated, contaminates; a second opened bundle AT AN ALREADY OPENED COST
     LEVEL contaminates; opened bundles are OPENED, and OPENED followed by any decision of the
     trial is CONSUMED.
+
+    A holdout opens at most once across trials too (amended 2026-10-02 after the 8D2 review): a
+    trial is CONTAMINATED when another trial whose registered protocol declares the same holdout
+    (same start, end and dataset hash) has sealed an opened or consumed bundle. A trial's own
+    opening is never counted against it by this rule, so the per-level rule above is unchanged.
 
     One opening is the cost grid run over the locked window (8D2: three bundles, 1.0x, 1.5x
     and 2.0x, all opened). The 8D1 text counted every opened bundle as an opening, which made
@@ -229,6 +274,19 @@ def derive_holdout(
             "before the research gates is an inspection before lock",
         )
 
+    sharing = holdout_sharing_trials(trial_id, events)
+    for event in events:
+        payload = event.payload
+        if event.trial_id in sharing and isinstance(payload, EvidenceSealedPayload):
+            if payload.evidence_sha256 not in sealed_holdout_states:
+                raise PromotionRefusedError() from ValueError(
+                    f"sealed evidence {payload.evidence_sha256} has no holdout state to derive from"
+                )
+            if sealed_holdout_states[payload.evidence_sha256] in _OPENING_STATES:
+                return _status(
+                    HoldoutState.CONTAMINATED,
+                    f"this holdout was opened by trial {event.trial_id}",
+                )
     opened: dict[str, Decimal] = {}
     consumed = False
     for event in events:

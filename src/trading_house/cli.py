@@ -125,7 +125,7 @@ from trading_house.ops.decide import (
 )
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
-from trading_house.ops.holdout import refuse_outside_coverage
+from trading_house.ops.holdout import refuse_forged_holdout_provenance, refuse_outside_coverage
 from trading_house.ops.ledger import (
     build_evidence_store,
     execution_started_event,
@@ -1701,12 +1701,17 @@ def research_trial_record(
     is missing -- the unreferenced side of that pair is the recoverable one. Both
     events are derived from the bundle, and both ids are deterministic, so a
     retried ``record`` is one event read back.
+
+    A bundle whose provenance says the holdout was opened, consumed or locked is
+    refused (exit 21) before any write: only ``open-holdout`` seals an opened bundle.
     """
 
     def operation() -> dict[str, JsonValue]:
         bundle = _evidence_bundle(evidence)
         if bundle.trial_id != trial_id or bundle.attempt_id != attempt_id:
             raise SchemaValidationError()
+        # Only ``open-holdout`` may seal an opened bundle: refused before anything is written.
+        refuse_forged_holdout_provenance(bundle)
         # The ledger is resolved -- and the migration head checked -- before the
         # first byte is written. A database that has never had the ledger tables
         # cannot record the seal either, so writing first would leave a document
@@ -2531,9 +2536,10 @@ def research_trial_open_holdout(
     that is not locked (a second opening included), a latest decision other than
     RESEARCH_PASSED, a window outside the stored bars, a ``--protocol`` file that is not the
     registered one, an invalid option, and a run whose replay inputs differ from the
-    research baseline's. A run that stops after its start row leaves a partial opening,
-    which is final: ``decide`` refuses until both stressed bundles exist, and the opening
-    cannot be repeated.
+    research baseline's. A run that stops after its FIRST SEALED bundle leaves a partial
+    opening, which is final: ``decide`` refuses until both stressed bundles exist, and the
+    opening cannot be repeated. A simulator refusal at 1.0x seals nothing: the holdout stays
+    locked and a new ``--attempt-prefix`` can retry.
     """
 
     def operation() -> dict[str, JsonValue]:

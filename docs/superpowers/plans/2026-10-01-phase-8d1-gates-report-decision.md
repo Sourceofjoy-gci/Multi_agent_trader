@@ -20,7 +20,9 @@ no ledger, no store, no clock.
    `derive_holdout(trial_id, events: Sequence[LedgerEvent], sealed_holdout_states: Mapping[str, HoldoutState])`
    implementing P-8 exactly (legacy => CONTAMINATED; protocol NOT_DEFINED/LOCKED; protocol OPENED/CONSUMED/
    CONTAMINATED => CONTAMINATED; one OPENED bundle => OPENED; OPENED then a later GATE_DECIDED => CONSUMED; two
-   opened bundles => CONTAMINATED). Event ORDER is the sequence in `events` (replay order). `sealed_holdout_states` maps
+   opened bundles at one cost level => CONTAMINATED; and another trial declaring the same holdout window and hash
+   that has an opened bundle => CONTAMINATED -- amended 2026-10-02 after the 8D2 review; the original read
+   "two opened bundles" and was per trial id). Event ORDER is the sequence in `events` (replay order). `sealed_holdout_states` maps
    an evidence digest to that bundle's `provenance.holdout_state` (the caller reads it).
 Tests: one per transition and per contamination route, written from the table in P-8; an OPENED holdout never goes
 back; CONSUMED needs the later decision; order matters (a decision BEFORE the opening does not consume it).

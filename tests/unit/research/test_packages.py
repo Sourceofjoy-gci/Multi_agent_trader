@@ -82,6 +82,18 @@ def test_a_sandbox_package_carries_no_authorization_and_no_signature(
         StrategyPackage(**{**clean, **claim})
 
 
+@pytest.mark.parametrize(
+    "extra", [{"capital_authorization_ref": "capital-auth-1"}, {"signature_sha256": "a-signature"}]
+)
+def test_a_paper_package_carries_neither_a_capital_authorization_nor_a_signature(
+    extra: dict[str, object],
+) -> None:
+    assert StrategyPackage(**_package()).stage is PromotionStage.PAPER
+
+    with pytest.raises(ValidationError, match="paper package carries no capital"):
+        StrategyPackage(**_package(**extra))
+
+
 def test_a_package_survives_its_own_json_round_trip() -> None:
     package = StrategyPackage(**_live())
 

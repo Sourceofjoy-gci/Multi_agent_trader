@@ -59,6 +59,7 @@ from trading_house.research.promotion import (
     decide,
     derive_holdout,
     evaluate_gates,
+    holdout_sharing_trials,
     policy_digest_input,
     policy_sha256,
 )
@@ -114,12 +115,14 @@ class _SealedHoldout(NamedTuple):
 def _sealed_holdout(
     events: Sequence[LedgerEvent], trial_id: str, store: EvidenceStore
 ) -> _SealedHoldout:
-    """The provenance holdout state and the cost level of every bundle the chain seals here."""
+    """State and cost level of the bundles sealed by this trial or one sharing its holdout."""
 
     states: dict[str, HoldoutState] = {}
     levels: dict[str, Decimal] = {}
+    # this trial's bundles, and those of the trials that share its holdout (and only those)
+    readable = {trial_id, *holdout_sharing_trials(trial_id, events)}
     for event in events:
-        if event.trial_id == trial_id and isinstance(event.payload, EvidenceSealedPayload):
+        if event.trial_id in readable and isinstance(event.payload, EvidenceSealedPayload):
             digest = event.payload.evidence_sha256
             bundle = store.read(digest)
             states[digest] = bundle.provenance.holdout_state

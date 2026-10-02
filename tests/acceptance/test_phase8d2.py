@@ -42,6 +42,7 @@ from tests.integration.research.test_scenarios import (
 from tests.integration.research.test_trial_cli import _bundle as _unit_bundle
 from tests.integration.research.test_trial_cli import _ledger, _store, _verify
 from tests.integration.research.test_trial_cli import _result as _unit_result
+from tests.unit.ops.test_scenarios import _protocol as _unit_protocol
 from tests.unit.research.backtest.conftest import _contract
 from trading_house import cli
 from trading_house.database.connection import open_runtime_connection
@@ -441,7 +442,11 @@ def test_a_holdout_window_outside_the_stored_bars_is_refused_before_any_write(
 def _hand_sealed_opened(
     research_env: Path, dsn: str, level: str, attempt_id: str, **provenance: Any
 ) -> str:
-    """An opened bundle sealed by hand through the real ledger: what a crashed opening leaves."""
+    """A NAMED TEST HELPER: an opened bundle sealed through ``seal_bundle``, the lower-level path.
+
+    It is what a crashed opening leaves, and it is NOT reachable through ``research trial record``,
+    which refuses such a bundle (``test_record_cannot_seal_an_opening``).
+    """
 
     store, ledger = _store(research_env), _ledger(dsn)
     baseline = next(
@@ -560,10 +565,12 @@ def _package_chain(research_env: Path, dsn: str, tmp_path: Path) -> TrialProtoco
     return TrialProtocol.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def _open_cheaply(research_env: Path, dsn: str) -> None:
+def _open_cheaply(
+    research_env: Path, dsn: str, trial_id: str = PACKAGE_TRIAL, attempt_id: str = "open-1"
+) -> None:
     """One opened bundle sealed by hand: enough for the derived holdout to read OPENED."""
 
-    bundle = _unit_bundle(PACKAGE_TRIAL, "open-1", _unit_result())
+    bundle = _unit_bundle(trial_id, attempt_id, _unit_result())
     opened = bundle.model_copy(
         update={
             "provenance": bundle.provenance.model_copy(
@@ -914,6 +921,118 @@ def test_an_opened_holdout_is_not_opened_again_even_while_the_last_decision_says
 
     _assert_refused(_open(opening_seeded, tmp_path / "locked.json"), cli.ExitCode.PROMOTION_REFUSED)
 
+    assert _state(research_ledger_dsn, research_env) == before
+
+
+def test_record_cannot_seal_an_opening(
+    research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    _package_chain(research_env, research_ledger_dsn, tmp_path)
+    _synthetic(research_ledger_dsn, research_env, Decision.RESEARCH_PASSED)
+    before = _state(research_ledger_dsn, research_env)
+
+    for state in (HoldoutState.OPENED, HoldoutState.CONSUMED, HoldoutState.LOCKED):
+        bundle = _unit_bundle(PACKAGE_TRIAL, f"forged-{state.value}", _unit_result())
+        forged = bundle.model_copy(
+            update={"provenance": bundle.provenance.model_copy(update={"holdout_state": state})}
+        )
+        file = tmp_path / f"forged-{state.value}.json"
+        file.write_text(forged.model_dump_json(), encoding="utf-8")
+
+        refused = _trial(
+            "record",
+            "--trial-id",
+            PACKAGE_TRIAL,
+            "--attempt-id",
+            f"forged-{state.value}",
+            "--evidence",
+            str(file),
+        )
+
+        _assert_refused(refused, cli.ExitCode.PROMOTION_REFUSED)
+        assert _state(research_ledger_dsn, research_env) == before
+    assert _holdout() == ("locked", 0)
+
+
+def _locked_pair(tmp_path: Path, *ids: str, protocol_id: str = "pair", end_day: int = 1) -> Path:
+    """A unit protocol declaring ``ids`` over a LOCKED holdout, written to disk (not registered)."""
+
+    protocol = _unit_protocol(ids).model_copy(update={"protocol_id": protocol_id})
+    holdout = HoldoutSpec(
+        state=HoldoutState.LOCKED,
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 2, end_day, tzinfo=UTC),
+        dataset_sha256="9" * 64,
+    )
+    path = tmp_path / f"{protocol_id}.json"
+    path.write_text(protocol.model_copy(update={"holdout": holdout}).model_dump_json(), "utf-8")
+    return path
+
+
+def test_candidates_sharing_one_holdout_cannot_each_open_it_and_a_reregistration_cannot_reopen_it(
+    opening_seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    path = _locked_pair(tmp_path, "trial-1", "trial-2")
+    assert _trial("register", "--protocol", str(path)).exit_code == cli.ExitCode.OK
+    ledger, store = _ledger(research_ledger_dsn), _store(research_env)
+    for trial in ("trial-1", "trial-2"):
+        seal_bundle(
+            _unit_bundle(trial, f"base-{trial}", _unit_result()), ledger=ledger, store=store
+        )
+        _synthetic(research_ledger_dsn, research_env, Decision.RESEARCH_PASSED, trial, hour=12)
+    assert _holdout("trial-2") == ("locked", 0)
+
+    _open_cheaply(research_env, research_ledger_dsn, "trial-1", "open-1")  # A opens it
+
+    assert _holdout("trial-1") == ("opened", 1)  # not self-contaminated
+    state = _envelope(_trial("holdout", "--trial-id", "trial-2"))
+    assert state["state"] == "contaminated"
+    assert state["reason"] == "this holdout was opened by trial trial-1"
+    before = _state(research_ledger_dsn, research_env)
+    refused = _open(opening_seeded, path, **{"--trial-id": "trial-2"})
+    _assert_refused(refused, cli.ExitCode.PROMOTION_REFUSED)  # B's latest decision still allows it
+    assert _state(research_ledger_dsn, research_env) == before
+
+    # another protocol naming the same window and hash, with a new trial id
+    again = _locked_pair(tmp_path, "trial-9", protocol_id="again")
+    assert _trial("register", "--protocol", str(again)).exit_code == cli.ExitCode.OK
+    assert _holdout("trial-9")[0] == "contaminated"
+    # a different window, or a different hash, is a different holdout
+    elsewhere = _locked_pair(tmp_path, "trial-8", protocol_id="elsewhere", end_day=2)
+    assert _trial("register", "--protocol", str(elsewhere)).exit_code == cli.ExitCode.OK
+    assert _holdout("trial-8") == ("locked", 0)
+
+
+def test_a_package_is_refused_when_its_reference_is_stale_or_the_holdout_has_since_been_spent(
+    research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    _package_chain(research_env, research_ledger_dsn, tmp_path)
+    _open_cheaply(research_env, research_ledger_dsn)
+    _synthetic(research_ledger_dsn, research_env, Decision.PAPER_APPROVED, hour=14)
+    paper_file = tmp_path / "paper.json"
+    paper = [*BASE, "--stage", "paper", "--authorization-ref", "AUTH-1"]
+    assert _create(*paper, "--out", str(paper_file)).exit_code == cli.ExitCode.OK
+    assert _verify_package("--file", str(paper_file)).exit_code == cli.ExitCode.OK
+    refused = cli.ExitCode.PROMOTION_REFUSED
+
+    # a ledger reference that precedes the latest decision licenses nothing
+    first = _ledger(research_ledger_dsn).events()[0].event_hash
+    stale = _edited(paper_file, tmp_path, "stale.json", trial_ledger_reference=first)
+    _assert_refused(_verify_package("--file", str(stale)), refused)
+    # a PAPER package carries no capital authorization and no signature
+    for extra in (["--capital-authorization-ref", "CAP-1"], ["--signature-sha256", "SIG-1"]):
+        out = tmp_path / "paper-extra.json"
+        _assert_refused(_create(*paper, *extra, "--out", str(out)), refused)
+        assert not out.exists()
+
+    # a second opening at the same level spends the holdout: the old report no longer licenses it
+    _open_cheaply(research_env, research_ledger_dsn, attempt_id="open-2")
+    assert _holdout()[0] == "contaminated"
+    before = _state(research_ledger_dsn, research_env)
+    _assert_refused(_verify_package("--file", str(paper_file)), refused)
+    fresh = tmp_path / "fresh.json"
+    _assert_refused(_create(*paper, "--out", str(fresh)), refused)
+    assert not fresh.exists()
     assert _state(research_ledger_dsn, research_env) == before
 
 

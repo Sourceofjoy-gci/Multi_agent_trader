@@ -49,6 +49,7 @@ from trading_house.research.promotion import (
     decide,
     derive_holdout,
     evaluate_gates,
+    holdout_sharing_trials,
     policy_digest_input,
     policy_sha256,
 )
@@ -465,6 +466,111 @@ def test_the_same_registration_twice_is_one_registration() -> None:
 def test_sealed_evidence_with_no_known_holdout_state_is_refused_not_guessed() -> None:
     with pytest.raises(PromotionRefusedError):
         derive_holdout(TRIAL, (_registered(HoldoutState.LOCKED), _sealed("7" * 64)), STATES, LEVELS)
+
+
+# --- one holdout, however many trials declare it (amended 2026-10-02 after the 8D2 review) ----
+
+OTHER = "trial-b"
+
+
+def _family(
+    *trial_ids: str, version: str = "1", end_day: int = 1, hash_: str = "9" * 64
+) -> LedgerEvent:
+    """One protocol declaring ``trial_ids`` over a LOCKED holdout of the given window and hash."""
+
+    protocol = _protocol(trial_ids).model_copy(update={"protocol_version": version})
+    holdout = HoldoutSpec(
+        state=HoldoutState.LOCKED,
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 2, end_day, tzinfo=UTC),
+        dataset_sha256=hash_,
+    )
+    return _preregistered_event(protocol.model_copy(update={"holdout": holdout}))
+
+
+def test_a_candidate_sharing_the_holdout_contaminates_the_others_once_it_opens() -> None:
+    shared = _family(TRIAL, OTHER)
+
+    before = _derive(shared, trial_id=OTHER)
+    opened_by_a = _derive(shared, _sealed(O1, trial_id=TRIAL), trial_id=OTHER)
+    consumed_by_a = _derive(shared, _sealed("4" * 64, trial_id=TRIAL), trial_id=OTHER)
+
+    assert before.state is HoldoutState.LOCKED
+    assert opened_by_a.state is HoldoutState.CONTAMINATED
+    assert opened_by_a.reason == f"this holdout was opened by trial {TRIAL}"
+    assert consumed_by_a.state is HoldoutState.CONTAMINATED
+
+
+def test_a_trials_own_opening_does_not_contaminate_it_through_the_sharing_rule() -> None:
+    shared = _family(TRIAL, OTHER)
+
+    own = _derive(shared, _sealed(O1), _sealed(O15), _sealed(O20), trial_id=TRIAL)
+
+    assert (own.state, own.opened_bundle_count) == (HoldoutState.OPENED, 3)
+
+
+def test_the_sharing_rule_ignores_a_sharing_trials_unopened_bundles() -> None:
+    shared = _family(TRIAL, OTHER)
+
+    status = _derive(
+        shared, _sealed(W, trial_id=TRIAL), _sealed("6" * 64, trial_id=TRIAL), trial_id=OTHER
+    )
+
+    assert status.state is HoldoutState.LOCKED
+
+
+def test_a_second_protocol_naming_the_same_window_and_hash_cannot_reopen_a_spent_holdout() -> None:
+    first, second = _family(TRIAL), _family("trial-c", version="2")
+
+    unopened = _derive(first, second, trial_id="trial-c")
+    spent = _derive(first, second, _sealed(O1, trial_id=TRIAL), trial_id="trial-c")
+
+    assert unopened.state is HoldoutState.LOCKED
+    assert spent.state is HoldoutState.CONTAMINATED
+    assert holdout_sharing_trials("trial-c", (first, second)) == {TRIAL}
+
+
+@pytest.mark.parametrize("change", [{"end_day": 2}, {"hash_": "8" * 64}])
+def test_trials_with_a_different_window_or_hash_are_unaffected(change: dict[str, Any]) -> None:
+    mine, theirs = _family(TRIAL), _family(OTHER, version="2", **change)
+
+    status = _derive(mine, theirs, _sealed(O1, trial_id=OTHER), trial_id=TRIAL)
+
+    assert status.state is HoldoutState.LOCKED
+    assert holdout_sharing_trials(TRIAL, (mine, theirs)) == frozenset()
+
+
+def test_a_start_that_differs_is_a_different_holdout() -> None:
+    mine = _family(TRIAL)
+    other = _family(OTHER, version="2")
+    shifted = other.payload.model_copy(  # type: ignore[union-attr]
+        update={
+            "protocol": other.payload.protocol.model_copy(  # type: ignore[union-attr]
+                update={
+                    "holdout": other.payload.protocol.holdout.model_copy(  # type: ignore[union-attr]
+                        update={"start": datetime(2025, 12, 1, tzinfo=UTC)}
+                    )
+                }
+            )
+        }
+    )
+    theirs = other.model_copy(update={"payload": shifted})
+
+    assert holdout_sharing_trials(TRIAL, (mine, theirs)) == frozenset()
+
+
+def test_protocols_that_declare_no_holdout_share_nothing() -> None:
+    undefined = _registered(HoldoutState.NOT_DEFINED, trial_id=OTHER)
+
+    assert holdout_sharing_trials(TRIAL, (_family(TRIAL), undefined)) == frozenset()
+    assert holdout_sharing_trials(TRIAL, (undefined,)) == frozenset()
+    both_undefined = (undefined, _registered(HoldoutState.NOT_DEFINED, trial_id=TRIAL))
+    assert holdout_sharing_trials(OTHER, both_undefined) == frozenset()
+
+
+def test_a_sharing_trials_sealed_digest_with_no_state_is_refused_not_guessed() -> None:
+    with pytest.raises(PromotionRefusedError):
+        _derive(_family(TRIAL, OTHER), _sealed("7" * 64, trial_id=TRIAL), trial_id=OTHER)
 
 
 # --- the gates ----------------------------------------------------------------------------
