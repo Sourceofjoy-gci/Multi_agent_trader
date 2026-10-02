@@ -1354,3 +1354,106 @@ def test_a_report_with_its_gates_out_of_order_is_refused() -> None:
 
     with pytest.raises(ValidationError):
         _report(gates=(gates[1], gates[0], *gates[2:]))
+
+
+# --- a defined measurement on another basis is unavailable, never a pass or a fail ---------
+
+
+def _off_basis(ev: StatisticalEvidence, slot: str, value: float) -> StatisticalEvidence:
+    """The one measurement at ``slot`` replaced by a DEFINED one that is not on the marked basis."""
+
+    n = _m(slot, value, mtm=False)
+    if slot == "dsr":
+        return ev.model_copy(update={"dsr": ev.dsr.model_copy(update={"dsr": n})})
+    if slot == "pbo":
+        return ev.model_copy(update={"pbo": ev.pbo.model_copy(update={"pbo": n})})
+    if slot == "cpcv_p5":
+        return ev.model_copy(update={"cpcv_p5": ev.cpcv_p5.model_copy(update={"p5": n})})
+    if slot == "bootstrap":
+        return ev.model_copy(
+            update={"bootstrap": ev.bootstrap.model_copy(update={"bootstrap_lower_bound": n})}
+        )
+    if slot == "dd_baseline":
+        return ev.model_copy(update={"max_drawdown_baseline": n})
+    if slot == "dd_path":
+        return ev.model_copy(update={"max_drawdown_cpcv_paths": (ev.max_drawdown_cpcv_paths[0], n)})
+    if slot == "dd_compounding":
+        return ev.model_copy(update={"max_drawdown_compounding": n})
+    if slot == "p_halt":
+        return ev.model_copy(
+            update={"monte_carlo": ev.monte_carlo.model_copy(update={"p_halt": n})}
+        )
+    if slot == "p_loss":
+        return ev.model_copy(
+            update={"monte_carlo": ev.monte_carlo.model_copy(update={"p_loss": n})}
+        )
+    if slot == "oos_trades":
+        return ev.model_copy(update={"coverage": ev.coverage.model_copy(update={"oos_trades": n})})
+    assert slot == "regimes"
+    return ev.model_copy(
+        update={"coverage": ev.coverage.model_copy(update={"regimes_represented": n})}
+    )
+
+
+_OFF_BASIS: list[tuple[str, int, float, float]] = [
+    # slot, gate, a value that would PASS, a value that would FAIL
+    ("dsr", 3, 0.99, 0.1),
+    ("pbo", 4, 0.2, 0.9),
+    ("cpcv_p5", 5, 5.0, -5.0),
+    ("bootstrap", 6, 0.001, -0.001),
+    ("dd_baseline", 7, 0.05, 0.5),
+    ("dd_path", 7, 0.05, 0.5),
+    ("dd_compounding", 7, 0.05, 0.5),
+    ("p_halt", 7, 0.1, 0.1),
+    ("p_loss", 7, 0.2, 0.2),
+    ("oos_trades", 8, 40.0, 3.0),
+    ("regimes", 8, 2.0, 1.0),
+]
+
+
+@pytest.mark.parametrize(("slot", "number", "good", "bad"), _OFF_BASIS)
+def test_a_defined_measurement_not_on_the_marked_basis_is_unavailable_whatever_its_value(
+    slot: str, number: int, good: float, bad: float
+) -> None:
+    for value in (good, bad):
+        gate = _gates(_off_basis(_evidence(), slot, value))[number]
+
+        assert gate.status is GateStatus.UNAVAILABLE, (slot, value)
+        assert gate.measured_value is None
+        assert "the measurement is not on a mark-to-market basis" in gate.reason
+    # and the same slot on the marked basis is judged: the good value passes
+    marked = _gates(_evidence())[number]
+    assert marked.status is GateStatus.PASS
+
+
+def test_a_realized_basis_pbo_candidate_cannot_let_gate_four_pass_beside_a_marked_baseline() -> (
+    None
+):
+    ev = _off_basis(_evidence(), "pbo", 0.0)
+
+    assert _gates(ev)[4].status is GateStatus.UNAVAILABLE
+    assert _gates(ev)[3].status is GateStatus.PASS  # the baseline's own DSR is still judged
+
+
+@pytest.mark.parametrize("which", ["first", "second"])
+def test_a_holdout_expectancy_not_on_the_marked_basis_is_unavailable_whatever_its_value(
+    which: str,
+) -> None:
+    for value in (5.0, -5.0):
+        off, good = _m("h", value, mtm=False), _m("h", 5.0)
+        h15, h20 = (off, good) if which == "first" else (good, off)
+
+        gate = _gates(_evidence(), holdout=_holdout(HoldoutState.OPENED), h15=h15, h20=h20)[2]
+
+        assert gate.status is GateStatus.UNAVAILABLE
+        assert "the measurement is not on a mark-to-market basis" in gate.reason
+
+
+def test_the_fold_count_and_the_capacity_gate_read_no_return_series_and_are_exempt() -> None:
+    ev = _evidence().model_copy(update={"wfa_folds": _m("wfa_folds", 3.0, mtm=False)})
+
+    gates = _gates(ev)
+
+    assert gates[1].status is GateStatus.PASS
+    assert gates[9].status is GateStatus.UNAVAILABLE
+    assert promotion.NOT_MARK_TO_MARKET not in gates[9].reason

@@ -2374,8 +2374,8 @@ def research_trial_decide(
             "--occurred-at",
             help=(
                 "Declared time of the decision, UTC (e.g. 2026-03-01T12:00:00). Required, "
-                "so that a retry names the same value; a rerun on identical evidence "
-                "appends nothing whatever value it is given."
+                "so that a retry names the same value; a rerun on an unchanged "
+                "chain appends nothing whatever value it is given."
             ),
         ),
     ],
@@ -2390,7 +2390,8 @@ def research_trial_decide(
     RESEARCH_PASSED only for a locked, unopened holdout and eight passing research gates.
 
     Seals the report, then appends ``VALIDATED`` and ``GATE_DECIDED`` naming its digest.
-    A rerun on identical evidence appends nothing. It creates no package, changes no
+    A rerun on an unchanged chain appends nothing; evidence sealed for any trial since
+    makes it seal a new report. It creates no package, changes no
     stage and takes no stage option. A policy that moved since the trial's first report
     is refused (exit 21), as is an undeclared trial (exit 19).
     """

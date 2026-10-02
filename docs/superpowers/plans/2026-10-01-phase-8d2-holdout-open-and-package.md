@@ -30,6 +30,15 @@ real ledger (a named test helper; never reachable from a command), and the READM
 3. After opening, `decide` (8D1) must read the opened 1.5x and 2.0x bundles (exactly one each, else UNAVAILABLE with the reason)
    and feed `holdout_expectancy_1_5/2_0` (the 8C3 `scenario_expectancy` measurement over the opened bundle's sample); gate 2 then
    evaluates; a later `GATE_DECIDED` moves the derived holdout to `CONSUMED`.
+   **Any `decide` run after a sealed OPENED bundle appends a `GATE_DECIDED` and thereby CONSUMES the holdout** (8D1's
+   `derive_holdout`: OPENED followed by any decision of the trial). So an un-informed `decide` (one that cannot supply
+   gate 2's expectancies) would spend the holdout for nothing. Therefore: `decide` REFUSES (`PromotionRefusedError`,
+   exit 21, nothing written: no report, no event) whenever a sealed OPENED bundle exists for the trial but the opened
+   1.5x and 2.0x bundles are not BOTH present exactly once; this replaces the "else UNAVAILABLE" above for that case. And the
+   opening workflow must make `decide` supply the holdout expectancies in the same flow: `open-holdout` must not
+   leave a window in which an un-informed `decide` can consume the holdout (seal the three bundles, then the operator's next
+   step is `decide`, which is the informed one; test that `decide` after only a partial opening is refused and writes
+   nothing, and that the derived state is still OPENED afterwards). Specified here, NOT implemented in 8D1.
 Tests (with the named synthetic-RESEARCH_PASSED helper): each refusal with row/file equality (not LOCKED, no RESEARCH_PASSED,
 already opened, other replay inputs, holdout window outside bar coverage); the happy path seals three OPENED bundles and the
 derived state is OPENED; a second call is refused; `decide` afterwards evaluates gate 2 PASS and FAIL both ways; the derived state

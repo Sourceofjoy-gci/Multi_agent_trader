@@ -75,10 +75,21 @@ def test_event_ids_are_content_derived_from_trial_report_and_event_type() -> Non
     assert gate_decided_event("t2", "a1", SPEC, R, "REJECTED", T0).event_id != decided.event_id
 
 
-def _events(trial_id: str, report_sha256: str, decision: str = "REJECTED") -> list:  # type: ignore[type-arg]
+REPORT_SPEC = "d" * 64  # the spec_sha256 and attempt of tests.unit.research.test_promotion._report
+REPORT_ATTEMPT = "attempt-1"
+
+
+def _events(
+    trial_id: str,
+    report_sha256: str,
+    decision: str = "REJECTED",
+    *,
+    attempt: str = REPORT_ATTEMPT,
+    spec: str = REPORT_SPEC,
+) -> list:  # type: ignore[type-arg]
     return [
-        validated_event(trial_id, "a1", SPEC, report_sha256, T0),
-        gate_decided_event(trial_id, "a1", SPEC, report_sha256, decision, T0),  # type: ignore[arg-type]
+        validated_event(trial_id, attempt, spec, report_sha256, T0),
+        gate_decided_event(trial_id, attempt, spec, report_sha256, decision, T0),  # type: ignore[arg-type]
     ]
 
 
@@ -142,3 +153,72 @@ def test_verify_reports_checks_the_validated_event_too_not_only_the_decision(
 
     with pytest.raises(EvidenceIntegrityError):
         verify_reports(_events("trial-1", digest)[:1], store)
+
+
+@pytest.mark.parametrize("which", ["both", "validated", "decided"])
+@pytest.mark.parametrize("field", ["attempt", "spec"])
+def test_verify_reports_refuses_a_report_of_another_attempt_or_specification(
+    tmp_path: Path, which: str, field: str
+) -> None:
+    store = EvidenceStore(tmp_path)
+    digest = store.write_report(_report()).sha256
+    right = _events("trial-1", digest)
+    wrong = _events("trial-1", digest, **{field: "other" if field == "attempt" else "e" * 64})
+    events = {
+        "both": wrong,
+        "validated": [wrong[0], right[1]],
+        "decided": [right[0], wrong[1]],
+    }[which]
+
+    with pytest.raises(EvidenceIntegrityError):
+        verify_reports(events, store)
+
+
+def test_verify_reports_refuses_a_report_whose_policy_digest_is_not_its_embedded_policys(
+    tmp_path: Path,
+) -> None:
+    """Unreachable through the store (the model refuses it on read), so a store that hands
+    back an unvalidated report is the only way to put the clause under test."""
+
+    good = _report()
+    bad = good.model_copy(update={"policy_sha256": "0" * 64})
+
+    class _Store(EvidenceStore):
+        def read_report(self, digest: str):  # type: ignore[no-untyped-def]
+            return bad
+
+    with pytest.raises(EvidenceIntegrityError):
+        verify_reports(_events("trial-1", "f" * 64), _Store(tmp_path))
+
+    class _GoodStore(EvidenceStore):
+        def read_report(self, digest: str):  # type: ignore[no-untyped-def]
+            return good
+
+    verify_reports(_events("trial-1", "f" * 64), _GoodStore(tmp_path))
+
+
+def test_a_validated_event_with_no_decision_after_it_is_a_verification_failure(
+    tmp_path: Path,
+) -> None:
+    store = EvidenceStore(tmp_path)
+    digest = store.write_report(_report()).sha256
+    validated, decided = _events("trial-1", digest)
+
+    with pytest.raises(EvidenceIntegrityError):
+        verify_reports([validated], store)  # the crash between decide's two appends
+    with pytest.raises(EvidenceIntegrityError):
+        verify_reports([decided, validated], store)  # a decision BEFORE the report is not after it
+    verify_reports([validated, decided], store)  # the next decide closes it
+
+
+def test_the_decision_that_closes_a_validated_event_names_the_same_report(
+    tmp_path: Path,
+) -> None:
+    store = EvidenceStore(tmp_path)
+    digest = store.write_report(_report()).sha256
+    other = store.write_report(_report(chain_head="i" * 64)).sha256
+    validated = _events("trial-1", digest)[0]
+    other_report = _events("trial-1", other)[1]
+
+    with pytest.raises(EvidenceIntegrityError):
+        verify_reports([validated, other_report], store)

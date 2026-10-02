@@ -10,11 +10,14 @@ the only thing that may move a stage is a package carrying a human authorization
 
 Three properties are deliberate, and each is a place a shorter version would break:
 
-* **A rerun on identical evidence is a no-op.** The report digest is a function of the
+* **A rerun on an UNCHANGED chain is a no-op.** The report digest is a function of the
   evidence alone (``chain_head`` is taken with the two decision event types left out, so
   the rows a decision appends do not change the evidence a rerun reads), and the event ids
-  are content-derived. A rerun finds both events by id and appends nothing, whatever
-  ``occurred_at`` it is given; a crash between the two appends is closed by the next run.
+  are content-derived. But that head is the last evidence-bearing row of the WHOLE chain,
+  so evidence sealed for another trial moves it and a rerun then seals a new report and
+  appends a new pair for the same decision. On an unchanged chain a rerun finds both
+  events by id and appends nothing, whatever ``occurred_at`` it is given; a crash between
+  the two appends is closed by the next run (and is visible to ``verify`` until then).
 * **The first report pins the policy.** A trial that already has a report is evaluated
   under the policy digest that report names. If the constants in force have since moved,
   ``evaluate_gates`` refuses: a threshold may not change after a result exists.
@@ -34,6 +37,7 @@ from trading_house.core.values import CanonicalModel, NonEmptyStr
 from trading_house.ops.ledger import gate_decided_event, validated_event
 from trading_house.ops.scenarios import declared_candidate, registered_protocol
 from trading_house.ops.validate import read_validation_inputs, statistical_evidence
+from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.promotion import (
@@ -264,17 +268,34 @@ def latest_report(
 def verify_reports(events: Sequence[LedgerEvent], store: EvidenceStore) -> None:
     """Re-read every report the chain names, and check each is the event's own.
 
-    A missing or altered report file is ``EvidenceIntegrityError`` through ``read_report``;
-    a report of another trial, or a ``GATE_DECIDED`` whose decision is not the report's,
-    is the same error.
+    A missing or altered report file is ``EvidenceIntegrityError`` through ``read_report``.
+    The same error for a report that is not the event's own (another trial, attempt or
+    specification), a report whose policy digest is not the digest of the policy it
+    embeds, a ``GATE_DECIDED`` whose decision is not the report's, and a ``VALIDATED``
+    with no ``GATE_DECIDED`` for the same report after it. The last is also what a crash
+    between ``decide``'s two appends looks like: visible here until the next ``decide``
+    closes it.
     """
 
+    awaiting: set[str] = set()
     for event in events:
         payload = event.payload
         if not isinstance(payload, (ValidatedPayload, GateDecidedPayload)):
             continue
         report = store.read_report(payload.report_sha256)
-        if report.trial_id != event.trial_id:
+        if (
+            report.trial_id != event.trial_id
+            or report.attempt_id != event.attempt_id
+            or report.spec_sha256 != event.spec_sha256
+            or report.policy_sha256 != canonical_sha256(report.policy)
+        ):
             raise EvidenceIntegrityError()
-        if isinstance(payload, GateDecidedPayload) and report.decision.value != payload.decision:
+        key = payload.report_sha256
+        if isinstance(payload, ValidatedPayload):
+            awaiting.add(key)
+            continue
+        if report.decision.value != payload.decision:
             raise EvidenceIntegrityError()
+        awaiting.discard(key)
+    if awaiting:
+        raise EvidenceIntegrityError()

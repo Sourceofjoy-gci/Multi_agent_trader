@@ -34,7 +34,11 @@ import trading_house.research.ledger_store as ledger_store
 from trading_house.core.errors import TrialLedgerAppendError, TrialLedgerIntegrityError
 from trading_house.database.connection import open_runtime_connection
 from trading_house.marketdata.models import Timeframe
-from trading_house.ops.ledger import execution_started_event
+from trading_house.ops.ledger import (
+    execution_started_event,
+    gate_decided_event,
+    validated_event,
+)
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.canonical import canonical_bytes, canonical_sha256
 from trading_house.research.ledger_store import (
@@ -1386,3 +1390,60 @@ def test_vouching_reads_on_the_connection_the_append_runs_on(
     ledger.append(_start(candidate.trial_id, "a-1", canonical_sha256(candidate)))
 
     assert len(opened) == 1
+
+
+# --- 8D: a report and a decision are outcomes of a declared trial --------------------------
+
+_DECISION_BUILDERS: dict[str, Callable[[str], LedgerEvent]] = {
+    "validated": lambda trial_id: validated_event(
+        trial_id, "attempt-1", "a" * 64, "b" * 64, datetime(2026, 10, 1, tzinfo=UTC)
+    ),
+    "gate_decided": lambda trial_id: gate_decided_event(
+        trial_id, "attempt-1", "a" * 64, "b" * 64, "REJECTED", datetime(2026, 10, 1, tzinfo=UTC)
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_DECISION_BUILDERS))
+def test_a_report_or_decision_for_an_undeclared_trial_is_refused_and_appends_nothing(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol, kind: str
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_preregistered_event(trial_protocol))
+    rows = len(ledger.events())
+
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(_DECISION_BUILDERS[kind]("trial-never-declared"))
+
+    assert len(ledger.events()) == rows
+
+
+@pytest.mark.parametrize("kind", sorted(_DECISION_BUILDERS))
+def test_a_report_or_decision_that_names_no_trial_is_refused_and_appends_nothing(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol, kind: str
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_preregistered_event(trial_protocol))
+    rows = len(ledger.events())
+    event = _DECISION_BUILDERS[kind]("trial-1").model_copy(update={"trial_id": None})
+
+    with pytest.raises(TrialLedgerAppendError):
+        ledger.append(event)
+
+    assert len(ledger.events()) == rows
+
+
+@pytest.mark.parametrize("kind", sorted(_DECISION_BUILDERS))
+def test_a_report_or_decision_for_a_registered_or_legacy_imported_trial_still_appends(
+    research_ledger_dsn: str, trial_protocol: TrialProtocol, kind: str
+) -> None:
+    ledger = _ledger(research_ledger_dsn)
+    ledger.append(_preregistered_event(trial_protocol))
+    ledger.append(_legacy_event("legacy-trial"))
+    registered = trial_protocol.candidates[0].trial_id
+
+    first = ledger.append(_DECISION_BUILDERS[kind](registered))
+    second = ledger.append(_DECISION_BUILDERS[kind]("legacy-trial"))
+
+    assert first.event_type.value == second.event_type.value == kind
+    assert (first.trial_id, second.trial_id) == (registered, "legacy-trial")

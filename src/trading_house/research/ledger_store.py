@@ -150,6 +150,11 @@ _REQUIRES_REGISTRATION = frozenset(
         LedgerEventType.RESULT_RECORDED,
         LedgerEventType.FAILED,
         LedgerEventType.EVIDENCE_SEALED,
+        # 8D: a report and a decision about a trial nobody declared are as unattributable
+        # as an outcome for one. A trial with a legacy import satisfies the same lineage
+        # check, so a legacy trial's decision is admitted.
+        LedgerEventType.VALIDATED,
+        LedgerEventType.GATE_DECIDED,
     }
 )
 

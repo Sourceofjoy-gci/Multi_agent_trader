@@ -317,6 +317,30 @@ def _gate(
     )
 
 
+NOT_MARK_TO_MARKET = "the measurement is not on a mark-to-market basis"
+
+
+def _marked(measurement: Measurement) -> Measurement:
+    """The measurement itself if it is undefined or on the mark-to-market basis, else it
+    restated as undefined for that reason.
+
+    Realized and mark-to-market series are never interchangeable (umbrella 5.5), and a
+    candidate set whose baseline is marked can still hold a candidate that is not (a PBO
+    ranking, say). The gates read measurements only through this, so a defined value on
+    another basis blocks as ``UNAVAILABLE`` and can neither pass nor fail a gate.
+    Gate 1 (a fold count) and gate 9 (capacity) read no return series and are exempt.
+    """
+
+    if measurement.value is None or measurement.basis_is_mark_to_market:
+        return measurement
+    return Measurement.undefined(
+        measurement.name,
+        NOT_MARK_TO_MARKET,
+        evidence_sha256=measurement.evidence_sha256,
+        basis_is_mark_to_market=False,
+    )
+
+
 def _compared(
     number: int,
     name: str,
@@ -326,9 +350,12 @@ def _compared(
     relation: str,
     passes: Callable[[float], bool],
     note: str = "",
+    series_gate: bool = True,
 ) -> GateResult:
     """One measurement against one threshold: UNAVAILABLE if undefined, else PASS or FAIL."""
 
+    if series_gate:
+        measurement = _marked(measurement)
     if measurement.value is None:
         return _gate(
             number,
@@ -364,6 +391,7 @@ def _wfa_gate(evidence: StatisticalEvidence) -> GateResult:
         threshold=minimum,
         relation="at least",
         passes=lambda value: value >= minimum,
+        series_gate=False,
     )
 
 
@@ -395,6 +423,7 @@ def _positive_all(
 ) -> GateResult:
     """Every measurement strictly above zero: FAIL on any defined one that is not."""
 
+    measurements = [_marked(item) for item in measurements]
     evidence = [digest for item in measurements for digest in item.evidence_sha256]
     defined = [item for item in measurements if item.value is not None]
     wrong = [item for item in defined if item.value is not None and not item.value > 0.0]
@@ -437,12 +466,15 @@ def _positive_all(
 def _drawdown_gate(evidence: StatisticalEvidence) -> GateResult:
     name = GATE_NAMES[7]
     limit = MAX_DRAWDOWN - DRAWDOWN_TOLERANCE
-    drawdowns = (
-        evidence.max_drawdown_baseline,
-        *evidence.max_drawdown_cpcv_paths,
-        evidence.max_drawdown_compounding,
+    drawdowns = tuple(
+        _marked(item)
+        for item in (
+            evidence.max_drawdown_baseline,
+            *evidence.max_drawdown_cpcv_paths,
+            evidence.max_drawdown_compounding,
+        )
     )
-    monte_carlo = (evidence.monte_carlo.p_halt, evidence.monte_carlo.p_loss)
+    monte_carlo = (_marked(evidence.monte_carlo.p_halt), _marked(evidence.monte_carlo.p_loss))
     everything = (*drawdowns, *monte_carlo)
     digests = [digest for item in everything for digest in item.evidence_sha256]
     over = [item for item in drawdowns if item.value is not None and not item.value < limit]
@@ -495,8 +527,8 @@ def _drawdown_gate(evidence: StatisticalEvidence) -> GateResult:
 def _coverage_gate(evidence: StatisticalEvidence) -> GateResult:
     name = GATE_NAMES[8]
     parts = (
-        (evidence.coverage.oos_trades, float(MIN_OOS_TRADES)),
-        (evidence.coverage.regimes_represented, float(MIN_REGIMES)),
+        (_marked(evidence.coverage.oos_trades), float(MIN_OOS_TRADES)),
+        (_marked(evidence.coverage.regimes_represented), float(MIN_REGIMES)),
     )
     digests = [digest for item, _ in parts for digest in item.evidence_sha256]
     short = [

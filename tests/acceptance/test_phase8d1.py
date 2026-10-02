@@ -12,7 +12,7 @@ store:
    statuses equal an independent reading of ``validate``'s numbers against the spec's
    thresholds; capacity (gate 9) and the holdout (gate 2) are UNAVAILABLE, and the report's
    chain head is the last evidence-bearing row, not the decision it was appended by.
-4. **A rerun on identical evidence is a no-op** (rows and files unchanged, same digest), in
+4. **A rerun on an unchanged chain is a no-op** (rows and files unchanged, same digest), in
    this process and in two others under different hash seeds.
 5. **``verify`` re-reads reports**: a deleted or altered report file exits 17.
 6. **A threshold that moves after a first report is refused** (exit 21) with nothing written.
@@ -776,13 +776,18 @@ def test_the_readme_states_the_gates_the_decision_the_reasons_and_the_limits() -
         "mark-to-market returns are unavailable",
         "spread and slippage cannot be separately attributed",
         "A decision moves no stage and creates no package",
+        "A defined measurement that is not on the mark-to-market basis is `UNAVAILABLE`",
+        "(`validate`'s own head includes decision rows; the report's head excludes them.)",
+        "is visible to `research trial verify` until then",
+        "Gate 5 can rest on an in-sample figure",
+        "`RESEARCH_PASSED` can therefore rest on it",
         "Gate 2 (the holdout) and gate 9 (capacity) are `UNAVAILABLE` for every candidate today",
         "so every decision is `REJECTED` today",
         "The first report of a trial pins its policy digest",
-        "A rerun on identical evidence appends nothing",
+        "A rerun on an unchanged chain appends nothing",
         "`research trial verify` re-reads every report",
         "The report is a second document kind in the existing evidence store",
-        "The ledger vouches for no `VALIDATED` or `GATE_DECIDED` row",
+        "The append guard covers `VALIDATED` and `GATE_DECIDED`",
         "`research trial decide`, `report` and `holdout` are the only trial commands whose help "
         "may speak in decisions",
     ):
