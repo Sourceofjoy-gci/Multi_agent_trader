@@ -32,6 +32,7 @@ from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.trial_ledger import (
+    LedgerEventType,
     ReturnSeriesBasis,
     TrialCounters,
     TrialProtocol,
@@ -128,12 +129,22 @@ def _optional(
 
 
 def read_validation_inputs(
-    trial_id: str, ledger: PostgresTrialLedger, store: EvidenceStore
+    trial_id: str,
+    ledger: PostgresTrialLedger,
+    store: EvidenceStore,
+    *,
+    ignore: frozenset[LedgerEventType] = frozenset(),
 ) -> ValidationInputs:
-    """Read a trial's sealed runs, its protocol's other candidates, and the chain's state."""
+    """Read a trial's sealed runs, its protocol's other candidates, and the chain's state.
+
+    ``ignore`` names event types left out of the chain this reads, so the head it records
+    is the last row of any other type. ``decide`` ignores its own two event types: the
+    chain it appends to is then not part of the evidence it was made on. Nothing here
+    counts those types, so the counters are the same either way.
+    """
 
     # One read of the chain: the counters, the head and the protocol describe the same chain.
-    events, head = ledger.snapshot()
+    events, head = ledger.snapshot(ignore)
     if head is None:
         raise ScenarioEvidenceError() from ValueError("the chain holds no event")
     protocol = registered_protocol(events, trial_id)

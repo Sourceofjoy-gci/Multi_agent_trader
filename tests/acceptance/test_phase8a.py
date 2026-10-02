@@ -95,7 +95,8 @@ runner = CliRunner()
 # here rather than derived, so a new command fails this file instead of quietly
 # widening the operator table the README carries. Phase 8B2b added two:
 # `scenarios` runs and seals a candidate's declared cost grid, and
-# `scenario-report` reads one back.
+# `scenario-report` reads one back. Phase 8D1 added three that speak in decisions:
+# `decide`, `report` and `holdout`.
 TRIAL_COMMANDS = (
     "register",
     "start",
@@ -110,6 +111,9 @@ TRIAL_COMMANDS = (
     "capacity",
     "splits",
     "validate",
+    "decide",
+    "report",
+    "holdout",
     "verify",
 )
 

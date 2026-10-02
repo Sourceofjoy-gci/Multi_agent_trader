@@ -826,21 +826,47 @@ def test_the_four_pinned_digests_are_still_exactly_these_literals() -> None:
 # --- 9. the operator-facing text ----------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        ["scenarios"],
-        ["scenario-report"],
-        # 8B3: the three commands it adds are held to the same total rule.
-        ["compounding"],
-        ["compounding-report"],
-        ["capacity"],
-        # 8C1: the read command that prints the folds and splits.
-        ["splits"],
-        # 8C3: the read command that assembles every statistical measurement.
-        ["validate"],
-    ],
+DECISION_COMMANDS = frozenset({"decide", "report", "holdout"})
+"""The only trial commands whose help may speak in decisions, and why.
+
+Phase 8D1 is the first slice that judges a candidate, and the three commands that exist to
+say what was judged cannot describe themselves without the vocabulary: ``decide`` records
+a decision, ``report`` prints the report of the last one, and ``holdout`` prints the state
+a decision's gate two reads. This is a NAMED exception, not a loosening: every other trial
+command stays under the total ban below, and ``test_every_trial_command_is_banned_a_named_
+decision_command_or_a_ledger_one`` fails when a command is in neither list,
+so a new command cannot slip out from under the rule by being forgotten."""
+
+TOTAL_BAN_COMMANDS = (
+    ["scenarios"],
+    ["scenario-report"],
+    # 8B3: the three commands it adds are held to the same total rule.
+    ["compounding"],
+    ["compounding-report"],
+    ["capacity"],
+    # 8C1: the read command that prints the folds and splits.
+    ["splits"],
+    # 8C3: the read command that assembles every statistical measurement.
+    ["validate"],
 )
+
+
+def test_every_trial_command_is_banned_a_named_decision_command_or_a_ledger_one() -> None:
+    """The two lists together are exactly the trial commands that report or run evidence.
+
+    The commands outside both are the ledger's own (register, start, record, import-legacy,
+    show, count, verify), whose help predates the rule and says nothing about candidates.
+    """
+
+    registered = {command.name for command in cli.trial_app.registered_commands}
+    banned = {command[0] for command in TOTAL_BAN_COMMANDS}
+    ledger_commands = {"register", "start", "record", "import-legacy", "show", "count", "verify"}
+
+    assert banned.isdisjoint(DECISION_COMMANDS)
+    assert registered == banned | DECISION_COMMANDS | ledger_commands
+
+
+@pytest.mark.parametrize("command", TOTAL_BAN_COMMANDS)
 def test_no_report_commands_help_text_claims_a_verdict(command: list[str]) -> None:
     """The gate the framework's premise actually needs.
 

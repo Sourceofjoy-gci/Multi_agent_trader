@@ -24,6 +24,7 @@ class ExitCode(IntEnum):
     EQUITY_EVIDENCE = 18
     SCENARIO_EVIDENCE = 19
     STATISTICAL_INPUT = 20
+    PROMOTION_REFUSED = 21
 
 
 class TradingHouseError(Exception):
@@ -152,6 +153,24 @@ class StatisticalInputError(TradingHouseError):
     """
 
     public_message = "sealed evidence is not a usable statistical input"
+
+
+class PromotionRefusedError(TradingHouseError):
+    """Raised when a promotion step is refused.
+
+    Phase 8D. Three ways: the policy digest an evaluation was asked to run under is not
+    the one the constants in force recompute to (a threshold moved after a result existed,
+    which umbrella 11.4 says needs a new trial), a decision or a holdout derivation was
+    handed inputs that are not a whole, consistent set (a decision over fewer than nine
+    gates, sealed evidence with no holdout state), or a report is asked for where none was
+    ever decided. Each is a refusal to judge, never a verdict.
+
+    Evidence-shaped refusals keep their own errors (``ScenarioEvidenceError``,
+    ``StatisticalInputError``). The specifics ride on the private cause, so the public
+    message stays as uninformative as every other code here.
+    """
+
+    public_message = "promotion step refused"
 
 
 class BrokerUnavailableError(TradingHouseError):

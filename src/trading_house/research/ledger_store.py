@@ -516,8 +516,15 @@ class PostgresTrialLedger:
             _raise_trial_ledger_append_error()
         return _rows_mapped(rows, _event_from_row)
 
-    def snapshot(self) -> tuple[tuple[LedgerEvent, ...], str | None]:
+    def snapshot(
+        self, exclude: frozenset[LedgerEventType] = frozenset()
+    ) -> tuple[tuple[LedgerEvent, ...], str | None]:
         """The chain as validated events and the last row's event hash, from ONE read.
+
+        ``exclude`` drops rows of those event types before the head is taken, so the head
+        is then the last row *not* of those types. 8D passes the two decision types: a
+        decision appends to the chain it was made over, and without this the evidence a
+        rerun reads would differ from the evidence the first run read.
 
         A reader that needs the events and the chain head to describe the same chain
         takes both from here: two reads are two transactions, and a row appended
@@ -528,6 +535,8 @@ class PostgresTrialLedger:
         rows = _read_rows(self._connection_factory, _ALL_EVENTS_SQL, None)
         if isinstance(rows, _OperationFailure):
             _raise_trial_ledger_append_error()
+        skipped = {event_type.value for event_type in exclude}
+        rows = tuple(row for row in rows if row[6] not in skipped)
         head = bytes(rows[-1][14]).hex() if rows else None
         return _rows_mapped(rows, _event_from_row), head
 

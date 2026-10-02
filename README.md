@@ -2043,6 +2043,109 @@ NumPy remains the only numerical dependency.
   sequence checks.** It runs the cost, window, strategy and specification fidelity checks on
   every bundle it uses; `scenario-report` is where the declared grid is checked whole.
 
+## Phase 8D1 - the nine gates, the report and the decision
+
+Phase 8D1 is the first slice that judges a candidate, and the only code that may. It adds
+one pure module (`research/promotion.py`: no ledger, no store, no filesystem, no clock), one
+assembly module (`ops/decide.py`), one typed error (`PromotionRefusedError`, exit 21) and
+three commands. It adds no ledger event type and no migration: `VALIDATED` and
+`GATE_DECIDED` already existed and carry exactly a report digest and a decision.
+
+```bash
+uv run trading-house research trial decide --trial-id T --occurred-at 2026-10-01T12:00:00
+uv run trading-house research trial report --trial-id T
+uv run trading-house research trial holdout --trial-id T
+```
+
+- **The nine gates** (`evaluate_gates`), in order, each `PASS`, `FAIL` or `UNAVAILABLE` with
+  its measured value, its threshold, the digests it rests on and a reason: (1) at least
+  `MIN_WFA_FOLDS = 1` walk-forward folds; (2) locked-holdout expectancy above zero at both
+  1.5x and 2.0x; (3) DSR at least `DSR_MINIMUM = 0.95`; (4) PBO at most `PBO_MAXIMUM = 0.50`;
+  (5) CPCV 5th-percentile net expectancy above zero; (6) bootstrap 5th-percentile mean daily
+  return above zero; (7) maximum mark-to-market drawdown below `MAX_DRAWDOWN = 0.10` on the
+  baseline, every CPCV path and the compounding run, with the Monte Carlo halt and loss
+  measurements defined; (8) at least `MIN_OOS_TRADES = 30` out-of-sample trades and at least
+  `MIN_REGIMES = 2` regimes; (9) a declared capacity model passes. Thresholds are not options
+  and not arguments: they are the constants in `research/validation/policy.py` and the
+  protocol's own `ValidationSpec`, and nothing on any command line can change one.
+- **`UNAVAILABLE` blocks and `FAIL` blocks.** `UNAVAILABLE` is evidence that is missing,
+  undefined or non-finite, or a precondition that does not exist (an opened holdout, a
+  capacity model). `FAIL` is a measured value on the wrong side of its threshold, and it
+  wins over `UNAVAILABLE` when both are present (gate 7 says so in its reason). `PASS`
+  requires a defined, finite measurement on the right side of its threshold and nothing
+  else. Each boundary is exact: DSR passes at 0.95, PBO at 0.50, trades at 30, regimes at 2,
+  folds at 1; expectancies and the bootstrap bound must be strictly above zero; the drawdown
+  gate passes only when the drawdown is `< MAX_DRAWDOWN - DRAWDOWN_TOLERANCE`, so an exact
+  10% fall fails.
+- **Gate 5 says what it read.** When the CPCV paths are identical its reason says the number
+  is the net expectancy of the full sealed research-window sample, in-sample on that window.
+- **The policy digest.** `policy_sha256` is the canonical digest of every signed constant and
+  the protocol's validation spec (`null` for a legacy trial, which was registered under no
+  protocol). A report embeds it, and `evaluate_gates` refuses inputs naming a different one
+  than the constants in force recompute to. The first report of a trial pins its policy
+  digest: a later `decide` runs under that digest, so a threshold that has moved since is
+  refused with exit 21 and nothing is written (a policy change needs a new trial).
+- **The decision is three-valued** (`decide`). It is `REJECTED` whenever any blocking reason
+  stands. Otherwise `PAPER_APPROVED` only when all nine gates pass (which requires an opened
+  or consumed holdout), and `RESEARCH_PASSED` only when every research gate passes and the
+  holdout is still `LOCKED` (the research gates are all but gate 2), the one state from
+  which the holdout may be opened. A `NOT_DEFINED` or `CONTAMINATED` holdout can never reach `RESEARCH_PASSED`: it is
+  `REJECTED`, with the reason.
+- **The six blocking reasons** are computed from the evidence, not tied to any trial, and any
+  one forces `REJECTED`: negative expectancy at baseline costs; no locked unseen holdout (the
+  derived state is not defined or is contaminated); legacy evidence was not preregistered;
+  dataset-content hash is unavailable; mark-to-market returns are unavailable; spread and
+  slippage cannot be separately attributed. A legacy-imported trial reaches the same
+  `decide`: its measurements are unavailable, no research gate can pass, it names every
+  reason its evidence supports (all six for a losing Phase 7 artifact), and it is
+  `REJECTED`.
+- **The holdout is derived from the chain, never stored** (`research trial holdout`). Legacy
+  evidence is `CONTAMINATED`. A protocol that registers its holdout as not defined or locked
+  starts there; one that registers it opened, consumed or contaminated is `CONTAMINATED`. One
+  sealed bundle whose provenance holdout state is opened or consumed makes it `OPENED`; a
+  decision of the trial after that makes it `CONSUMED`; a decision before it does not. A
+  second opened bundle is `CONTAMINATED` and nothing heals it. An opening with no locked
+  holdout, and a sealed bundle that says its holdout was contaminated, also contaminate.
+- **A decision moves no stage and creates no package.** `decide` seals the report, then
+  appends `VALIDATED` and `GATE_DECIDED` naming its digest, in that order; it takes no stage
+  option and nothing here creates a `StrategyPackage` (8D2 does, with a human authorization).
+  A rerun on identical evidence appends nothing, whatever `--occurred-at` it is given: the
+  report digest depends on the evidence alone, so the event ids are the same. The report's
+  `chain_head` is the last evidence-bearing row, taken with the two decision event types left
+  out, so the rows a decision appends do not change the evidence it was made on. A crash
+  between the two appends is closed by the next run.
+- **The report is a second document kind in the existing evidence store**: same root, same
+  layout, same atomic write, same domain-separated digest as a bundle. `read` refuses a
+  report's digest and `read_report` refuses a bundle's. It carries the policy, the 8C
+  measurements, the facts read from the baseline bundle, the derived holdout state, all nine
+  gates, the blocking reasons and the decision, and holds no field for its own digest.
+  `research trial verify` re-reads every report a `VALIDATED` or `GATE_DECIDED` event names
+  (a missing or altered file exits 17) and checks each is of the event's own trial and that a
+  `GATE_DECIDED` decision is the report's.
+- **The ledger vouches for no `VALIDATED` or `GATE_DECIDED` row.** `_REQUIRES_REGISTRATION`
+  omits both and the append function checks no specification digest for them, so
+  `ops/decide.py` itself refuses a trial no registration or legacy import declares (exit 19)
+  and a trial that is both (exit 21). The events carry the baseline attempt's id and
+  `spec_sha256`, scoped to the attempt; neither enters a counter.
+- **`research trial decide`, `report` and `holdout` are the only trial commands whose help
+  may speak in decisions.** The no-verdict gate keeps every other report command under its
+  total ban, and fails if a command is in neither list.
+
+### What 8D1 cannot say
+
+- **Gate 2 (the holdout) and gate 9 (capacity) are `UNAVAILABLE` for every candidate today**,
+  so every decision is `REJECTED` today. No holdout has ever been opened for any candidate:
+  the machinery is proven on synthetic locked windows only (8D2 adds the one-time opening).
+  No volume-to-lots model can be declared, so capacity is `unavailable`.
+- **Every `backtest run` seals no dataset hash**, so a prospective trial run through the
+  repository's own commands carries the reason "dataset-content hash is unavailable" as well.
+- **The human authorization and the signature are references** (8D2); nothing here can check
+  that a person made them.
+- **Regimes are recognised, not vouched** (8C): gate 8 counts the labels it is given.
+- **A concurrent opening and decision can race.** `decide` reads the chain twice (the
+  holdout from one read, the evidence from another); an opening sealed between the two is
+  seen by the next `decide`, not this one.
+
 ## Phase 8A.1 - ledger-level specification vouching
 
 `research trial start` and every other writer reach the ledger through one append
@@ -2098,11 +2201,14 @@ uv run trading-house --help
 | `trading-house research trial compounding-report` | Report a sealed compounding rerun beside its 1.0x constant-notional baseline, from the chain and the evidence store alone. States no verdict |
 | `trading-house research trial splits` | Print the walk-forward folds and the CPCV folds, splits and paths of a registered candidate's one sealed 1.0x constant-notional run, with the closed trades each path's test samples kept and dropped (test-side, purge-driven; the embargo affects only the train sample) and `paths_differ`. Read only; no statistic, no verdict. A series under 30 days, or a policy the series cannot honour, is refused with exit 20 |
 | `trading-house research trial validate` | Print every statistical measurement of a registered candidate's sealed evidence as one document: walk-forward fold count, PSR, DSR, PBO, the bootstrap, the drawdown Monte Carlo, drawdowns (baseline, each CPCV path, compounding), the CPCV 5th percentile, CPCV-kept coverage, the 1.5x and 2.0x expectancies and the capacity state, each a finite value or a reason and each naming its evidence digests. Read only, byte-deterministic, no statistic compared with anything. Refuses as `splits` does: an unregistered trial, no/duplicate sealed 1.0x baseline, or a bundle that is not the protocol's candidate on the protocol's terms with exit 19, a series under 30 days or a candidate sealed over other days with exit 20 |
+| `trading-house research trial decide` | Evaluate the nine gates for a declared trial (a prospective one over its sealed evidence, a legacy one over its sealed bundle), seal the validation report and append `VALIDATED` then `GATE_DECIDED`. Takes `--trial-id` and a required `--occurred-at`; no threshold, stage or package option. A rerun on identical evidence appends nothing. Refuses an undeclared trial or unusable evidence with 19 or 20, a moved policy or a legacy-and-registered trial with 21 |
+| `trading-house research trial report` | Print the validation report the trial's last recorded decision names, re-read from the evidence store. Read only; 17 if the report is missing or altered, 21 if no decision is recorded |
+| `trading-house research trial holdout` | Print the holdout state derived from the chain for a declared trial: not defined, locked, opened, consumed or contaminated, with the reason. Read only |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
 | `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |
-| `trading-house research trial verify` | Re-derive the chain hashes, then re-read every sealed bundle |
+| `trading-house research trial verify` | Re-derive the chain hashes, then re-read every sealed bundle and every validation report the chain names |
 | `trading-house health` | Run the full readiness gate |
 
 Every command prints deterministic, key-sorted JSON on stdout and errors on
@@ -2194,6 +2300,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 18 | `mark-to-market equity evidence is not trustworthy` | A run's equity series cannot be produced or reduced honestly: more than `MAX_EQUITY_OBSERVATIONS` (2,000,000) processed bars, a requested daily range whose first day is after its last, or a day whose prior close is not strictly positive | **Do not record this run as evidence.** Narrow the window, use a coarser timeframe, or check the requested range, then re-run. The run is never silently subsampled, and the count that broke the ceiling stays on the private cause for a log reader. A series that violates its own mark identity is *not* this code — that is a pydantic `ValidationError`, which the CLI reports as `configuration invalid`, exit 2 |
 | 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were or which specification they were pinned to, a trial no registration names, or a trial two registrations name | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. Which check fired is on the error's private cause for a log reader, and the remedy differs: a level never run is a new attempt through `research trial scenarios` at a fresh `--attempt-prefix`. A level run **twice** has no remedy — the second document is at that level and completeness refuses the candidate for good, because the only fix would be surgery on the evidence root and the chain. `scenarios` and `compounding` no longer produce that state: they skip a level already sealed under their own attempt id and refuse one sealed under another. Anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
 | 20 | `sealed evidence is not a usable statistical input` | A sealed run cannot be turned into a statistical input or cut as its protocol declares: no series, days that are not contiguous, a value that is not finite, fewer than 30 days, a missing basis, a trade that exits outside the series, or a policy that cannot be applied (for example more CPCV folds than days) | **Do not measure this run.** The evidence is intact and is the candidate's own; it is too short or malformed to measure. Which refusal fired is on the error's private cause. No default is substituted |
+| 21 | `promotion step refused` | The policy digest an evaluation was asked to run under is not the one the constants in force give (a threshold moved after the trial's first report), a decision or holdout derivation was handed an incomplete or inconsistent set, a trial is both legacy-imported and preregistered, or `report` was asked for a trial with no recorded decision | **Do not edit the constants to make it run.** A policy change needs a new trial. The specifics ride on the error's private cause for a log reader |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates

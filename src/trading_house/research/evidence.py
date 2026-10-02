@@ -68,6 +68,7 @@ from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.sizing import SizingMode, is_constant_notional
 from trading_house.research.canonical import DOMAIN_SEPARATOR, canonical_bytes, canonical_sha256
+from trading_house.research.promotion import ValidationReport
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     HoldoutState,
@@ -437,8 +438,20 @@ class EvidenceStore:
         return self.root / digest[:2] / f"{digest}.json"
 
     def write(self, bundle: EvidenceBundle) -> StoredEvidence:
-        data = canonical_bytes(bundle)
-        digest = canonical_sha256(bundle)
+        return self._publish(canonical_bytes(bundle), canonical_sha256(bundle))
+
+    def write_report(self, report: ValidationReport) -> StoredEvidence:
+        """Seal a validation report: a second document kind, in this store and no other.
+
+        Same root, same layout, same atomic link-publish and the same domain-separated
+        digest as a bundle. Nothing in the path says which kind a file is; ``read`` and
+        ``read_report`` each refuse the other's documents, because a digest that named the
+        wrong kind of document would verify and mean something else.
+        """
+
+        return self._publish(canonical_bytes(report), canonical_sha256(report))
+
+    def _publish(self, data: bytes, digest: str) -> StoredEvidence:
         target = self._path(digest)
 
         try:
@@ -475,7 +488,7 @@ class EvidenceStore:
             size_bytes=len(data),
         )
 
-    def read(self, digest: str) -> EvidenceBundle:
+    def _read_bytes(self, digest: str) -> bytes:
         target = self._path(digest)
         try:
             data = target.read_bytes()
@@ -489,7 +502,10 @@ class EvidenceStore:
         # parsing first.
         if hashlib.sha256(DOMAIN_SEPARATOR + data).hexdigest() != digest:
             raise EvidenceIntegrityError()
+        return data
 
+    def read(self, digest: str) -> EvidenceBundle:
+        data = self._read_bytes(digest)
         try:
             bundle = EvidenceBundle.model_validate_json(data)
         except (ValueError, TypeError) as error:
@@ -502,6 +518,22 @@ class EvidenceStore:
         if canonical_bytes(bundle) != data:
             raise EvidenceIntegrityError()
         return bundle
+
+    def read_report(self, digest: str) -> ValidationReport:
+        """The report a digest names, or ``EvidenceIntegrityError`` for anything else.
+
+        A bundle's digest is refused here as a report's is refused by ``read``: both are
+        strict documents with no field in common, so the wrong kind never parses.
+        """
+
+        data = self._read_bytes(digest)
+        try:
+            report = ValidationReport.model_validate_json(data)
+        except (ValueError, TypeError) as error:
+            raise EvidenceIntegrityError() from error
+        if canonical_bytes(report) != data:
+            raise EvidenceIntegrityError()
+        return report
 
     def verify(self, digest: str) -> None:
         self.read(digest)

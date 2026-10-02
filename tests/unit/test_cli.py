@@ -30,6 +30,7 @@ from trading_house.core.errors import (
     EvidenceIntegrityError,
     InsufficientHistoryError,
     MigrationMismatchError,
+    PromotionRefusedError,
     ScenarioEvidenceError,
     SchemaValidationError,
     SignatureVerificationError,
@@ -394,6 +395,32 @@ def test_statistical_input_error_maps_to_its_own_exit_code() -> None:
 
     assert cli.EXIT_CODES[StatisticalInputError] is cli.ExitCode.STATISTICAL_INPUT
     assert int(cli.ExitCode.STATISTICAL_INPUT) == 20
+
+
+def test_promotion_refused_error_maps_to_its_own_exit_code_and_stays_opaque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 21 a refused promotion step earns, pinned as a number, with the cause kept private."""
+
+    assert cli.EXIT_CODES[PromotionRefusedError] is cli.ExitCode.PROMOTION_REFUSED
+    assert int(cli.ExitCode.PROMOTION_REFUSED) == 21
+
+    def refuse(*_: object, **__: object) -> None:
+        raise PromotionRefusedError() from ValueError("private detail /secret/path")
+
+    monkeypatch.setattr(cli, "_trial_ledger", lambda: object())
+    monkeypatch.setattr(cli, "_evidence_store", lambda: object())
+    monkeypatch.setattr(cli, "decide_trial", refuse)
+
+    result = runner.invoke(
+        cli.app,
+        ["research", "trial", "decide", "--trial-id", "t", "--occurred-at", "2026-10-01T12:00:00"],
+    )
+
+    assert result.exit_code == 21
+    assert json.loads(result.stderr)["detail"] == PromotionRefusedError.public_message
+    assert "private detail" not in result.stderr
+    assert "/secret/path" not in result.stderr
 
 
 _COMPOUNDING_OPTIONS = [

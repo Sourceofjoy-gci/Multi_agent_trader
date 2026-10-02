@@ -29,6 +29,7 @@ that claim false. A refusal is cheap and a silent collapse is not.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
 import psycopg
@@ -40,11 +41,13 @@ from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.trial_ledger import (
     EvidenceSealedPayload,
     ExecutionStartedPayload,
+    GateDecidedPayload,
     LedgerEvent,
     LedgerEventType,
     ResultRecordedPayload,
     ScopeKind,
     TrialLedger,
+    ValidatedPayload,
 )
 from trading_house.settings import RuntimeSettings
 
@@ -211,6 +214,75 @@ def evidence_sealed_event(bundle: EvidenceBundle, evidence_sha256: str) -> Ledge
             event_type=LedgerEventType.EVIDENCE_SEALED,
             attempt_id=bundle.attempt_id,
             evidence_sha256=evidence_sha256,
+        ),
+    )
+
+
+def validated_event(
+    trial_id: str,
+    attempt_id: str,
+    spec_sha256: str,
+    report_sha256: str,
+    occurred_at: datetime,
+) -> LedgerEvent:
+    """The event a sealed validation report earns: "this report is the trial's".
+
+    The id is content-derived from the trial, the report digest and the event type, so
+    deciding the same evidence twice derives the same event and the chain recognises it.
+    ``occurred_at`` is the operator's declared time, taken as an argument for the reason
+    ``execution_started_event`` gives. Scope is the attempt the report's baseline came
+    from. The ledger does not vouch for this event's ``spec_sha256`` (only a start's is)
+    and does not require the trial to be declared (``_REQUIRES_REGISTRATION`` omits it),
+    so ``ops/decide.py`` refuses an undeclared trial itself.
+    """
+
+    return LedgerEvent(
+        event_id=uuid5(
+            NAMESPACE_URL,
+            f"trading-house:trial-validated:{trial_id}:{report_sha256}",
+        ),
+        scope_kind=ScopeKind.ATTEMPT,
+        scope_id=attempt_id,
+        event_type=LedgerEventType.VALIDATED,
+        trial_id=trial_id,
+        attempt_id=attempt_id,
+        spec_sha256=spec_sha256,
+        occurred_at=occurred_at,
+        payload=ValidatedPayload(event_type=LedgerEventType.VALIDATED, report_sha256=report_sha256),
+    )
+
+
+def gate_decided_event(
+    trial_id: str,
+    attempt_id: str,
+    spec_sha256: str,
+    report_sha256: str,
+    decision: Literal["REJECTED", "RESEARCH_PASSED", "PAPER_APPROVED"],
+    occurred_at: datetime,
+) -> LedgerEvent:
+    """The event a decision earns, over the report ``validated_event`` names.
+
+    Keyed as ``validated_event`` is, on a different event-type string, so the two ids
+    cannot collide. The decision is part of the payload and the report states it too: a
+    second decision over the same report digest is the same event.
+    """
+
+    return LedgerEvent(
+        event_id=uuid5(
+            NAMESPACE_URL,
+            f"trading-house:trial-gate-decided:{trial_id}:{report_sha256}",
+        ),
+        scope_kind=ScopeKind.ATTEMPT,
+        scope_id=attempt_id,
+        event_type=LedgerEventType.GATE_DECIDED,
+        trial_id=trial_id,
+        attempt_id=attempt_id,
+        spec_sha256=spec_sha256,
+        occurred_at=occurred_at,
+        payload=GateDecidedPayload(
+            event_type=LedgerEventType.GATE_DECIDED,
+            decision=decision,
+            report_sha256=report_sha256,
         ),
     )
 

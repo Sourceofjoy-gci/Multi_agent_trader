@@ -58,6 +58,7 @@ from trading_house.core.errors import (
     IntentAlreadySubmittedError,
     MigrationMismatchError,
     NonDemoAccountError,
+    PromotionRefusedError,
     ScenarioEvidenceError,
     SchemaValidationError,
     SignatureVerificationError,
@@ -113,6 +114,7 @@ from trading_house.ops.compounding import (
     sealed_baseline,
     sealed_rerun,
 )
+from trading_house.ops.decide import decide_trial, holdout_status, latest_report, verify_reports
 from trading_house.ops.guard import LedgerEscalator, Mt5ProtectionPort
 from trading_house.ops.health import BookReconciler, HealthService, build_audit_event
 from trading_house.ops.ledger import (
@@ -206,6 +208,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     EquityEvidenceError: ExitCode.EQUITY_EVIDENCE,
     ScenarioEvidenceError: ExitCode.SCENARIO_EVIDENCE,
     StatisticalInputError: ExitCode.STATISTICAL_INPUT,
+    PromotionRefusedError: ExitCode.PROMOTION_REFUSED,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --
     # but they are all "the run you asked for cannot be simulated honestly", and
@@ -2362,15 +2365,97 @@ def research_trial_scenario_report(
     _emit(payload)
 
 
+@trial_app.command("decide")
+def research_trial_decide(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+    occurred_at: Annotated[
+        datetime,
+        typer.Option(
+            "--occurred-at",
+            help=(
+                "Declared time of the decision, UTC (e.g. 2026-03-01T12:00:00). Required, "
+                "so that a retry names the same value; a rerun on identical evidence "
+                "appends nothing whatever value it is given."
+            ),
+        ),
+    ],
+) -> None:
+    """Evaluate the nine gates for one declared trial, seal the report and record the decision.
+
+    Reads a prospective trial's statistical evidence as ``validate`` does, or a legacy
+    trial's sealed bundle, and derives the holdout state from the chain. The nine gates
+    pass, fail or are unavailable against thresholds taken from the signed policy and the
+    protocol's own validation spec; none is an option here. The decision is REJECTED,
+    RESEARCH_PASSED or PAPER_APPROVED: REJECTED whenever a blocking reason stands,
+    RESEARCH_PASSED only for a locked, unopened holdout and eight passing research gates.
+
+    Seals the report, then appends ``VALIDATED`` and ``GATE_DECIDED`` naming its digest.
+    A rerun on identical evidence appends nothing. It creates no package, changes no
+    stage and takes no stage option. A policy that moved since the trial's first report
+    is refused (exit 21), as is an undeclared trial (exit 19).
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        outcome = decide_trial(
+            trial_id,
+            ledger=_trial_ledger(),
+            store=_evidence_store(),
+            occurred_at=_as_utc(occurred_at),
+        )
+        return cast(dict[str, JsonValue], json.loads(outcome.model_dump_json()))
+
+    _run(operation)
+
+
+@trial_app.command("report")
+def research_trial_report(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Print the validation report the trial's last recorded decision names.
+
+    Read only. The report is re-read from the evidence store through its digest, and a
+    decision the chain holds that is not the report's own is refused as an integrity
+    failure (exit 17). A trial with no recorded decision is refused (exit 21).
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        digest, report = latest_report(trial_id, _trial_ledger(), _evidence_store())
+        return {
+            "report_sha256": digest,
+            "report": cast(JsonValue, json.loads(report.model_dump_json())),
+        }
+
+    _run(operation)
+
+
+@trial_app.command("holdout")
+def research_trial_holdout(
+    trial_id: Annotated[str, typer.Option("--trial-id")],
+) -> None:
+    """Print the holdout state derived from the chain for one declared trial.
+
+    Read only and never stored: legacy evidence is contaminated, a protocol's own
+    holdout state gives not defined or locked, one sealed opening gives opened, a decision
+    after it consumed, and a second opening contaminated. Nothing here can open a holdout.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        status = holdout_status(trial_id, _trial_ledger(), _evidence_store())
+        return cast(dict[str, JsonValue], json.loads(status.model_dump_json()))
+
+    _run(operation)
+
+
 @trial_app.command("verify")
 def research_trial_verify() -> None:
     """Verify the event chain, then re-read every file the chain points at.
 
     Two checks, and the second is the one a hash chain cannot do for itself: the
     hashes prove the events were not rewritten, and only reading the sealed
-    bundles proves the evidence they name still exists and still hashes to its
-    own name. A chain failure is reported rather than raised, because an operator
-    asking "is this intact?" needs a plain reason, not a stack trace.
+    bundles and validation reports proves the documents they name still exist and
+    still hash to their own names. A chain failure is reported rather than raised,
+    because an operator asking "is this intact?" needs a plain reason, not a
+    stack trace.
     """
 
     def operation() -> dict[str, JsonValue]:
@@ -2383,11 +2468,14 @@ def research_trial_verify() -> None:
                 "reason": report.reason,
             }
         evidence = _evidence_store()
-        for event in ledger.replay():
+        events = ledger.replay()
+        for event in events:
             # A broken chain's events are not evidence of anything, which is why
             # this loop only runs once the report says the chain is intact.
             if isinstance(event.payload, (EvidenceSealedPayload, LegacyImportedPayload)):
                 evidence.verify(event.payload.evidence_sha256)
+        # The second document kind: every report a VALIDATED or GATE_DECIDED event names.
+        verify_reports(events, evidence)
         return {"valid": True, "checked_events": report.checked_events, "reason": None}
 
     payload = _execute(operation)
