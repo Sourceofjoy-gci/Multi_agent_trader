@@ -2002,10 +2002,13 @@ def _seal_levels(
     validate later are validated now (a mistyped option leaves no orphan start
     row); the code's strategy id and version equal the protocol's; no level is
     sealed under another attempt id; no attempt id this run would start is already
-    started; and the run's replay inputs must equal
+    started; the run's replay inputs must equal
     those of the constant-notional baseline the chain holds -- for ``compounding``
     the one 1.0x baseline (required), for ``scenarios`` every constant level
-    already sealed, if any.
+    already sealed, if any; and, last, the stored bars of the window must hash to the
+    protocol's declared dataset hash (8E: the only pre-flight that reads the bar store,
+    skipped when every level is already sealed, and a window the store does not hold is
+    refused here as a coverage error).
 
     A level already sealed under this run's own attempt id is skipped entirely:
     no start event, no simulation, no seal. Re-running would derive a different
@@ -2021,8 +2024,10 @@ def _seal_levels(
     Take a ledger lock if that assumption stops holding.
 
     What can still orphan a start row: a data-dependent ``BacktestRefused`` from
-    ``simulate`` and a ``derive_daily_returns`` refusal (a ruined account), both
-    of which need the bars. For ``compounding`` the attempt id is then spent.
+    ``simulate``, a ``derive_daily_returns`` refusal (a ruined account), both of
+    which need the bars, and the post-run dataset agreement (the store changed between
+    the pre-flight and the run: one row more, no file more). For ``compounding`` the
+    attempt id is then spent.
     """
 
     refuse_edited_protocol(registered_protocol(run.ledger.replay(), run.trial_id), run.parsed)

@@ -1318,3 +1318,26 @@ def test_the_digest_is_carried_in_memory_and_kept_out_of_the_outcomes_bytes() ->
     assert "dataset_sha256" not in outcome.model_dump_json()
     bare = outcome.model_copy(update={"dataset_sha256": None})
     assert bare.model_dump_json() == outcome.model_dump_json()
+
+
+def test_an_in_coverage_window_holding_no_bar_is_a_statistical_input_refusal() -> None:
+    """The window is inside what the store holds (it starts after the first bar and ends before the
+    last) but falls in a gap, so the replay reads nothing and there is nothing to digest. Before 8E
+    this surfaced as a validation error from the outcome; it is now the typed refusal the CLI maps
+    to exit 20."""
+
+    from trading_house.cli import EXIT_CODES, ExitCode
+    from trading_house.core.errors import StatisticalInputError
+
+    bars = _ramp(30)
+    held = bars[:10] + bars[20:]
+
+    with pytest.raises(StatisticalInputError):
+        _outcome(
+            bars=held,
+            strategy=ToyStrategy(every_n=20),
+            start=bars[12].event_time,
+            end=bars[15].event_time,
+        )
+    assert EXIT_CODES[StatisticalInputError] is ExitCode.STATISTICAL_INPUT
+    assert int(ExitCode.STATISTICAL_INPUT) == 20

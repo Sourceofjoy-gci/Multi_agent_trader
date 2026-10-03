@@ -23,6 +23,21 @@ The known answer was produced by this script, run on its own (no repository impo
     # 4cab67865daf1ada0c0ced051cd1cee087c5500bcaa53d08bff77403f75f69c6
 
 The second bar is defective on purpose: a defective bar is part of the dataset.
+
+The sub-second known answer (``KNOWN_ANSWER_SUBSECOND``) was produced the same way, standalone,
+for one bar whose event time is 00:00:00.250000 (availability 00:15:00.250000)::
+
+    import hashlib, json
+    bars = [
+        {"instrument_id": "fx.eurusd", "timeframe": "M15",
+         "event_time": "2026-09-21T00:00:00.250000Z",
+         "availability_time": "2026-09-21T00:15:00.250000Z",
+         "open": "1.10000", "high": "1.10010", "low": "1.09990", "close": "1.10005",
+         "tick_volume": 100, "spread": 10, "real_volume": 0, "quality": "OK"},
+    ]
+    payload = json.dumps(bars, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    print(hashlib.sha256(b"trading-house:dataset:v1" + payload.encode("utf-8")).hexdigest())
+    # 5d26663a5d0ba0a01f91d1e1c40379400f47f77ae5ad626f6842cdb85f8f6638
 """
 
 from __future__ import annotations
@@ -45,6 +60,7 @@ from trading_house.research.backtest.dataset import DATASET_DOMAIN, dataset_sha2
 from trading_house.research.backtest.engine import replay_window_bars
 
 KNOWN_ANSWER = "4cab67865daf1ada0c0ced051cd1cee087c5500bcaa53d08bff77403f75f69c6"
+KNOWN_ANSWER_SUBSECOND = "5d26663a5d0ba0a01f91d1e1c40379400f47f77ae5ad626f6842cdb85f8f6638"
 ORIGIN = datetime(2026, 9, 21, tzinfo=UTC)
 
 
@@ -89,7 +105,7 @@ def _payload(bars: list[Bar] | tuple[Bar, ...]) -> bytes:
     """The canonical bytes, restated with ``json`` alone, from the spec's words."""
 
     def stamp(value: datetime) -> str:
-        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
     records = [
         {
@@ -120,6 +136,15 @@ def _reference(bars: list[Bar] | tuple[Bar, ...]) -> str:
 
 def test_the_digest_of_a_known_bar_set_is_the_independently_derived_literal() -> None:
     assert dataset_sha256(_known_bars()) == KNOWN_ANSWER
+
+
+def test_a_sub_second_event_time_keeps_its_microseconds_in_the_digest() -> None:
+    event = ORIGIN + timedelta(milliseconds=250)
+    bar = _bar(0, event_time=event, availability_time=event + timedelta(minutes=15))
+
+    assert dataset_sha256([bar]) == KNOWN_ANSWER_SUBSECOND
+    assert _reference([bar]) == KNOWN_ANSWER_SUBSECOND
+    assert dataset_sha256([bar]) != dataset_sha256([_bar(0)])
 
 
 def test_the_digest_equals_an_independent_restatement_of_the_rule_over_a_real_series() -> None:

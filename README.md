@@ -1660,11 +1660,14 @@ as `scenario-report` refuses it.
   under another attempt id, an attempt id the trial has already started, and a run
   whose replay inputs differ from those of a constant-notional baseline already
   sealed. `compounding` also requires a sealed 1.0x constant-notional baseline.
-  Row and file counts before and after a refused command are equal. The read and
-  the writes are not one transaction: the slice assumes a single operator.
+  Since Phase 8E the last pre-flight hashes the stored bars of the window against the
+  protocol's declared dataset hash.
+  Row and file counts before and after a command refused by one of these checks are equal.
+  The read and the writes are not one transaction: the slice assumes a single operator.
   What can still orphan a start row: a data-dependent `BacktestRefused` from the
-  simulation and a `derive_daily_returns` refusal (a ruined account), because
-  both need the bars. Nothing else can.
+  simulation, a `derive_daily_returns` refusal (a ruined account), because both need the
+  bars, and (Phase 8E) the post-run dataset agreement: the store changed between the
+  pre-flight and the run, which leaves one row more and no file more. Nothing else can.
 - **An orphaned `compounding` attempt id is spent.** A `compounding` run that stops
   after its start row leaves that row in the chain, and the id is refused from then
   on. Retry under a **new** `--attempt-id`; `audit_attempts` then rises by one for
@@ -2359,14 +2362,24 @@ uv run trading-house research dataset digest --instrument fx.eurusd --timeframe 
   closed: every earlier run's digest then names data the store no longer holds, and a new run is
   refused until the protocol declares the new digest.
 - **Trailing zeros are significant.** `1.10` and `1.1` hash differently. The store returns one
-  representation per column, so one store hashes one way.
-- **`research trial record` seals the bundle it is given.** A bundle edited by hand to carry the
-  declared digest is not detected there; only a bundle `scenarios` produced carries a digest a run
-  computed. The opened-bundle forgery guard of 8D2 is unchanged.
+  representation per column, so one store hashes one way, but a value-equal re-ingestion into a
+  FRESH store (a provider that quantises `1.10` as `1.1`, say) can also change the digest.
+- **`research trial record` seals the bundle it is given, and `decide` trusts the digest the
+  bundle carries.** Bundles from `scenarios`, `compounding`, `open-holdout` and
+  `backtest run --mark-to-market` carry a digest a run computed. `decide` clears "dataset-content
+  hash is unavailable" on the digest the baseline CARRIES and never re-reads the store, so the
+  clearing rests on the bundle's own attestation: a bundle sealed by hand through `trial record`
+  could carry any digest, the declared one included, and that is not detected there. The
+  opened-bundle forgery guard of 8D2 is unchanged. `ValidationReport.facts.dataset_sha256_present`
+  keeps its name and now means "the baseline carries the protocol's declared digest".
 - **Reads and writes are not one transaction.** A store that changes between the pre-flight and
   the run is caught after the start row, not before it.
 - **A window must lie inside the stored bars,** as a run requires, and an operator declaring a
-  hash for a window beyond the store is refused (exit 10).
+  hash for a window beyond the store is refused (exit 10). So are `scenarios` and `compounding` on
+  a window beyond the store, before any write (row and file counts unchanged); before 8E that left
+  an orphan start row and a simulator refusal. A window inside the store that holds no bar is
+  refused as a statistical input (exit 20), by `backtest run` too, where it used to surface as a
+  validation error.
 - **The help of `research dataset digest` is under the no-verdict ban,** like every report
   command: it reports a digest and judges nothing. It is a named set of its own in the gate,
   with the completeness test that fails if a command in its group is in none of the lists.

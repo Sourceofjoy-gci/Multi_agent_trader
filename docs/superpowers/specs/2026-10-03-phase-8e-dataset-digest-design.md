@@ -71,3 +71,31 @@ pinned digest in the suite is unmoved.
 - The digest proves the replay's input bytes, not their source or that the bars are real market data.
 - A bar store that is later corrected invalidates every earlier run's digest by design.
 - Existing trials whose protocols declared placeholder hashes cannot be re-run; they remain readable.
+
+## 7. As built (2026-10-03)
+
+Where the implementation differs from the decisions above, the implementation is the authority:
+
+- **E-1 (module).** The digest is `dataset_sha256` in `research/backtest/dataset.py`, not
+  `research/dataset.py`: the engine must call it and `BACKTEST_ALLOWED` admits
+  `trading_house.research.backtest` but not `trading_house.research`. For the same reason the
+  canonical-bytes rules are restated there (twelve fields, sorted keys, compact separators,
+  `Decimal` as `format(value, "f")`, UTC `Z` stamps) and not imported from `research/canonical.py`.
+- **E-4 (outcome field).** `BacktestOutcome.dataset_sha256` is `Field(default=None, exclude=True)`,
+  not `exclude_if`: it is carried in memory and never serialised. The engine always sets it, so a
+  conditional exclusion would have moved every pinned outcome byte.
+- **E-4 (bundle).** `mark_to_market_bundle`'s `dataset_sha256` parameter was removed; the bundle
+  takes `outcome.dataset_sha256` only (computed, never typed). `backtest run --mark-to-market`
+  therefore seals the computed digest too.
+- **E-7 and E-8.** E-7 pre-empts E-8 inside `decide`: the statistical read's faithfulness check would
+  refuse a baseline carrying another digest as exit 19 first. `refuse_other_dataset` therefore runs
+  before the statistical read: the baseline is refused with exit 21, every other bundle (compounding,
+  stressed, other candidates) with exit 19.
+- **E-9 (coverage).** `window_digest` refuses a window the store does not hold with `CoverageError`
+  (exit 10), which also moves `scenarios` and `compounding` on such a window from an orphan start row
+  plus a simulator refusal to a refusal before any write.
+- **E-3 in the engine.** `Backtester.run` over an in-coverage window that holds no bar now raises
+  `StatisticalInputError` (exit 20) from the digest, where it used to fail construction of the outcome
+  with a validation error.
+- **Third orphan source.** The post-run agreement (E-6) refuses after the start row is appended:
+  one row more, no file more, and the attempt id is spent.

@@ -218,6 +218,39 @@ def test_open_holdout_refuses_a_holdout_hash_the_store_does_not_hash_to_before_a
     assert _holdout() == ("locked", 0)
 
 
+def _beyond_the_store(seeded: Fixture, protocol: TrialProtocol) -> TrialProtocol:
+    return protocol.model_copy(
+        update={
+            "data": protocol.data.model_copy(
+                update={"end": seeded.last_bar.replace(year=seeded.last_bar.year + 1)}
+            )
+        }
+    )
+
+
+def test_scenarios_on_a_window_beyond_the_store_is_a_coverage_refusal_before_any_write(
+    seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    path = _register_protocol(tmp_path, _beyond_the_store(seeded, _protocol(seeded)))
+    before = _state(research_ledger_dsn, research_env)
+
+    _assert_refused(runner.invoke(cli.app, _scenario_args(seeded, path)), cli.ExitCode.COVERAGE)
+
+    assert _state(research_ledger_dsn, research_env) == before
+
+
+def test_compounding_on_a_window_beyond_the_store_is_a_coverage_refusal_before_any_write(
+    seeded: Fixture, research_env: Path, research_ledger_dsn: str, tmp_path: Path
+) -> None:
+    path = _register_protocol(tmp_path, _beyond_the_store(seeded, _protocol(seeded)))
+    _seal_grid(seeded, tmp_path, levels=("1",))  # the 1.0x baseline a rerun needs, by hand
+    before = _state(research_ledger_dsn, research_env)
+
+    _assert_refused(_compounding(seeded, path), cli.ExitCode.COVERAGE)
+
+    assert _state(research_ledger_dsn, research_env) == before
+
+
 # --- 4. the store changes between the pre-flight and the run -------------------------------
 
 
@@ -430,11 +463,28 @@ def test_the_readme_states_the_digest_where_it_is_checked_and_what_it_does_not_p
         "A protocol that declares a placeholder hash cannot run.",
         "It does not prove where the bars came from, or that they are real market data.",
         "A store that is later corrected, or re-ingested, hashes differently, by design.",
-        "`research trial record` seals the bundle it is given.",
+        "`research trial record` seals the bundle it is given, and `decide` trusts the digest the "
+        "bundle carries.",
+        "the clearing rests on the bundle's own attestation",
+        "can also change the digest",
+        'keeps its name and now means "the baseline carries the protocol\'s declared digest"',
+        "is refused as a statistical input (exit 20), by `backtest run` too",
         "`scenario-report` and `splits` are descriptive reads with their own checks and do not "
         "examine the dataset digest",
     ):
         assert sentence in section, sentence
+
+
+def test_the_readme_names_the_third_source_of_an_orphaned_start_row() -> None:
+    text = _flat(README)
+
+    for sentence in (
+        "the post-run dataset agreement: the store changed between the pre-flight and the run, "
+        "which leaves one row more and no file more. Nothing else can.",
+        "Row and file counts before and after a command refused by one of these checks are equal.",
+    ):
+        assert sentence in text, sentence
+    assert "Row and file counts before and after a refused command are equal" not in text
 
 
 def test_the_readme_no_longer_says_the_dataset_hash_is_never_computed() -> None:
