@@ -7,6 +7,7 @@ import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
+from hypothesis import HealthCheck, settings
 from psycopg import sql
 from sqlalchemy import URL
 from testcontainers.community.postgres import PostgresContainer
@@ -23,6 +24,21 @@ TEST_SUPERUSER_PASSWORD = "integration-test-superuser-password"  # noqa: S105
 # because 8A grants it, so the privilege that keeps the chain append-only is the
 # absence of INSERT rather than which database the rows live in.
 RESEARCH_DATABASE = "trading_house_research"
+
+# Hypothesis's 200 ms per-example deadline and its ``too_slow`` health check
+# time the machine, not the property. On a loaded Windows box a full run failed
+# three property tests that pass in isolation. Reproduced under load: the
+# mutated-YAML constitution test with ``DeadlineExceeded`` (a 30-80 ms parse
+# took 260-300 ms) and the mark identity test with ``FailedHealthCheck``
+# (nine inputs in a second). The third, the constitution drift test, did not
+# fail at 200 ms here, but the deadline is the only part of it that depends on
+# the clock. So both are off for the whole suite rather than test by test, as
+# ``tests/property/test_promotion.py`` already did for itself. Neither setting
+# weakens an assertion.
+settings.register_profile(
+    "trading_house", deadline=None, suppress_health_check=[HealthCheck.too_slow]
+)
+settings.load_profile("trading_house")
 
 
 def printed_strings(*streams: str) -> str:
