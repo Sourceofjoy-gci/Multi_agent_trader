@@ -1281,3 +1281,40 @@ def test_a_non_positive_sizing_equity_rejects_without_reaching_the_risk_engine()
     assert len(constant.result.trades) >= 2
     assert len(calls) > 1
     assert set(calls) == {_EQUITY}
+
+
+# --- Phase 8E: the outcome names the bars it replayed ----------------------------------------
+
+
+def test_the_outcome_carries_the_digest_of_exactly_the_bars_it_replayed() -> None:
+    """Whole window, then a narrower one: the digest follows ``[start, end]`` the way the
+    replay's read does (the bar at ``end`` in, the one after it out), against an independent
+    restatement of the digest rule."""
+
+    from tests.unit.research.backtest.test_dataset import _reference
+
+    bars = _ramp(60)
+    whole = _outcome(bars=bars, strategy=ToyStrategy(every_n=20))
+    narrow = _outcome(
+        bars=bars,
+        strategy=ToyStrategy(every_n=20),
+        start=bars[5].event_time,
+        end=bars[39].event_time,
+    )
+
+    assert whole.dataset_sha256 == _reference(bars)
+    assert narrow.dataset_sha256 == _reference(bars[5:40])
+    assert narrow.dataset_sha256 != whole.dataset_sha256
+
+
+def test_the_digest_is_carried_in_memory_and_kept_out_of_the_outcomes_bytes() -> None:
+    """Why the pinned outcome bytes above did not move although the engine now sets a digest:
+    the field is excluded from every serialisation, set or not."""
+
+    outcome = _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
+
+    assert outcome.dataset_sha256 is not None
+    assert "dataset_sha256" not in outcome.model_dump(mode="json")
+    assert "dataset_sha256" not in outcome.model_dump_json()
+    bare = outcome.model_copy(update={"dataset_sha256": None})
+    assert bare.model_dump_json() == outcome.model_dump_json()

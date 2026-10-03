@@ -868,6 +868,37 @@ def test_every_trial_command_is_banned_a_named_decision_command_or_a_ledger_one(
     assert registered == banned | DECISION_COMMANDS | ledger_commands
 
 
+TOTAL_BAN_RESEARCH_COMMANDS = (
+    # 8E: the one report command outside ``research trial``. It reads the bar store and prints a
+    # digest, bar count and bar times: it states no verdict, so its help is under the total ban.
+    ["dataset", "digest"],
+)
+"""Commands directly under ``research`` held to the same total ban as ``TOTAL_BAN_COMMANDS``, and
+why: ``research dataset digest`` is read only and reports a digest, nothing about a candidate.
+``research package`` is the other group and is a named set of its own in the 8D2 acceptance, because
+its help must speak of decisions."""
+
+RESEARCH_GROUPS = frozenset({"trial", "package", "dataset"})
+
+
+def test_every_research_group_and_dataset_command_is_named() -> None:
+    """A new ``research`` group, or a new ``research dataset`` command, fails here until it is
+    put in a list: ``trial`` (the two lists above), ``package`` (8D2) or the ban below."""
+
+    assert {group.name for group in cli.research_app.registered_groups} == RESEARCH_GROUPS
+    assert {command.name for command in cli.dataset_app.registered_commands} == {
+        command[1] for command in TOTAL_BAN_RESEARCH_COMMANDS
+    }
+
+
+@pytest.mark.parametrize("command", TOTAL_BAN_RESEARCH_COMMANDS)
+def test_no_research_dataset_commands_help_text_claims_a_verdict(command: list[str]) -> None:
+    result = runner.invoke(cli.app, ["research", *command, "--help"])
+
+    assert result.exit_code == 0, result.stderr
+    assert _verdict_claims(result.stdout) == []
+
+
 @pytest.mark.parametrize("command", TOTAL_BAN_COMMANDS)
 def test_no_report_commands_help_text_claims_a_verdict(command: list[str]) -> None:
     """The gate the framework's premise actually needs.

@@ -177,7 +177,30 @@ def refuse_unopenable(
         )
 
 
-def _facts(bundle: EvidenceBundle, digest: str) -> EvidenceFacts:
+def refuse_other_dataset(bundle: EvidenceBundle, protocol: TrialProtocol) -> None:
+    """A baseline sealed on other data than the protocol declared is not judged (8E, E-8).
+
+    Runs before the statistical read, whose faithfulness check (``refuse_unfaithful``) would
+    otherwise refuse the same bundle first as ``ScenarioEvidenceError``: a decision refuses
+    as ``PromotionRefusedError`` and writes nothing. A baseline carrying no digest is not refused;
+    it is a run sealed before 8E and keeps its blocking reason.
+    """
+
+    carried = bundle.provenance.dataset_sha256
+    if carried is not None and carried != protocol.data.dataset_sha256:
+        raise PromotionRefusedError() from ValueError(
+            f"the baseline was sealed on dataset {carried}; "
+            f"the protocol declares {protocol.data.dataset_sha256}"
+        )
+
+
+def _facts(bundle: EvidenceBundle, digest: str, declared_dataset: str | None) -> EvidenceFacts:
+    """``dataset_sha256_present`` means the baseline carries the protocol's declared digest.
+
+    ``declared_dataset`` is ``None`` for a legacy trial, whose bundle has no computed digest and
+    so never clears the reason.
+    """
+
     trades = bundle.result.trades
     expectancy = (
         float(sum((trade.net_pnl for trade in trades), Decimal(0)) / len(trades))
@@ -186,7 +209,9 @@ def _facts(bundle: EvidenceBundle, digest: str) -> EvidenceFacts:
     )
     return EvidenceFacts(
         registration_state=bundle.provenance.registration_state,
-        dataset_sha256_present=bundle.provenance.dataset_sha256 is not None,
+        dataset_sha256_present=(
+            declared_dataset is not None and bundle.provenance.dataset_sha256 == declared_dataset
+        ),
         return_series_basis=bundle.return_series_basis,
         cost_status=bundle.costs.status,
         baseline_net_expectancy=expectancy,
@@ -235,6 +260,7 @@ def decide_trial(
             raise PromotionRefusedError() from ValueError("the chain holds no evidence-bearing row")
     else:
         inputs = read_validation_inputs(trial_id, ledger, store, ignore=DECISION_EVENT_TYPES)
+        refuse_other_dataset(inputs.baseline[1], inputs.protocol)
         evidence = statistical_evidence(inputs)
         digest, bundle = inputs.baseline
         protocol = inputs.protocol
@@ -250,7 +276,7 @@ def decide_trial(
         expectancies = holdout_expectancies(
             trial_id, protocol, sealed_bundles(ledger.events_for(trial_id), store.read)
         )
-    facts = _facts(bundle, digest)
+    facts = _facts(bundle, digest, None if protocol is None else protocol.data.dataset_sha256)
     results = evaluate_gates(
         GateInputs(
             trial_id=trial_id,

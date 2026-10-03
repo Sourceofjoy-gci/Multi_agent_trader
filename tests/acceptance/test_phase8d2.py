@@ -28,6 +28,7 @@ from typer.testing import CliRunner
 from tests.acceptance.test_phase8b2b import _assert_refused, _envelope
 from tests.acceptance.test_phase8d1 import _locked_protocol as _locked_unit_protocol
 from tests.conftest import DatabaseHarness
+from tests.dataset_digest import declared_digest
 from tests.integration.marketdata.conftest import seed
 from tests.integration.research.conftest import research_env  # noqa: F401
 from tests.integration.research.synthetic_decision import append_synthetic_decision
@@ -71,9 +72,13 @@ BAR_DAYS = 45
 RESEARCH_DAYS = 35
 """Thirty-five days of research bars (the walk-forward and CPCV reads need thirty or more), then
 ten days that the protocol locks as its holdout."""
-HOLDOUT_HASH = "9" * 64
 AT = "2026-10-01T12:00:00"
 BARS_PER_DAY = 96
+_RAMP = _ramp(BAR_DAYS)
+RESEARCH_HASH = declared_digest(_RAMP[: RESEARCH_DAYS * BARS_PER_DAY])
+HOLDOUT_HASH = declared_digest(_RAMP[RESEARCH_DAYS * BARS_PER_DAY :])
+"""The REAL digests of the two windows the protocol declares: the research bars and the ten days
+locked behind them (8E: a protocol declaring any other hash cannot run or open)."""
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +98,7 @@ def opening_seeded(
             first_bar=bars[0].event_time,
             last_bar=bars[-1].event_time,
             mid_session_bar=bars[33].event_time,
+            bars=bars,
         )
     finally:
         with (
@@ -119,7 +125,7 @@ def _locked_protocol(
     research_end = ORIGIN + timedelta(minutes=15 * (RESEARCH_DAYS * BARS_PER_DAY - 1))
     holdout_start = ORIGIN + timedelta(minutes=15 * RESEARCH_DAYS * BARS_PER_DAY)
     update: dict[str, Any] = {
-        "data": base.data.model_copy(update={"end": research_end}),
+        "data": base.data.model_copy(update={"end": research_end, "dataset_sha256": RESEARCH_HASH}),
         "holdout": HoldoutSpec(
             state=HoldoutState.LOCKED,
             start=holdout_start,
@@ -255,6 +261,8 @@ def test_the_opening_seals_three_opened_bundles_and_decide_then_evaluates_gate_t
         level = Decimal(entry["multiplier"])
         opened[level] = (entry["evidence_sha256"], bundle)
         assert bundle.provenance.holdout_state is HoldoutState.OPENED
+        # computed by the opening's own run over the holdout window's stored bars (8E), and the
+        # protocol's declared hash is the digest of those bars
         assert bundle.provenance.dataset_sha256 == HOLDOUT_HASH == holdout.dataset_sha256
         assert (bundle.result.start, bundle.result.end) == (holdout.start, holdout.end)
         assert bundle.result.cost_model == baseline_at(protocol, level)
@@ -315,9 +323,12 @@ def test_the_opening_seals_three_opened_bundles_and_decide_then_evaluates_gate_t
     assert verdict["decision"] == "REJECTED"  # capacity: no candidate can pass gate 9
     assert verdict["gates"][8]["status"] == "UNAVAILABLE"
     baseline = store.read(validated["evidence"]["baseline"])
+    # 8E: the research baseline was run by ``scenarios`` and carries the digest it computed, which
+    # is the protocol's declared one, so the dataset reason no longer stands
+    assert baseline.provenance.dataset_sha256 == protocol.data.dataset_sha256 == RESEARCH_HASH
     assert verdict["blocking_reasons"] == (
         ["negative expectancy at baseline costs"] if _expectancy(baseline) < 0 else []
-    ) + ["dataset-content hash is unavailable"]
+    )
     assert _holdout() == ("consumed", 3)
     assert _verify().exit_code == cli.ExitCode.OK
 

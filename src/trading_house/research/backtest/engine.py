@@ -64,6 +64,7 @@ from trading_house.features.sessions import session_of
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
 from trading_house.research.backtest.costs import CostModel, commission_cost, swap_cost
 from trading_house.research.backtest.costs_attribution import CostAttribution, TradeCostAttribution
+from trading_house.research.backtest.dataset import dataset_sha256
 from trading_house.research.backtest.fills import Exit, ExitKind, Fill, entry_fill, resolve_exit
 from trading_house.research.backtest.mark import (
     MAX_EQUITY_OBSERVATIONS,
@@ -308,6 +309,41 @@ def trail_candidate(
     return candidate if improves else None
 
 
+def replay_window_bars(
+    reader: BarReader,
+    instrument_id: str,
+    timeframe: Timeframe,
+    start: datetime,
+    end: datetime,
+) -> tuple[Bar, ...]:
+    """Every bar in the requested range, defective ones included.
+
+    Included so a defective bar can be refused as it is read rather than
+    silently dropped, which would leave the run quietly shorter than the
+    period it claims.
+
+    ``start``/``end`` are inclusive bar open times while the store's
+    range is half-open, so the end moves one bar's duration forward here.
+    The same instant serves as ``as_of``: holding the whole range is not a
+    leak, because the only thing a strategy ever sees is one
+    ``FeatureSnapshot`` carrying one closed bar.
+
+    The ONE statement of what a replay reads. The engine calls it, and so does
+    ``ops/dataset.py`` when it takes the digest a protocol declares, so a digest
+    cannot be a claim about a different read than the one the run used.
+    """
+
+    horizon = end + duration(timeframe)
+    return reader.bars(
+        instrument_id,
+        timeframe,
+        start=start,
+        end=horizon,
+        as_of=horizon,
+        include_defective=True,
+    )
+
+
 class Backtester:
     """Replays a strategy over stored bars. One position at a time (D-7)."""
 
@@ -341,7 +377,12 @@ class Backtester:
         self._refuse_outside_coverage(request, coverage)
         reader = MaterializedBarReader(self._bars, coverage)
         features = FeatureEngine(reader)
-        replay_bars = self._replay_bars(request, reader)
+        replay_bars = replay_window_bars(
+            reader, request.instrument_id, request.timeframe, request.start, request.end
+        )
+        # The digest of exactly the bars this run replays, taken here so that no later
+        # step can hash a different series than the one the loop reads.
+        dataset_digest = dataset_sha256(replay_bars)
         tolerance_fraction = Fraction(request.defective_bar_tolerance)
         defective_bars = sum(1 for bar in replay_bars if bar.quality is not BarQuality.OK)
         if defective_bars:
@@ -528,6 +569,7 @@ class Backtester:
             equity=EquitySeries(firm_equity=request.firm_equity, observations=tuple(observations)),
             attribution=CostAttribution(trades=tuple(attributions)),
             sizing=request.sizing,
+            dataset_sha256=dataset_digest,
         )
 
     def _refuse_outside_coverage(self, request: BacktestRequest, coverage: Coverage) -> None:
@@ -556,30 +598,6 @@ class Backtester:
             raise BacktestRefused(RefusalKind.COVERAGE)
         if request.end > coverage.latest_event_time:
             raise BacktestRefused(RefusalKind.COVERAGE)
-
-    def _replay_bars(self, request: BacktestRequest, bars: BarReader) -> tuple[Bar, ...]:
-        """Every bar in the requested range, defective ones included.
-
-        Included so a defective bar can be refused as it is read rather than
-        silently dropped, which would leave the run quietly shorter than the
-        period it claims.
-
-        ``request.start``/``end`` are inclusive bar open times while the store's
-        range is half-open, so the end moves one bar's duration forward here.
-        The same instant serves as ``as_of``: holding the whole range is not a
-        leak, because the only thing a strategy ever sees is one
-        ``FeatureSnapshot`` carrying one closed bar.
-        """
-
-        horizon = request.end + duration(request.timeframe)
-        return bars.bars(
-            request.instrument_id,
-            request.timeframe,
-            start=request.start,
-            end=horizon,
-            as_of=horizon,
-            include_defective=True,
-        )
 
     def _snapshot(
         self,

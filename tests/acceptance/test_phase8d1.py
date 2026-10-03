@@ -52,7 +52,7 @@ from tests.acceptance.test_phase8c1 import long_seeded  # noqa: F401
 from tests.integration.research.conftest import research_env  # noqa: F401
 from tests.integration.research.test_backtest_evidence import Fixture
 from tests.integration.research.test_compounding import _compounding, _files, _rows
-from tests.integration.research.test_scenarios import TRIAL_ID, _register, _scenarios
+from tests.integration.research.test_scenarios import TRIAL_ID, _protocol, _register, _scenarios
 from tests.integration.research.test_trial_cli import (
     _bundle,
     _import_legacy,
@@ -605,12 +605,13 @@ def test_a_prospective_trial_over_a_real_sealed_run_is_rejected_today(
             assert set(gate["evidence_sha256"]) <= chain_digests
 
     # the reasons, derived by hand from the sealed baseline: not a legacy trial, mark-to-market,
-    # complete attribution; the backtest sealed no dataset hash, and no holdout is defined
+    # complete attribution, and (8E) a baseline that carries the protocol's declared dataset
+    # digest, computed by the run, so that reason is cleared; no holdout is defined
     expectancy = sum((t.net_pnl for t in baseline.result.trades), Decimal(0))
-    assert baseline.provenance.dataset_sha256 is None
+    declared = _protocol(long_seeded).data.dataset_sha256
+    assert baseline.provenance.dataset_sha256 == declared
     expected = (["negative expectancy at baseline costs"] if expectancy < 0 else []) + [
         "no locked unseen holdout",
-        "dataset-content hash is unavailable",
     ]
     assert payload["blocking_reasons"] == expected
 

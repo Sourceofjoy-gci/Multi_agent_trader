@@ -70,7 +70,9 @@ def test_the_whole_story_from_a_locked_registration_to_a_verified_live_package(
     assert first["gates"][1]["status"] == "UNAVAILABLE"  # the holdout is locked, not opened
     assert first["gates"][8]["status"] == "UNAVAILABLE"  # capacity
     assert first["holdout"]["state"] == "locked"
-    assert "dataset-content hash is unavailable" in first["blocking_reasons"]
+    # 8E: the baseline was sealed by ``scenarios`` carrying the digest it computed, which is the
+    # declared one, so the dataset reason is cleared; the holdout reason stands until it is opened
+    assert "dataset-content hash is unavailable" not in first["blocking_reasons"]
     refused = tmp_path / "refused.json"
     _assert_refused(_open(opening_seeded, path), cli.ExitCode.PROMOTION_REFUSED)
     _assert_refused(
@@ -279,9 +281,11 @@ def test_the_readme_states_what_the_opening_and_the_package_commands_do_and_do_n
         "`open-holdout` is allowed only when the holdout derived from the chain is `LOCKED` "
         "and the trial's latest recorded decision is `RESEARCH_PASSED`",
         "a second invocation: an opened, consumed or contaminated holdout is not locked",
-        "The holdout dataset hash is DECLARED, not computed.",
-        "Nothing in this repository can hash a bar store",
-        'umbrella section 10\'s "dataset hash mismatch" check is not implemented and is not done',
+        "The holdout dataset hash is declared when the holdout is locked and computed when it is "
+        "opened (Phase 8E).",
+        "the opening hashes the stored bars of the holdout window before its first write and "
+        "refuses any other hash",
+        "A holdout declared with a placeholder hash therefore cannot be opened.",
         "One opening is three opened bundles.",
         "`audit_attempts` rises by three",
         "it refuses with exit 21, before the report and both events",
@@ -330,7 +334,8 @@ def test_the_readme_closes_phase_8_by_saying_no_candidate_can_be_promoted() -> N
         "Regime labels are recognised, not vouched.",
         "DSR is defined only for a one-day holding horizon",
         "Opened-bundle contents are never re-simulated.",
-        "The declared holdout dataset hash is never computed from any data.",
+        "The declared holdout dataset hash is checked against the stored bars when the holdout "
+        "is opened",
     ):
         assert sentence in closing, sentence
 

@@ -116,6 +116,7 @@ from trading_house.ops.compounding import (
     sealed_baseline,
     sealed_rerun,
 )
+from trading_house.ops.dataset import refuse_changed_dataset, refuse_dataset_mismatch, window_digest
 from trading_house.ops.decide import (
     decide_trial,
     holdout_status,
@@ -249,6 +250,7 @@ backtest_app = typer.Typer(no_args_is_help=True, help="Backtest commands.")
 research_app = typer.Typer(no_args_is_help=True, help="Research commands.")
 trial_app = typer.Typer(no_args_is_help=True, help="Trial-ledger commands.")
 package_app = typer.Typer(no_args_is_help=True, help="Strategy-package commands.")
+dataset_app = typer.Typer(no_args_is_help=True, help="Dataset-digest commands.")
 app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
@@ -259,6 +261,7 @@ app.add_typer(backtest_app, name="backtest")
 app.add_typer(research_app, name="research")
 research_app.add_typer(trial_app, name="trial")
 research_app.add_typer(package_app, name="package")
+research_app.add_typer(dataset_app, name="dataset")
 
 
 @app.callback()
@@ -1576,6 +1579,49 @@ def _event_payload(record: LedgerRecord) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], record.model_dump(mode="json"))
 
 
+@dataset_app.command("digest")
+def research_dataset_digest(
+    instrument: Annotated[str, typer.Option("--instrument", help="Instrument id.")],
+    timeframe: Annotated[Timeframe, typer.Option("--timeframe", help="Bar timeframe.")],
+    start: Annotated[
+        datetime, typer.Option("--start", help="First bar open time, UTC, inclusive.")
+    ],
+    end: Annotated[datetime, typer.Option("--end", help="Last bar open time, UTC, inclusive.")],
+) -> None:
+    """Print the digest of the stored bars a replay of one window reads.
+
+    Read only. The digest is a SHA-256, domain-separated and canonical, over exactly the bars
+    ``backtest run`` and the run commands read for the same ``--start`` and ``--end`` (defective
+    bars included, one bar past ``--end`` in the store's half-open range). Declare it as a
+    protocol's ``data.dataset_sha256`` or ``holdout.dataset_sha256`` instead of typing a hash:
+    a run whose stored bars hash differently is refused before anything is written. It also
+    prints the bar count and the first and last bar times it covers.
+
+    It proves what bytes the replay reads, not where they came from; a store that is later
+    corrected hashes differently, by design. A window the store does not hold is refused (exit
+    10), and so is a window inside the store that holds no bar (exit 20).
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        found = window_digest(
+            _bar_store(),
+            instrument_id=instrument,
+            timeframe=timeframe,
+            start=_as_utc(start),
+            end=_as_utc(end),
+        )
+        return {
+            "dataset_sha256": found.dataset_sha256,
+            "instrument_id": instrument,
+            "timeframe": timeframe.value,
+            "bar_count": found.bar_count,
+            "first_event_time": found.first_event_time.isoformat(),
+            "last_event_time": found.last_event_time.isoformat(),
+        }
+
+    _run(operation)
+
+
 @trial_app.command("register")
 def research_trial_register(
     protocol: Annotated[Path, typer.Option("--protocol", help="Frozen TrialProtocol JSON.")],
@@ -2017,16 +2063,40 @@ def _seal_levels(
     for baseline in baselines:
         refuse_other_replay(expected, baseline.result, what="this run")
     digests = dict(done)
-    for multiplier, request in requests.items():
-        if multiplier not in done:
+    if running:
+        # The last pre-flight, and the only one that reads the bar store: the stored bars of
+        # this window must hash to the digest the protocol declared (8E, E-5). Taken once,
+        # because every level replays the same window, and not at all when every level is
+        # already sealed, which writes and runs nothing.
+        window = next(iter(requests.values()))
+        declared = (
+            run.parsed.holdout.dataset_sha256 if run.opening else run.parsed.data.dataset_sha256
+        )
+        computed = window_digest(
+            _bar_store(),
+            instrument_id=window.instrument_id,
+            timeframe=window.timeframe,
+            start=window.start,
+            end=window.end,
+        ).dataset_sha256
+        refuse_dataset_mismatch(declared, computed)
+        for multiplier, request in requests.items():
             digests[multiplier] = _run_and_seal(
-                run, attempt_id=attempts[multiplier], request=request
+                run, attempt_id=attempts[multiplier], request=request, preflight_digest=computed
             )
     return digests
 
 
-def _run_and_seal(run: _RunInputs, *, attempt_id: str, request: BacktestRequest) -> str:
-    """One attempt: start it, simulate it, seal its bundle. Returns the evidence digest."""
+def _run_and_seal(
+    run: _RunInputs, *, attempt_id: str, request: BacktestRequest, preflight_digest: str
+) -> str:
+    """One attempt: start it, simulate it, seal its bundle. Returns the evidence digest.
+
+    The digest the run computed over the bars it replayed must be the one the pre-flight took
+    (8E, E-6): the store did not change in between. Checked before the bundle is built, so a
+    run on other data seals nothing; its start row is already appended and its attempt id spent,
+    like any refusal that needs the bars.
+    """
 
     run.ledger.append(
         execution_started_event(run.trial_id, attempt_id, run.spec_sha256, _as_utc(run.started_at))
@@ -2037,6 +2107,7 @@ def _run_and_seal(run: _RunInputs, *, attempt_id: str, request: BacktestRequest)
         contract=run.instrument_contract,
         constitution=run.constitution,
     )
+    refuse_changed_dataset(preflight_digest, outcome.dataset_sha256)
     bundle = mark_to_market_bundle(
         outcome,
         trial_id=run.trial_id,
@@ -2045,9 +2116,7 @@ def _run_and_seal(run: _RunInputs, *, attempt_id: str, request: BacktestRequest)
         agent_run_id=run.agent_run_id,
         occurred_at=_as_utc(run.occurred_at),
         registered_at=_as_utc(run.registered_at),
-        # The declared holdout hash is recorded as declared: nothing here can compute one.
         holdout_state=HoldoutState.OPENED if run.opening else HoldoutState.NOT_DEFINED,
-        dataset_sha256=run.parsed.holdout.dataset_sha256 if run.opening else None,
     )
     return seal_bundle(bundle, ledger=run.ledger, store=run.store)
 
@@ -2111,7 +2180,9 @@ def research_trial_scenarios(
     ``--protocol`` **file** edited after registration is refused: the command
     compares the file's canonical digest with the registered protocol's. So is a
     level already sealed under another attempt id, an attempt id the trial has
-    already started for another level, and a run whose replay inputs
+    already started for another level, stored bars of the window that do not hash to the
+    protocol's declared ``data.dataset_sha256`` (``research dataset digest`` prints it), and
+    a run whose replay inputs
     (``--firm-equity``, ``--exit-policy``, ``--atr-period``, ``--spread-window``,
     ``--defective-bar-tolerance``, the contract and the constitution) differ from
     those of a constant-notional level already sealed. The options are built and
@@ -2229,8 +2300,9 @@ def research_trial_compounding(
 
     Like ``scenarios`` it checks before the first write: the ``--protocol`` file is
     the registered one, the options are valid, the strategy in code is the one the
-    protocol declares, a 1.0x constant-notional baseline is sealed, and the run's
-    replay inputs equal that baseline's. It refuses an ``--attempt-id`` the trial
+    protocol declares, a 1.0x constant-notional baseline is sealed, the stored bars of
+    the window hash to the protocol's declared dataset hash, and the run's replay inputs
+    equal that baseline's. It refuses an ``--attempt-id`` the trial
     has started and not sealed as this run's own rerun; an id already sealed as
     this run's rerun is a no-op that reports the existing digest.
 
@@ -2526,20 +2598,21 @@ def research_trial_open_holdout(
     Allowed only when the derived holdout is locked and the trial's latest decision is
     RESEARCH_PASSED under the policy in force. Runs the protocol's grid (1.0x, 1.5x, 2.0x of
     its baseline costs) over the protocol's holdout window as three attempts, and seals each
-    bundle with its provenance holdout state opened and the protocol's DECLARED holdout
-    dataset hash (recorded as declared; nothing here can hash a bar store). The window and
-    the costs are not options. The next step is ``decide``, which reads the opened 1.5x and
-    2.0x bundles for gate 2 and, by recording any decision after the opening, consumes the
-    holdout.
+    bundle with its provenance holdout state opened and the dataset digest its own run
+    computed over the stored holdout bars (which must equal the protocol's declared holdout
+    dataset hash, checked before the first write). The window and the costs are not options.
+    The next step is ``decide``, which reads the opened 1.5x and 2.0x bundles for gate 2
+    and, by recording any decision after the opening, consumes the holdout.
 
     Everything that needs no simulation is refused before anything is written: a holdout
     that is not locked (a second opening included), a latest decision other than
-    RESEARCH_PASSED, a window outside the stored bars, a ``--protocol`` file that is not the
-    registered one, an invalid option, and a run whose replay inputs differ from the
-    research baseline's. A run that stops after its FIRST SEALED bundle leaves a partial
-    opening, which is final: ``decide`` refuses until both stressed bundles exist, and the
-    opening cannot be repeated. A simulator refusal at 1.0x seals nothing: the holdout stays
-    locked and a new ``--attempt-prefix`` can retry.
+    RESEARCH_PASSED, a window outside the stored bars, stored bars that do not hash to the
+    declared holdout dataset hash, a ``--protocol`` file that is not the registered one, an
+    invalid option, and a run whose replay inputs differ from the research baseline's.
+    A run that stops after its FIRST SEALED bundle leaves a partial opening, which is final:
+    ``decide`` refuses until both stressed bundles exist, and the opening cannot be
+    repeated. A simulator refusal at 1.0x seals nothing: the holdout stays locked and a new
+    ``--attempt-prefix`` can retry.
     """
 
     def operation() -> dict[str, JsonValue]:

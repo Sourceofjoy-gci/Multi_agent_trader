@@ -87,6 +87,7 @@ from pydantic import ValidationError
 from typer.main import get_command
 from typer.testing import CliRunner
 
+from tests.dataset_digest import declared_digest
 from tests.property.test_trial_evidence import _CANONICAL_BUNDLE_SHA256, _bundle
 from tests.unit.research.backtest.conftest import (
     FakeBarReader,
@@ -713,9 +714,9 @@ def test_the_command_now_produces_the_mark_to_market_basis(
     assert payload["digest"] == canonical_sha256(bundle)
     assert payload["digest"] != bundle.source_result_sha256
     assert bundle.source_result_sha256 == bundle.result.digest()
-    # 8B1 computes no digest of the bar store, so it writes none. A fabricated
-    # one would vouch for data nobody hashed.
-    assert bundle.provenance.dataset_sha256 is None
+    # Since 8E the run computes the digest of the bars it replayed and the bundle carries it
+    # (8B1 wrote none, and a fabricated one would have vouched for data nobody hashed).
+    assert bundle.provenance.dataset_sha256 == declared_digest(_session_ramp())
     assert bundle.provenance.registration_state is RegistrationState.PROSPECTIVE
 
     # The series, sealed. ``bars_seen`` is the count the result already published,

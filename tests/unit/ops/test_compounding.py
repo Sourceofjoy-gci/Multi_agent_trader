@@ -32,6 +32,7 @@ from trading_house.ops.compounding import (
     REPLAY_FIELDS,
     CompoundingReport,
     compounding_report,
+    refuse_unfaithful,
     replay_inputs,
 )
 from trading_house.research.backtest.result import BacktestResult
@@ -360,3 +361,56 @@ def test_a_request_declares_the_replay_inputs_its_run_then_records() -> None:
         constitution_sha256=constitution.constitution_sha256,
     ) == replay_inputs(outcome.result)
     assert replay_inputs(outcome.result)["firm_equity"] == Decimal("90000")
+
+
+# --- Phase 8E, E-7: a bundle that carries a dataset digest carries the declared one -------------
+
+
+def test_a_bundle_sealed_on_another_dataset_than_the_declared_one_is_refused() -> None:
+    protocol = _protocol()
+    trial = _trial_id(protocol)
+    declared = protocol.data.dataset_sha256
+    own = _bundle_at(protocol, BARS, ONE, trial_id=trial)
+    other = _bundle_at(protocol, BARS, ONE, trial_id=trial, dataset_sha256="9" * 64)
+
+    assert own.provenance.dataset_sha256 == declared
+    refuse_unfaithful(trial, protocol, own)
+    with pytest.raises(ScenarioEvidenceError) as excinfo:
+        refuse_unfaithful(trial, protocol, other)
+
+    assert str(excinfo.value) == "sealed scenarios do not match the declared cost grid"
+    assert "9" * 64 in str(excinfo.value.__cause__)
+    assert declared in str(excinfo.value.__cause__)
+
+
+def test_a_bundle_carrying_no_dataset_digest_is_not_refused_by_the_faithfulness_check() -> None:
+    """Older bundles exist; ``decide`` handles them with the blocking reason."""
+
+    protocol = _protocol()
+    trial = _trial_id(protocol)
+    bare = _bundle_at(protocol, BARS, ONE, trial_id=trial, dataset_sha256=None)
+
+    assert bare.provenance.dataset_sha256 is None
+    refuse_unfaithful(trial, protocol, bare)
+
+
+def test_the_compounding_report_refuses_a_run_sealed_on_other_data() -> None:
+    protocol = _protocol()
+    trial = _trial_id(protocol)
+    constant = _bundle_at(protocol, BARS, ONE, trial_id=trial)
+    forged = _bundle_at(
+        protocol,
+        BARS,
+        ONE,
+        trial_id=trial,
+        sizing=SizingMode.COMPOUNDING,
+        dataset_sha256="9" * 64,
+    )
+
+    with pytest.raises(ScenarioEvidenceError):
+        compounding_report(
+            trial_id=trial,
+            protocol=protocol,
+            constant=(canonical_sha256(constant), constant),
+            compounding=(canonical_sha256(forged), forged),
+        )

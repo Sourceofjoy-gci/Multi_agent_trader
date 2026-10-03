@@ -36,6 +36,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from tests.dataset_digest import declared_digest
 from tests.unit.research.backtest.conftest import (
     ATR_PERIOD,
     SPREAD_WINDOW,
@@ -230,7 +231,7 @@ def _protocol(
             timeframe=Timeframe.M15,
             start=WINDOW_START,
             end=WINDOW_END,
-            dataset_sha256="a" * 64,
+            dataset_sha256=declared_digest(BARS),
             point_in_time_policy="availability_time",
         ),
         execution=ExecutionSpec(
@@ -318,7 +319,10 @@ def _bundle_at(
     """One scenario, from a real run at one multiplier, sealed the way the chain seals it.
 
     ``provenance`` is forwarded to ``mark_to_market_bundle`` (8D2: the holdout opening's
-    ``holdout_state`` and ``dataset_sha256``); without it the bundle is the 8B one, byte for byte.
+    ``holdout_state``) -- except ``dataset_sha256``, which a run computes and no caller supplies
+    (8E): a test that needs a bundle carrying another hash passes one, and it is forged onto
+    the sealed bundle's provenance afterwards, the way a hand-edited document would carry it.
+    Without ``provenance`` the bundle carries the digest of the bars it ran over.
 
     The cost model is the protocol's own baseline with the multiplier set --
     built through ``CostModel``'s constructor so it validates rather than
@@ -347,7 +351,8 @@ def _bundle_at(
             sizing=sizing,
         )
     )
-    return mark_to_market_bundle(
+    forged = {key: provenance.pop(key) for key in ("dataset_sha256",) if key in provenance}
+    bundle = mark_to_market_bundle(
         outcome,
         trial_id=trial_id,
         attempt_id=f"{ATTEMPT_PREFIX}-{multiplier}",
@@ -357,6 +362,9 @@ def _bundle_at(
         registered_at=REGISTERED_AT,
         **provenance,
     )
+    if forged:
+        return bundle.model_copy(update={"provenance": bundle.provenance.model_copy(update=forged)})
+    return bundle
 
 
 def _rebuild(bundle: EvidenceBundle, change: Callable[[dict[str, Any]], None]) -> EvidenceBundle:

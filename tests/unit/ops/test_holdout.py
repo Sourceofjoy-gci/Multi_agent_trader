@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import pytest
 
+from tests.dataset_digest import declared_digest
 from tests.unit.ops.test_scenarios import (
     BARS,
     WINDOW_END,
@@ -37,7 +38,9 @@ from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
 from trading_house.research.trial_ledger import HoldoutSpec, HoldoutState, TrialProtocol
 
-HOLDOUT_HASH = "9" * 64
+HOLDOUT_HASH = declared_digest(BARS)
+"""The real digest of the whole ramp: the window the locked holdout declares."""
+WRONG_HASH = "8" * 64
 RESEARCH_END = BARS[79].event_time
 ONE, ONE_AND_A_HALF, TWO = Decimal(1), Decimal("1.5"), Decimal(2)
 
@@ -46,7 +49,9 @@ def _locked() -> TrialProtocol:
     base = _protocol()
     return base.model_copy(
         update={
-            "data": base.data.model_copy(update={"end": RESEARCH_END}),
+            "data": base.data.model_copy(
+                update={"end": RESEARCH_END, "dataset_sha256": declared_digest(BARS[:80])}
+            ),
             "holdout": HoldoutSpec(
                 state=HoldoutState.LOCKED,
                 start=WINDOW_START,
@@ -72,7 +77,7 @@ def _bundle(level: Decimal, *, opened: bool, **provenance: object) -> EvidenceBu
         BARS,
         level,
         trial_id=TRIAL,
-        **{"holdout_state": HoldoutState.OPENED, "dataset_sha256": HOLDOUT_HASH, **provenance},
+        **{"holdout_state": HoldoutState.OPENED, **provenance},
     )
 
 
@@ -136,7 +141,10 @@ def test_a_bundle_keeps_its_default_provenance_and_records_what_it_is_given() ->
     default = _bundle(ONE, opened=False).provenance
     opened = _bundle(ONE, opened=True).provenance
 
-    assert (default.holdout_state, default.dataset_sha256) == (HoldoutState.NOT_DEFINED, None)
+    assert (default.holdout_state, default.dataset_sha256) == (
+        HoldoutState.NOT_DEFINED,
+        declared_digest(BARS[:80]),
+    )
     assert (opened.holdout_state, opened.dataset_sha256) == (HoldoutState.OPENED, HOLDOUT_HASH)
     assert _bundle(ONE, opened=False) == _bundle_at(PROTOCOL, BARS[:80], ONE, trial_id=TRIAL)
 
@@ -237,7 +245,7 @@ def test_a_bundle_sealed_as_consumed_is_not_one_the_opening_made() -> None:
 
 
 def test_an_opened_bundle_must_carry_the_declared_holdout_dataset_hash() -> None:
-    for wrong in (None, "8" * 64):
+    for wrong in (None, WRONG_HASH):
         sealed = _sealed(
             _bundle(ONE, opened=True),
             _bundle(ONE_AND_A_HALF, opened=True, dataset_sha256=wrong),
@@ -277,7 +285,7 @@ def test_a_missing_level_is_refused_before_the_other_levels_faithfulness_is_read
         ONE_AND_A_HALF,
         trial_id=TRIAL,
         holdout_state=HoldoutState.OPENED,
-        dataset_sha256="8" * 64,
+        dataset_sha256=WRONG_HASH,
     )
 
     assert "opened bundles at 2x" in _cause(
@@ -374,3 +382,31 @@ def test_a_window_outside_the_stored_bars_is_refused(start: datetime, end: datet
 def test_a_store_with_no_bars_covers_nothing() -> None:
     with pytest.raises(ScenarioEvidenceError):
         refuse_outside_coverage(EARLIEST, LATEST, _coverage(None, None))
+
+
+# --- Phase 8E, E-7: an opened bundle is held to the HOLDOUT's declared digest --------------------
+
+
+def test_the_faithfulness_check_reads_the_declared_hash_of_the_window_it_checks() -> None:
+    """An opened bundle carrying the research window's digest, and a research bundle carrying the
+    holdout's, are each refused: ``opened`` selects which declared digest applies."""
+
+    research_digest = declared_digest(BARS[:80])
+    assert research_digest != HOLDOUT_HASH
+    opened_on_research_hash = _bundle(ONE, opened=True, dataset_sha256=research_digest)
+    research = _bundle(ONE, opened=False)
+    research_on_holdout_hash = research.model_copy(
+        update={
+            "provenance": research.provenance.model_copy(update={"dataset_sha256": HOLDOUT_HASH})
+        }
+    )
+
+    refuse_unfaithful(TRIAL, PROTOCOL, _bundle(ONE, opened=True), ONE, opened=True)
+    refuse_unfaithful(TRIAL, PROTOCOL, research)
+    with pytest.raises(ScenarioEvidenceError) as opened_error:
+        refuse_unfaithful(TRIAL, PROTOCOL, opened_on_research_hash, ONE, opened=True)
+    with pytest.raises(ScenarioEvidenceError) as research_error:
+        refuse_unfaithful(TRIAL, PROTOCOL, research_on_holdout_hash)
+
+    assert "was sealed on dataset" in str(opened_error.value.__cause__)
+    assert "was sealed on dataset" in str(research_error.value.__cause__)

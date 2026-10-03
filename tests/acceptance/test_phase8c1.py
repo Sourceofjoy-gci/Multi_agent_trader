@@ -118,6 +118,7 @@ def long_seeded(
             first_bar=bars[0].event_time,
             last_bar=bars[-1].event_time,
             mid_session_bar=bars[33].event_time,
+            bars=bars,
         )
     finally:
         with (

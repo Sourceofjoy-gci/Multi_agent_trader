@@ -248,6 +248,11 @@ def refuse_unfaithful(
     ``opened`` the locked holdout's: never the other), the strategy id and version
     are the protocol's, and the specification digest is the one of the protocol's
     candidate for ``trial_id``. Shared by the compounding report and ``validate``.
+
+    A bundle that CARRIES a dataset digest must carry the one the protocol declares for that
+    window (8E, E-7): a present-but-different digest is evidence from other data. A bundle
+    carrying none is not refused here, because bundles sealed before 8E exist; ``decide`` keeps
+    its blocking reason for them.
     """
 
     result = bundle.result
@@ -262,6 +267,13 @@ def refuse_unfaithful(
         raise ScenarioEvidenceError() from ValueError(
             f"the {bundle.sizing.value} run ran [{result.start}, {result.end}]; "
             f"the protocol declares [{window[0]}, {window[1]}]"
+        )
+    carried = bundle.provenance.dataset_sha256
+    declared_dataset = protocol.holdout.dataset_sha256 if opened else protocol.data.dataset_sha256
+    if carried is not None and carried != declared_dataset:
+        raise ScenarioEvidenceError() from ValueError(
+            f"the {bundle.sizing.value} run was sealed on dataset {carried}; "
+            f"the protocol declares {declared_dataset}"
         )
     if (result.strategy_id, result.strategy_version) != (
         protocol.strategy_id,

@@ -43,6 +43,7 @@ from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from tests.conftest import DatabaseHarness
+from tests.dataset_digest import declared_digest
 from tests.integration.marketdata.conftest import seed
 
 # The trial CLI's own helpers rather than a second copy of them: ``_protocol`` is
@@ -93,6 +94,8 @@ class Fixture(NamedTuple):
     first_bar: datetime
     last_bar: datetime
     mid_session_bar: datetime
+    bars: tuple[Bar, ...]
+    """What the store was seeded with, so a protocol declares the digest of its own window."""
 
 
 def _ramp(days: int) -> tuple[Bar, ...]:
@@ -152,6 +155,7 @@ def seeded(
             # the engine discards rather than closing at the range's edge, and the
             # case this file has to report rather than hide.
             mid_session_bar=bars[33].event_time,
+            bars=bars,
         )
     finally:
         with (
@@ -293,8 +297,9 @@ def test_mark_to_market_emits_a_marked_series_and_a_complete_cost_summary(
     per-trade detail sealed beside it, which the last two assertions are the
     reader's own version of.
 
-    ``dataset_sha256`` is ``None`` and that is still honest: 8B1 computes no
-    digest of the bar store, and an unavailable hash is the honest record.
+    ``dataset_sha256`` is the digest of the bars the run replayed (8E): computed by the
+    engine from the very bars it read, never typed. It is compared here with the digest of
+    the seeded ramp taken independently of the run.
     """
 
     payload = _run(seeded, marked=True)
@@ -318,7 +323,7 @@ def test_mark_to_market_emits_a_marked_series_and_a_complete_cost_summary(
     # Commission and swap are measured, so they are not None, and now neither is
     # spread: every modelled term has a number and a per-trade split behind it.
     assert bundle.costs.commission > 0
-    assert bundle.provenance.dataset_sha256 is None
+    assert bundle.provenance.dataset_sha256 == declared_digest(_ramp(DAYS))
     assert payload["mark_to_market_flat"] is True
 
     # The aggregate, recomputed here rather than read: this is the check the model

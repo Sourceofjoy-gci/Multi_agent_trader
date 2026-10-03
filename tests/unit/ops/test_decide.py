@@ -8,16 +8,23 @@ report or trial is not) and that ``verify_reports`` refuses each way a report ca
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from tests.unit.ops.test_scenarios import BARS, _bundle_at, _protocol, _trial_id
 from tests.unit.research.test_promotion import _report
-from trading_house.core.errors import EvidenceIntegrityError
-from trading_house.ops.decide import DECISION_EVENT_TYPES, verify_reports
+from trading_house.core.errors import EvidenceIntegrityError, PromotionRefusedError
+from trading_house.ops.decide import (
+    DECISION_EVENT_TYPES,
+    _facts,
+    refuse_other_dataset,
+    verify_reports,
+)
 from trading_house.ops.ledger import gate_decided_event, validated_event
-from trading_house.research.evidence import EvidenceStore
+from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.trial_ledger import (
     GateDecidedPayload,
     LedgerEventType,
@@ -222,3 +229,41 @@ def test_the_decision_that_closes_a_validated_event_names_the_same_report(
 
     with pytest.raises(EvidenceIntegrityError):
         verify_reports([validated, other_report], store)
+
+
+# --- Phase 8E, E-8: what the baseline's dataset digest means to a decision ----------------------
+
+PROTOCOL = _protocol()
+TRIAL = _trial_id(PROTOCOL)
+
+
+def _baseline(**provenance: object) -> EvidenceBundle:
+    return _bundle_at(PROTOCOL, BARS, Decimal(1), trial_id=TRIAL, **provenance)
+
+
+def test_a_baseline_sealed_on_other_data_is_refused_as_a_promotion_refusal() -> None:
+    other = _baseline(dataset_sha256="9" * 64)
+
+    with pytest.raises(PromotionRefusedError) as excinfo:
+        refuse_other_dataset(other, PROTOCOL)
+
+    assert str(excinfo.value) == "promotion step refused"
+    assert "9" * 64 in str(excinfo.value.__cause__)
+    assert PROTOCOL.data.dataset_sha256 in str(excinfo.value.__cause__)
+
+
+def test_a_baseline_with_the_declared_digest_or_none_is_not_refused() -> None:
+    refuse_other_dataset(_baseline(), PROTOCOL)
+    refuse_other_dataset(_baseline(dataset_sha256=None), PROTOCOL)
+
+
+def test_the_dataset_fact_is_true_only_for_a_baseline_carrying_the_declared_digest() -> None:
+    declared = PROTOCOL.data.dataset_sha256
+    carrying = _baseline()
+    unavailable = _baseline(dataset_sha256=None)
+
+    assert _facts(carrying, "d" * 64, declared).dataset_sha256_present is True
+    assert _facts(unavailable, "d" * 64, declared).dataset_sha256_present is False
+    # a legacy trial has no protocol to declare one, so no digest clears the reason
+    assert _facts(carrying, "d" * 64, None).dataset_sha256_present is False
+    assert _facts(carrying, "d" * 64, "8" * 64).dataset_sha256_present is False

@@ -5,10 +5,11 @@ and seals three bundles whose provenance says the holdout was OPENED. This modul
 reads around that: what must be true before the first write, and how the opened bundles
 become the two measurements gate 2 reads. Nothing here judges, and nothing here appends.
 
-The holdout's dataset hash is DECLARED, never computed. The protocol states one when it locks
-the holdout, the opening records that declared value in each bundle's provenance, and nothing
-in this repository can hash a bar store to compare it with. Umbrella 10's "dataset hash
-mismatch" check therefore does not exist, and this module does not pretend to it.
+The holdout's dataset hash is declared when the protocol locks the holdout and COMPUTED when it
+is opened (8E): ``research trial open-holdout`` hashes the stored bars of the holdout window
+before its first write and refuses a different hash (umbrella 10's "dataset hash mismatch"),
+and each opened bundle's provenance carries the digest its run computed. A holdout declared
+with a placeholder hash can therefore not be opened.
 
 Opened-bundle contents are verified only for provenance, window, dataset hash and costs, at
 ``decide`` time (``holdout_expectancies``). The trades inside an opened bundle are never

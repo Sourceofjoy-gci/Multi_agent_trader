@@ -1182,9 +1182,10 @@ the first time at a later gate.
   charges, so a prospective bundle now carries the per-trade split and reports
   `COMPLETE` with all four components. The three imported Phase 7 bundles stay
   `PARTIAL` with two `null`s forever — their bar store was deleted, so there is
-  nothing left to attribute. `dataset_sha256` is `null` for the same reason —
-  8B1 computes no digest of the bar store, and an unavailable hash is the honest
-  record.
+  nothing left to attribute. `dataset_sha256` is `null` for the same reason on those
+  bundles, and for every legacy import: an unavailable hash is the honest record.
+  8B1 computed no digest of the bar store, so a run sealed before Phase 8E is `null`
+  too; since 8E a run seals the digest of the bars it replayed (see Phase 8E).
 - **The daily series is rectangular over UTC calendar days**, one point per day
   inclusive, with a day carrying no mark holding the prior end-of-day equity
   forward and therefore returning a literal `0.00`. That zero is a measurement of
@@ -2095,7 +2096,10 @@ uv run trading-house research trial holdout --trial-id T
   one forces `REJECTED`: negative expectancy at baseline costs; no locked unseen holdout (the
   derived state is not defined or is contaminated); legacy evidence was not preregistered;
   dataset-content hash is unavailable; mark-to-market returns are unavailable; spread and
-  slippage cannot be separately attributed. A legacy-imported trial reaches the same
+  slippage cannot be separately attributed. Since Phase 8E the dataset reason stands only when
+  the baseline carries no dataset digest (a legacy import, or a run sealed before 8E): a
+  baseline that carries the protocol's declared digest clears it, and one carrying another is
+  refused. A legacy-imported trial reaches the same
   `decide`: its measurements are unavailable, no research gate can pass, it names every
   reason its evidence supports (all six for a losing Phase 7 artifact), and it is
   `REJECTED`.
@@ -2150,8 +2154,10 @@ uv run trading-house research trial holdout --trial-id T
   so every decision is `REJECTED` today. No holdout has ever been opened for any candidate:
   the machinery is proven on synthetic locked windows only (8D2 adds the one-time opening).
   No volume-to-lots model can be declared, so capacity is `unavailable`.
-- **Every `backtest run` seals no dataset hash**, so a prospective trial run through the
-  repository's own commands carries the reason "dataset-content hash is unavailable" as well.
+- **Before Phase 8E every `backtest run` sealed no dataset hash**, so a prospective trial run
+  through the repository's own commands carried the reason "dataset-content hash is
+  unavailable" as well. That is now true only of legacy imports and of runs sealed before 8E;
+  a run sealed since carries the digest of the bars it replayed (Phase 8E).
 - **The human authorization and the signature are references** (8D2); nothing here can check
   that a person made them.
 - **Regimes are recognised, not vouched** (8C): gate 8 counts the labels it is given.
@@ -2187,15 +2193,19 @@ uv run trading-house research package verify --file package.json
 - **What it does.** It runs the protocol's grid (1.0x, 1.5x, 2.0x of its baseline costs) over the
   holdout window as three attempts (`<prefix>-holdout-<multiplier>`) through the same simulator and
   the same `seal_bundle` as the research runs, and seals each bundle with provenance holdout state
-  `opened`. Before the first write it refuses a window outside the stored bars, a `--protocol` file
-  that is not the registered one, an invalid option, an attempt id the trial already started, and a
-  run whose replay inputs (`REPLAY_FIELDS`) differ from the research baseline's. The opening is
+  `opened`. Before the first write it refuses a window outside the stored bars, stored bars of
+  the holdout window that do not hash to the declared holdout dataset hash (Phase 8E), a
+  `--protocol` file that is not the registered one, an invalid option, an attempt id the trial
+  already started, and a run whose replay inputs (`REPLAY_FIELDS`) differ from the research
+  baseline's. The opening is
   three attempts, so `audit_attempts` rises by three and the selection count does not.
-- **The holdout dataset hash is DECLARED, not computed.** The protocol states a dataset hash when
-  it locks the holdout, and the opening records that declared value in each opened bundle's
-  provenance. Nothing in this repository can hash a bar store, so umbrella section 10's "dataset
-  hash mismatch" check is not implemented and is not done: nothing compares the declared hash with
-  any data.
+- **The holdout dataset hash is declared when the holdout is locked and computed when it is
+  opened (Phase 8E).** The protocol states a dataset hash when it locks the holdout. Phase 8D2
+  recorded that declared value in each opened bundle and compared it with nothing, so umbrella
+  section 10's "dataset hash mismatch" check was not done. Since 8E the opening hashes the stored
+  bars of the holdout window before its first write and refuses any other hash, and each opened
+  bundle carries the digest its own run computed. A holdout declared with a placeholder hash
+  therefore cannot be opened.
 - **One opening is three opened bundles.** The holdout derivation (8D1) counted every opened
   bundle as an opening, which made the opening contaminate itself on its second bundle. A second
   opening is now one that seals a bundle at a cost level an earlier opened bundle already ran;
@@ -2278,6 +2288,89 @@ uv run trading-house research package verify --file package.json
 - **A stage is not a deployment.** A package is a file; nothing here executes, schedules or
   trades it.
 
+## Phase 8E - the computed dataset digest
+
+Every protocol declares a `dataset_sha256` and every holdout declares one. Until Phase 8E nothing
+in this repository computed one: every real `backtest run` sealed no dataset hash, and umbrella
+section 10's "dataset hash mismatch" error could not be implemented. 8E computes the digest, checks
+it before any write, and seals it. It adds one command, `research dataset digest`, three small
+modules (`research/backtest/dataset.py`, `ops/dataset.py` and the shared window read in
+`research/backtest/engine.py`), no ledger event type, no migration and no dependency, and it moves
+no pinned digest.
+
+```bash
+uv run trading-house research dataset digest --instrument fx.eurusd --timeframe M15 \
+  --start 2026-09-21T00:00:00 --end 2026-10-25T23:45:00
+```
+
+- **The digest.** `sha256(b"trading-house:dataset:v1" + canonical JSON array of the bars)`, over
+  twelve fields of each bar in event-time order: instrument, timeframe, event time, availability
+  time, open, high, low, close, tick volume, spread, real volume and quality. A `Decimal` is its
+  `format(value, "f")` (trailing zeros are significant) and an instant is a UTC `Z` stamp; keys
+  are sorted and separators compact. The bytes of a window do not depend on the process.
+- **It covers exactly the bars the replay reads.** One function, `replay_window_bars`, is the
+  read: defective bars included, event times in `[start, end + one bar)`, `as_of` at that last
+  instant. The engine replays through it and the digest is taken over what it returns, so a bar at
+  `end` is in and the bar after it is out. An empty window, a repeated or decreasing event time, or
+  bars of more than one instrument or timeframe cannot be digested and are refused (exit 20).
+- **The workflow.** Run `research dataset digest` over the window, declare its digest as the
+  protocol's `data.dataset_sha256` (and `holdout.dataset_sha256`), then register. The command
+  reads the store and nothing else, and prints the digest, the bar count and the first and last
+  bar times.
+- **A run is refused before any write unless its data is the declared data.** `scenarios`,
+  `compounding` and `open-holdout` hash the stored bars of the window (the research window, or the
+  holdout's for the opening) before their first append and refuse, exit 19 and naming both digests
+  on the private cause, a digest that is not the protocol's. After each run the digest the engine
+  computed over the bars it replayed must equal the one the pre-flight took, which closes the gap
+  in which the store could change between the two; a run that stops there has appended its start
+  row and spent its attempt id, like any refusal that needs the bars. A retry in which every level
+  is already sealed runs and writes nothing, and is not hashed.
+- **A sealed bundle states the data it ran on.** `provenance.dataset_sha256` is the digest the
+  engine computed, never a value a caller supplies (`backtest run --mark-to-market` seals it too,
+  without a protocol to compare it with). The outcome carries the digest in memory only: it is
+  left out of every serialisation of `BacktestOutcome`, so the pinned outcome bytes, the four
+  Phase 7 digests and the version 1 bundle digest are unchanged, and a bundle whose provenance
+  carries none keeps the bytes it always had.
+- **The faithfulness check reads it.** `refuse_unfaithful`, shared by `validate`, the compounding
+  report and the opening's `decide` read, additionally requires a bundle that carries a dataset
+  digest to carry the protocol's declared one (the holdout's for an opened bundle), exit 19. A
+  bundle that carries none is not refused there. `scenario-report` and `splits` are descriptive
+  reads with their own checks and do not examine the dataset digest.
+- **`decide`.** A baseline carrying a digest that differs from the protocol's declared one is
+  refused (exit 21, nothing written; it is checked before the statistical read so that it is
+  this refusal and not exit 19). A baseline carrying the declared digest clears the blocking
+  reason "dataset-content hash is unavailable"; one carrying none keeps it.
+- **The statements of earlier phases that the dataset hash is declared and never computed, that
+  umbrella section 10's "dataset hash mismatch" check is not done, and that every real trial
+  carries "dataset-content hash is unavailable" are now true only for legacy imports and for
+  runs sealed before 8E.** A legacy artifact's dataset stays `unavailable`: its bar store was
+  deleted, and nothing here fabricates a hash for it.
+- **A protocol that declares a placeholder hash cannot run.** A chain already holding protocols
+  with placeholder hashes keeps them as valid history, because the ledger is append-only and
+  nothing rewrites them; a new run against one is refused, which is correct. Declare the real
+  digest in a new protocol.
+
+### What 8E does not establish
+
+- **It does not prove where the bars came from, or that they are real market data.** The digest
+  is of the stored bytes the replay reads. It says nothing about the broker, the ingest or the
+  honesty of whoever filled the store.
+- **A store that is later corrected, or re-ingested, hashes differently, by design.** That fails
+  closed: every earlier run's digest then names data the store no longer holds, and a new run is
+  refused until the protocol declares the new digest.
+- **Trailing zeros are significant.** `1.10` and `1.1` hash differently. The store returns one
+  representation per column, so one store hashes one way.
+- **`research trial record` seals the bundle it is given.** A bundle edited by hand to carry the
+  declared digest is not detected there; only a bundle `scenarios` produced carries a digest a run
+  computed. The opened-bundle forgery guard of 8D2 is unchanged.
+- **Reads and writes are not one transaction.** A store that changes between the pre-flight and
+  the run is caught after the start row, not before it.
+- **A window must lie inside the stored bars,** as a run requires, and an operator declaring a
+  hash for a window beyond the store is refused (exit 10).
+- **The help of `research dataset digest` is under the no-verdict ban,** like every report
+  command: it reports a digest and judges nothing. It is a named set of its own in the gate,
+  with the completeness test that fails if a command in its group is in none of the lists.
+
 ## Phase 8 - what exists, what blocks promotion, what a human must supply
 
 **What exists.** A preregistered, append-only trial ledger and a content-addressed evidence
@@ -2294,9 +2387,10 @@ each lives outside this repository:
 1. **A capacity model.** Gate 9 needs a declared volume-to-lots model, and no protocol can declare
    one; capacity is `UNAVAILABLE` for every candidate, so none reaches `RESEARCH_PASSED`.
 2. **A real locked holdout with a computable dataset hash.** No holdout has ever been collected for
-   any candidate, and no code here can hash a bar store, so the declared holdout hash cannot be
-   checked against data. Every `backtest run` also seals no dataset hash, which is its own blocking
-   reason.
+   any candidate. Since Phase 8E the code can hash a stored bar window and refuses a run or an
+   opening whose stored bars do not hash to the declared digest, but there is still no collected
+   holdout window to lock and hash. A run sealed before 8E carries no dataset hash, which is its
+   own blocking reason, as is every legacy import.
 3. **Human authorizations and signatures.** A package is created only from a `PAPER_APPROVED`
    decision with an authorization reference, and `LIVE` needs a separate capital authorization and
    a signature reference. Those are references to acts only a person can perform; nothing here
@@ -2311,10 +2405,12 @@ literal text, R-1 (PBO rank direction) corrects a contradiction in it, and R-3 a
 after review. Regime labels are recognised, not vouched. DSR is defined only for a one-day holding
 horizon and is otherwise unavailable. A holdout is shared by every trial that declares the same
 window and hash, and opens once across them. Opened-bundle contents are never re-simulated. The
-declared holdout dataset hash is never computed from any data.
+declared holdout dataset hash is checked against the stored bars when the holdout is opened,
+which proves what bytes the replay read and nothing about where they came from.
 
 **What a human must supply.** The capacity model (a volume-to-lots declaration in a new
-protocol, which needs a new trial), a collected and locked holdout window with its dataset hash,
+protocol, which needs a new trial), a collected and locked holdout window with its dataset hash
+(`research dataset digest` prints it from the store),
 and the authorization, capital authorization and signature references, in that order. Until all
 three exist the framework answers as it was built to: `REJECTED`, stage `SANDBOX`, with the
 reasons.
@@ -2365,6 +2461,7 @@ uv run trading-house --help
 | `trading-house guard status` | Report every position the guard watches, and any that escalated |
 | `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
 | `trading-house backtest run --mark-to-market` | Replay the same arm and print a sealable mark-to-market evidence bundle — the mark-to-market series, the per-trade cost attribution, and the bundle's digest — instead of the bare result |
+| `trading-house research dataset digest` | Print the dataset digest of the stored bars a replay of one window reads (`--instrument`, `--timeframe`, `--start`, `--end`), with the bar count and the first and last bar times. Read only; declare it in a protocol rather than typing a hash. A window the store does not hold is 10, one that holds no bar is 20 |
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
@@ -2377,7 +2474,7 @@ uv run trading-house --help
 | `trading-house research trial decide` | Evaluate the nine gates for a declared trial (a prospective one over its sealed evidence, a legacy one over its sealed bundle), seal the validation report and append `VALIDATED` then `GATE_DECIDED`. Takes `--trial-id` and a required `--occurred-at`; no threshold, stage or package option. A rerun on an unchanged chain appends nothing. Refuses an undeclared trial or unusable evidence with 19 or 20, a moved policy or a legacy-and-registered trial with 21 |
 | `trading-house research trial report` | Print the validation report the trial's last recorded decision names, re-read from the evidence store. Read only; 17 if the report is missing or altered, 21 if no decision is recorded |
 | `trading-house research trial holdout` | Print the holdout state derived from the chain for a declared trial: not defined, locked, opened, consumed or contaminated, with the reason. Read only |
-| `trading-house research trial open-holdout` | Open the locked holdout once: run the protocol's cost grid over its holdout window as three attempts and seal three bundles whose provenance says the holdout was opened, with the protocol's declared holdout dataset hash recorded as declared (never computed). Takes `scenarios`' options and no window or cost option. Refuses before any write unless the derived holdout is locked and the latest decision is the research pass (21), a window outside the stored bars, an edited `--protocol` file, other replay inputs than the research baseline's, or an invalid option (19 or 2). A second invocation is refused. `decide` then reads the opened 1.5x and 2.0x bundles |
+| `trading-house research trial open-holdout` | Open the locked holdout once: run the protocol's cost grid over its holdout window as three attempts and seal three bundles whose provenance says the holdout was opened, with the digest each run computed over the holdout window's stored bars (Phase 8E). Takes `scenarios`' options and no window or cost option. Refuses before any write unless the derived holdout is locked and the latest decision is the research pass (21), a window outside the stored bars, stored bars that do not hash to the declared holdout dataset hash (19), an edited `--protocol` file, other replay inputs than the research baseline's, or an invalid option (19 or 2). A second invocation is refused. `decide` then reads the opened 1.5x and 2.0x bundles |
 | `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |

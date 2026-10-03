@@ -32,7 +32,7 @@ from pydantic import Field, NonNegativeInt, field_validator, model_validator
 
 from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import EquityEvidenceError, TimestampError
-from trading_house.core.values import CanonicalModel
+from trading_house.core.values import CanonicalModel, NonEmptyStr
 from trading_house.research.backtest.costs_attribution import (
     CostAttribution,
     attribution_disagreement,
@@ -150,6 +150,12 @@ class BacktestOutcome(CanonicalModel):
     sizing: SizingMode = Field(
         default=SizingMode.CONSTANT_NOTIONAL, exclude_if=is_constant_notional
     )
+    # The digest of the bars this run replayed (Phase 8E), carried in memory to the
+    # bundle's provenance, which is where it is sealed. ``exclude=True`` and not
+    # ``exclude_if`` None: the engine always sets it, so a conditional exclusion would
+    # put it into every outcome's bytes and move the pinned outcome digest. Nothing
+    # persists or re-reads an outcome, so nothing is lost by leaving it out of them.
+    dataset_sha256: NonEmptyStr | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def series_is_the_result_it_came_from(self) -> Self:

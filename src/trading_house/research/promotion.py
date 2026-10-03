@@ -347,6 +347,9 @@ class EvidenceFacts(CanonicalModel):
 
     registration_state: RegistrationState
     dataset_sha256_present: bool
+    """The baseline bundle carries the protocol's declared dataset digest (8E): the digest the run
+    computed over its bars equals the one the protocol declared. ``False`` for a legacy import and
+    for a run sealed before 8E, which carry none."""
     return_series_basis: ReturnSeriesBasis
     cost_status: CostAttributionStatus
     baseline_net_expectancy: FiniteFloat | None
@@ -734,7 +737,7 @@ def blocking_reasons(facts: EvidenceFacts, holdout: HoldoutStatus) -> tuple[str,
     """The reasons that force REJECTED whatever the gates say (P-11), in a fixed order.
 
     Computed from the evidence, so they apply to any trial: a prospective trial sealed with
-    no dataset hash is blocked for the same reason a legacy import is.
+    no dataset hash (a run before 8E) is blocked for the same reason a legacy import is.
     """
 
     reasons: list[str] = []

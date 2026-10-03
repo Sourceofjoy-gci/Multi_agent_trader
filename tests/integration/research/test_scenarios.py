@@ -40,6 +40,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from tests.dataset_digest import declared_digest
 from tests.integration.research.test_backtest_evidence import (  # noqa: F401
     OCCURRED_AT,
     REGISTERED_AT,
@@ -165,7 +166,9 @@ def _protocol(
             timeframe=Timeframe.M15,
             start=seeded.first_bar,
             end=seeded.last_bar,
-            dataset_sha256="a" * 64,
+            dataset_sha256=declared_digest(
+                seeded.bars, start=seeded.first_bar, end=seeded.last_bar
+            ),
             point_in_time_policy="availability_time",
         ),
         execution=ExecutionSpec(

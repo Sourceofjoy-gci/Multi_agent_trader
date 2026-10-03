@@ -135,7 +135,10 @@ def _make(
             **(tamper or {}),
         }
     )
-    provenance = bundle.provenance
+    # Faithful to the protocol's declared dataset, like every other field above (8E, E-7).
+    provenance = bundle.provenance.model_copy(
+        update={"dataset_sha256": protocol.data.dataset_sha256}
+    )
     if holdout is not None:
         provenance = provenance.model_copy(update={"holdout_state": holdout})
     returns = values if values is not None else _wave(days)

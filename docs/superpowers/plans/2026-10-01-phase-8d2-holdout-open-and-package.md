@@ -27,6 +27,10 @@ real ledger (a named test helper; never reachable from a command), and the READM
    Seals three bundles (1.0x, 1.5x, 2.0x), each with `holdout_state=OPENED` and the holdout's declared dataset hash recorded in
    provenance (state in the README that the hash is DECLARED, not computed: nothing in this repository can hash a bar store,
    so umbrella §10's 'dataset hash mismatch' check is not implementable and is NOT done).
+   [Superseded by Phase 8E (`docs/superpowers/specs/2026-10-03-phase-8e-dataset-digest-design.md`): the digest is now
+   computed, the opening refuses a window whose stored bars do not hash to the declared holdout hash before its first
+   write, and each opened bundle carries the digest its run computed. The 8D2 statement stays true only for runs
+   sealed before 8E and for legacy imports.]
 3. After opening, `decide` (8D1) must read the opened 1.5x and 2.0x bundles (exactly one each, else UNAVAILABLE with the reason)
    and feed `holdout_expectancy_1_5/2_0` (the 8C3 `scenario_expectancy` measurement over the opened bundle's sample); gate 2 then
    evaluates; a later `GATE_DECIDED` moves the derived holdout to `CONSUMED`.
