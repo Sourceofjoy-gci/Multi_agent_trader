@@ -44,6 +44,10 @@ stated: R-1 is a direction correction (the umbrella's sentences contradict one a
 one under which they agree), R-2, R-3, R-5 and R-7 are stricter than the literal reading, and R-4 and R-6 are neutral
 or conservative. Each is surfaced to the human in the slice report.
 
+**Confirmed 2026-10-03:** the user confirmed all seven resolutions, R-1 to R-7, as written in the table below
+(including the amendments to R-3 and R-5 and the addition of R-7). They stand as the project's reading of the umbrella
+clauses they resolve; a later change to any of them is a new decision, not a correction.
+
 | # | Clause | Problem | Resolution |
 |---|---|---|---|
 | R-1 | §7.5: "rank the OOS… best first", "rank of 1 produces −∞ and rank N produces +∞", "count `logit <= 0` as overfit" | These three cannot all hold. With best-first ranks, the in-sample-best candidate that ranks *first* out-of-sample gets the smallest λ, the most negative logit, and is counted as **overfit** — the inverse of PBO. The infinities also need λ to reach 0 and 1, which `rank/(N+1)` never does | The OOS rank λ is taken **ascending (1 = worst OOS)** and mapped `λ = (rank − 1)/(N − 1)`, so rank 1 → −∞ (the IS-best was the OOS-worst: overfit) and rank N → +∞. This is the only reading under which the infinity sentence, the `logit <= 0` rule and Bailey–López de Prado's definition agree. "IS best first" is unchanged |
