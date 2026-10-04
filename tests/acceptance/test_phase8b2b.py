@@ -826,7 +826,7 @@ def test_the_four_pinned_digests_are_still_exactly_these_literals() -> None:
 # --- 9. the operator-facing text ----------------------------------------------
 
 
-DECISION_COMMANDS = frozenset({"decide", "report", "holdout", "open-holdout"})
+DECISION_COMMANDS = frozenset({"decide", "report", "holdout", "holdout-check", "open-holdout"})
 """The only trial commands whose help may speak in decisions, and why.
 
 Phase 8D1 is the first slice that judges a candidate, and the three commands that exist to

@@ -30,7 +30,12 @@ from trading_house.ops.compounding import refuse_unfaithful
 from trading_house.ops.scenarios import is_research_run, refuse_reportable
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.evidence import EvidenceBundle
-from trading_house.research.trial_ledger import HoldoutState, ReturnSeriesBasis, TrialProtocol
+from trading_house.research.trial_ledger import (
+    HoldoutCollection,
+    HoldoutState,
+    ReturnSeriesBasis,
+    TrialProtocol,
+)
 from trading_house.research.validation.coverage import scenario_expectancy
 from trading_house.research.validation.measurement import Measurement
 from trading_house.research.validation.series import TradeSample
@@ -104,13 +109,22 @@ def holdout_expectancies(
             )
         chosen.append((level, *found[0]))
     measured: list[Measurement] = []
+    prospective = protocol.holdout.collection is HoldoutCollection.PROSPECTIVE
+    if prospective:
+        # No hash was declared at the lock (the data did not exist); the opening computed one.
+        # Both levels replayed the same window, so they must carry the same computed hash.
+        hashes = {bundle.provenance.dataset_sha256 for _, _, bundle in chosen}
+        if None in hashes or len(hashes) != 1:
+            raise PromotionRefusedError() from ValueError(
+                "the opened bundles of a prospective holdout do not carry one computed dataset hash"
+            )
     for level, digest, bundle in chosen:
         refuse_reportable(trial_id, [(digest, bundle)])
         if bundle.provenance.holdout_state is not HoldoutState.OPENED:
             raise PromotionRefusedError() from ValueError(
                 f"the {level}x bundle says its holdout was {bundle.provenance.holdout_state.value}"
             )
-        if bundle.provenance.dataset_sha256 != protocol.holdout.dataset_sha256:
+        if not prospective and bundle.provenance.dataset_sha256 != protocol.holdout.dataset_sha256:
             raise PromotionRefusedError() from ValueError(
                 f"the {level}x bundle does not carry the protocol's declared holdout dataset hash"
             )

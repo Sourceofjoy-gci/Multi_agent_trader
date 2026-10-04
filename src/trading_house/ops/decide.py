@@ -34,10 +34,10 @@ Three properties are deliberate, and each is a place a shorter version would bre
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from trading_house.core.errors import EvidenceIntegrityError, PromotionRefusedError
 from trading_house.core.values import CanonicalModel, NonEmptyStr
@@ -47,6 +47,7 @@ from trading_house.ops.scenarios import declared_candidate, registered_protocol,
 from trading_house.ops.validate import read_validation_inputs, statistical_evidence
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
+from trading_house.research.holdout_window import SealedWindow
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.promotion import (
     Decision,
@@ -110,29 +111,87 @@ def _legacy_import(events: Sequence[LedgerEvent], trial_id: str) -> LegacyImport
 class _SealedHoldout(NamedTuple):
     states: dict[str, HoldoutState]
     levels: dict[str, Decimal]
+    windows: dict[str, SealedWindow]
+
+
+_OPENING = frozenset({HoldoutState.OPENED, HoldoutState.CONSUMED})
 
 
 def _sealed_holdout(
     events: Sequence[LedgerEvent], trial_id: str, store: EvidenceStore
 ) -> _SealedHoldout:
-    """State and cost level of the bundles sealed by this trial or one sharing its holdout."""
+    """State and cost level of the bundles sealed by this trial or one sharing its holdout,
+    and the window every sealed bundle in the chain read (Phase 12's unseen rule)."""
 
     states: dict[str, HoldoutState] = {}
     levels: dict[str, Decimal] = {}
-    # this trial's bundles, and those of the trials that share its holdout (and only those)
+    windows: dict[str, SealedWindow] = {}
+    # this trial's bundles, and those of the trials that share its holdout, for the states
     readable = {trial_id, *holdout_sharing_trials(trial_id, events)}
     for event in events:
-        if event.trial_id in readable and isinstance(event.payload, EvidenceSealedPayload):
-            digest = event.payload.evidence_sha256
-            bundle = store.read(digest)
+        if not isinstance(event.payload, EvidenceSealedPayload):
+            continue
+        digest = event.payload.evidence_sha256
+        bundle = store.read(digest)
+        windows[digest] = SealedWindow(
+            instrument_id=bundle.result.instrument_id,
+            timeframe=bundle.result.timeframe,
+            start=bundle.result.start,
+            end=bundle.result.end,
+            opened=bundle.provenance.holdout_state in _OPENING,
+        )
+        if event.trial_id in readable:
             states[digest] = bundle.provenance.holdout_state
             levels[digest] = bundle.result.cost_model.stress_multiplier
-    return _SealedHoldout(states, levels)
+    return _SealedHoldout(states, levels, windows)
 
 
-def _derived(events: Sequence[LedgerEvent], trial_id: str, store: EvidenceStore) -> HoldoutStatus:
+def chain_windows(events: Sequence[LedgerEvent], store: EvidenceStore) -> dict[str, SealedWindow]:
+    """The window every sealed bundle in the chain read."""
+
+    return _sealed_holdout(events, "", store).windows
+
+
+def registration_time(trial_id: str, ledger: PostgresTrialLedger) -> datetime | None:
+    """When the ledger recorded the trial's first registration: the lock's authority time.
+
+    ``recorded_at`` is the database's own clock on the append, not a time anyone declared;
+    a registration's declared ``occurred_at`` could be typed in after the data existed.
+    """
+
+    times = [
+        record.recorded_at
+        for record in ledger.events()
+        if record.event_type is LedgerEventType.PREREGISTERED
+        and any(
+            candidate.get("trial_id") == trial_id for candidate in _candidates_of(record.event_json)
+        )
+    ]
+    return min(times, default=None)
+
+
+def _candidates_of(event_json: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+    payload = event_json.get("payload")
+    protocol = payload.get("protocol") if isinstance(payload, Mapping) else None
+    candidates = protocol.get("candidates") if isinstance(protocol, Mapping) else None
+    return [c for c in candidates if isinstance(c, Mapping)] if isinstance(candidates, list) else []
+
+
+def _derived(
+    events: Sequence[LedgerEvent],
+    trial_id: str,
+    store: EvidenceStore,
+    registered_at: datetime | None,
+) -> HoldoutStatus:
     sealed = _sealed_holdout(events, trial_id, store)
-    return derive_holdout(trial_id, events, sealed.states, sealed.levels)
+    return derive_holdout(
+        trial_id,
+        events,
+        sealed.states,
+        sealed.levels,
+        sealed_windows=sealed.windows,
+        registered_at=registered_at,
+    )
 
 
 def holdout_status(
@@ -143,7 +202,7 @@ def holdout_status(
     events, _ = ledger.snapshot()
     if _legacy_import(events, trial_id) is None:
         registered_protocol(events, trial_id)
-    return _derived(events, trial_id, store)
+    return _derived(events, trial_id, store, registration_time(trial_id, ledger))
 
 
 def refuse_unopenable(
@@ -267,7 +326,7 @@ def decide_trial(
         head = evidence.evidence.chain_head
 
     spec = None if protocol is None else protocol.validation
-    holdout = _derived(events, trial_id, store)
+    holdout = _derived(events, trial_id, store, registration_time(trial_id, ledger))
     expectancies: tuple[Measurement | None, Measurement | None] = (None, None)
     if protocol is not None and holdout.state in {HoldoutState.OPENED, HoldoutState.CONSUMED}:
         # An OPENED holdout is consumed by ANY decision that follows, so a decision that

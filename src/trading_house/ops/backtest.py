@@ -36,6 +36,7 @@ from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import Side
 from trading_house.features.engine import BarReader
 from trading_house.research.backtest.engine import Backtester, BacktestRequest, ReplayClock
+from trading_house.research.backtest.liquidity import Liquidity
 from trading_house.research.backtest.mark import BacktestOutcome, derive_daily_returns
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import CostSummary, EvidenceBundle, EvidenceProvenance
@@ -142,6 +143,7 @@ def mark_to_market_bundle(
     occurred_at: datetime,
     registered_at: datetime,
     holdout_state: HoldoutState = HoldoutState.NOT_DEFINED,
+    liquidity: Liquidity | None = None,
 ) -> EvidenceBundle:
     """The bundle ``research trial record`` seals for one mark-to-market run.
 
@@ -209,6 +211,7 @@ def mark_to_market_bundle(
         # arithmetic.
         cost_attribution=attribution,
         sizing=outcome.sizing,
+        liquidity=liquidity,
         costs=CostSummary(
             status=CostAttributionStatus.COMPLETE,
             commission=sum((trade.commission for trade in result.trades), Decimal(0)),

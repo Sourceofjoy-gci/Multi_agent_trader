@@ -131,6 +131,7 @@ from trading_house.ops.control import (
 )
 from trading_house.ops.dataset import refuse_changed_dataset, refuse_dataset_mismatch, window_digest
 from trading_house.ops.decide import (
+    chain_windows,
     decide_trial,
     holdout_status,
     latest_report,
@@ -154,6 +155,7 @@ from trading_house.ops.scenarios import (
     declared_candidate,
     declared_grid,
     declared_window,
+    is_research_run,
     refuse_edited_protocol,
     refuse_other_attempts,
     refuse_reused_attempts,
@@ -166,22 +168,32 @@ from trading_house.ops.scenarios import (
 from trading_house.ops.splits import SplitsReport, splits_report
 from trading_house.ops.validate import read_validation_inputs, statistical_evidence
 from trading_house.research.backtest.costs import CostModel
-from trading_house.research.backtest.engine import BacktestRefused, BacktestRequest
+from trading_house.research.backtest.engine import (
+    BacktestRefused,
+    BacktestRequest,
+    replay_window_bars,
+)
+from trading_house.research.backtest.liquidity import trade_liquidity
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle, EvidenceStore
 from trading_house.research.ledger_store import PostgresTrialLedger
 from trading_house.research.legacy_import import import_phase7_artifact
 from trading_house.research.packages import PromotionStage, StrategyPackage
+from trading_house.research.promotion import holdout_preflight
 from trading_house.research.trial_ledger import (
     EvidenceSealedPayload,
+    HoldoutCollection,
     HoldoutState,
     LedgerRecord,
     LegacyImportedPayload,
     TrialProtocol,
     TrialSpec,
 )
-from trading_house.research.validation.capacity import capacity_diagnostic
+from trading_house.research.validation.capacity import (
+    CapacityDiagnostic,
+    capacity_diagnostic,
+)
 from trading_house.risk.engine import RiskEngine
 from trading_house.settings import RuntimeSettings
 from trading_house.strategies.registry import REGISTERED_STRATEGY_IDS, strategy_scope
@@ -2523,7 +2535,10 @@ def _seal_levels(
             start=window.start,
             end=window.end,
         ).dataset_sha256
-        refuse_dataset_mismatch(declared, computed)
+        # Phase 12: a prospective holdout was locked before its bars existed, so it declares
+        # no hash to compare with; this digest is its hash, and every opened level carries it.
+        if not (run.opening and run.parsed.holdout.collection is HoldoutCollection.PROSPECTIVE):
+            refuse_dataset_mismatch(declared, computed)
         for multiplier, request in requests.items():
             digests[multiplier] = _run_and_seal(
                 run, attempt_id=attempts[multiplier], request=request, preflight_digest=computed
@@ -2552,6 +2567,18 @@ def _run_and_seal(
         constitution=run.constitution,
     )
     refuse_changed_dataset(preflight_digest, outcome.dataset_sha256)
+    # Phase 12: a protocol that declared a capacity model seals the market volume at each
+    # fill, read from the same replay window the run read; the digest check above is what
+    # says the store did not change between the run and this read.
+    liquidity = None
+    if run.parsed.capacity is not None:
+        liquidity = trade_liquidity(
+            outcome.result.trades,
+            replay_window_bars(
+                _bar_store(), request.instrument_id, request.timeframe, request.start, request.end
+            ),
+            run.instrument_contract,
+        )
     bundle = mark_to_market_bundle(
         outcome,
         trial_id=run.trial_id,
@@ -2561,6 +2588,7 @@ def _run_and_seal(
         occurred_at=_as_utc(run.occurred_at),
         registered_at=_as_utc(run.registered_at),
         holdout_state=HoldoutState.OPENED if run.opening else HoldoutState.NOT_DEFINED,
+        liquidity=liquidity,
     )
     return seal_bundle(bundle, ledger=run.ledger, store=run.store)
 
@@ -2801,7 +2829,10 @@ def research_trial_compounding(
                 JsonValue,
                 json.loads(_compounding_report_for(trial_id, ledger, store).model_dump_json()),
             ),
-            "capacity": cast(JsonValue, json.loads(capacity_diagnostic(parsed).model_dump_json())),
+            "capacity": cast(
+                JsonValue,
+                json.loads(_capacity_for(trial_id, parsed, ledger, store).model_dump_json()),
+            ),
         }
 
     _run(operation)
@@ -2827,13 +2858,30 @@ def research_trial_capacity(
     """State what can be said about capacity for one registered candidate."""
 
     def operation() -> dict[str, JsonValue]:
-        protocol = registered_protocol(_trial_ledger().replay(), trial_id)
+        ledger = _trial_ledger()
+        protocol = registered_protocol(ledger.replay(), trial_id)
         # Nested: the diagnostic's own ``status`` would otherwise replace the
         # envelope's ``status`` key.
-        diagnostic = json.loads(capacity_diagnostic(protocol).model_dump_json())
-        return {"capacity": cast(JsonValue, diagnostic)}
+        diagnostic = _capacity_for(trial_id, protocol, ledger, _evidence_store())
+        return {"capacity": cast(JsonValue, json.loads(diagnostic.model_dump_json()))}
 
     _run(operation)
+
+
+def _capacity_for(
+    trial_id: str, protocol: TrialProtocol, ledger: PostgresTrialLedger, store: EvidenceStore
+) -> CapacityDiagnostic:
+    """Capacity of the trial's sealed 1.0x baseline, or unavailable while none is sealed.
+
+    More than one sealed baseline is refused, exactly as ``validate`` refuses it: picking one
+    would be a silent selection.
+    """
+
+    sealed = sealed_bundles(ledger.events_for(trial_id), store.read)
+    research = [item for item in sealed if is_research_run(item[1])]
+    if not research:
+        return capacity_diagnostic(protocol)
+    return capacity_diagnostic(protocol, sealed_baseline(sealed, trial_id)[1])
 
 
 def _splits_report_for(
@@ -3002,6 +3050,32 @@ def research_trial_holdout(
     def operation() -> dict[str, JsonValue]:
         status = holdout_status(trial_id, _trial_ledger(), _evidence_store())
         return cast(dict[str, JsonValue], json.loads(status.model_dump_json()))
+
+    _run(operation)
+
+
+@trial_app.command("holdout-check")
+def research_trial_holdout_check(
+    protocol: Annotated[Path, typer.Option("--protocol", exists=False)],
+) -> None:
+    """Before registering: would this protocol's locked holdout derive as unseen today?
+
+    Applies the same rules the holdout state is derived by (Phase 12) to a protocol that is
+    not registered yet: its window must not reach into its own research window, no sealed run
+    in the chain may have read bars of its instrument inside it, and a prospective window must
+    start after now. Read only. ``unseen`` false names every reason.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        parsed = _load_json_model(protocol, TrialProtocol)
+        events, _ = _trial_ledger().snapshot()
+        reasons = holdout_preflight(
+            parsed,
+            events,
+            chain_windows(events, _evidence_store()),
+            now=SystemClock().now(),
+        )
+        return {"unseen": not reasons, "reasons": list(reasons)}
 
     _run(operation)
 

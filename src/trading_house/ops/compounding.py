@@ -36,7 +36,7 @@ from trading_house.research.backtest.result import BacktestResult
 from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.canonical import canonical_sha256
 from trading_house.research.evidence import EvidenceBundle
-from trading_house.research.trial_ledger import TrialProtocol
+from trading_house.research.trial_ledger import HoldoutCollection, TrialProtocol
 
 
 class CompoundingRun(CanonicalModel):
@@ -270,7 +270,10 @@ def refuse_unfaithful(
         )
     carried = bundle.provenance.dataset_sha256
     declared_dataset = protocol.holdout.dataset_sha256 if opened else protocol.data.dataset_sha256
-    if carried is not None and carried != declared_dataset:
+    # A prospective holdout declares no hash: its opening computes one, and ``decide``
+    # checks the opened levels carry the same one (Phase 12).
+    computed_at_opening = opened and protocol.holdout.collection is HoldoutCollection.PROSPECTIVE
+    if carried is not None and not computed_at_opening and carried != declared_dataset:
         raise ScenarioEvidenceError() from ValueError(
             f"the {bundle.sizing.value} run was sealed on dataset {carried}; "
             f"the protocol declares {declared_dataset}"

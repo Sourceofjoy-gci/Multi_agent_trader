@@ -28,8 +28,10 @@ from pydantic import ValidationError
 
 from tests.unit.ops.test_scenarios import _preregistered_event, _protocol
 from trading_house.core.errors import PromotionRefusedError
+from trading_house.marketdata.models import Timeframe
 from trading_house.research import promotion
 from trading_house.research.canonical import DOMAIN_SEPARATOR, canonical_sha256
+from trading_house.research.holdout_window import SealedWindow
 from trading_house.research.promotion import (
     GATE_NAMES,
     REASON_COST_NOT_ATTRIBUTED,
@@ -54,6 +56,7 @@ from trading_house.research.promotion import (
     policy_sha256,
 )
 from trading_house.research.trial_ledger import (
+    CapacitySpec,
     CostAttributionStatus,
     EvidenceSealedPayload,
     GateDecidedPayload,
@@ -290,6 +293,8 @@ def _decided(trial_id: str = TRIAL) -> LedgerEvent:
 
 O1, O2, W = "1" * 64, "2" * 64, "3" * 64
 O15, O20, ORPHAN = "a" * 64, "b" * 64, "c" * 64
+FAR = "d" * 64
+"""An opening of some other holdout, over a window that does not touch this one's."""
 OPENED = HoldoutState.OPENED
 STATES = {
     O1: HoldoutState.OPENED,
@@ -301,6 +306,7 @@ STATES = {
     "4" * 64: HoldoutState.CONSUMED,
     "5" * 64: HoldoutState.CONTAMINATED,
     "6" * 64: HoldoutState.NOT_DEFINED,
+    FAR: HoldoutState.OPENED,
 }
 
 
@@ -314,8 +320,33 @@ LEVELS = {
 """O1 and O2 ran the SAME level (1x, spelled two ways); O15 and O20 are the other two."""
 
 
+def _window(*, opened: bool, start: datetime, end: datetime) -> SealedWindow:
+    return SealedWindow(
+        instrument_id="fx.eurusd", timeframe=Timeframe.M15, start=start, end=end, opened=opened
+    )
+
+
+_IN_HOLDOUT = {"start": datetime(2026, 1, 5, tzinfo=UTC), "end": datetime(2026, 1, 20, tzinfo=UTC)}
+_ELSEWHERE = {"start": datetime(2025, 3, 1, tzinfo=UTC), "end": datetime(2025, 4, 1, tzinfo=UTC)}
+WINDOWS = {
+    digest: _window(
+        opened=state in {OPENED, HoldoutState.CONSUMED},
+        **(
+            _IN_HOLDOUT
+            if state in {OPENED, HoldoutState.CONSUMED} and digest != FAR
+            else _ELSEWHERE
+        ),
+    )
+    for digest, state in STATES.items()
+}
+"""Phase 12: the bars each sealed digest read. An opening read the holdout window; every
+other bundle here read a research window outside it."""
+
+
 def _derive(*events: LedgerEvent, trial_id: str = TRIAL) -> HoldoutStatus:
-    return derive_holdout(trial_id, events, STATES, LEVELS)
+    return derive_holdout(
+        trial_id, events, STATES, LEVELS, sealed_windows=WINDOWS, registered_at=None
+    )
 
 
 def test_legacy_evidence_is_contaminated_whatever_else_the_chain_says() -> None:
@@ -382,12 +413,21 @@ def test_a_decision_with_no_opening_leaves_a_locked_holdout_locked() -> None:
 def test_another_trials_opening_and_decision_do_not_touch_this_trial() -> None:
     status = _derive(
         _registered(HoldoutState.LOCKED),
-        _sealed(O1, trial_id="other"),
+        _sealed(FAR, trial_id="other"),
         _decided(trial_id="other"),
         _legacy(trial_id="other"),
     )
 
     assert status.state is HoldoutState.LOCKED
+
+
+def test_another_trials_run_inside_the_window_contaminates_it() -> None:
+    """Phase 12: unseen means no run in the chain read those bars, whoever's run it was."""
+
+    status = _derive(_registered(HoldoutState.LOCKED), _sealed(O1, trial_id="other"))
+
+    assert status.state is HoldoutState.CONTAMINATED
+    assert "trial other's sealed run read fx.eurusd M15 bars" in status.reason
 
 
 def test_the_three_bundles_of_one_opening_are_one_opening() -> None:
@@ -413,7 +453,14 @@ def test_a_bundle_at_an_already_opened_level_is_a_second_opening_after_a_whole_o
 
 def test_an_opened_bundle_with_no_known_cost_level_is_refused_not_guessed() -> None:
     with pytest.raises(PromotionRefusedError):
-        derive_holdout(TRIAL, (_registered(HoldoutState.LOCKED), _sealed(ORPHAN)), STATES, LEVELS)
+        derive_holdout(
+            TRIAL,
+            (_registered(HoldoutState.LOCKED), _sealed(ORPHAN)),
+            STATES,
+            LEVELS,
+            sealed_windows=WINDOWS,
+            registered_at=None,
+        )
 
 
 def test_a_second_opened_bundle_contaminates_and_it_never_heals() -> None:
@@ -465,7 +512,14 @@ def test_the_same_registration_twice_is_one_registration() -> None:
 
 def test_sealed_evidence_with_no_known_holdout_state_is_refused_not_guessed() -> None:
     with pytest.raises(PromotionRefusedError):
-        derive_holdout(TRIAL, (_registered(HoldoutState.LOCKED), _sealed("7" * 64)), STATES, LEVELS)
+        derive_holdout(
+            TRIAL,
+            (_registered(HoldoutState.LOCKED), _sealed("7" * 64)),
+            STATES,
+            LEVELS,
+            sealed_windows=WINDOWS,
+            registered_at=None,
+        )
 
 
 # --- one holdout, however many trials declare it (amended 2026-10-02 after the 8D2 review) ----
@@ -534,10 +588,21 @@ def test_a_second_protocol_naming_the_same_window_and_hash_cannot_reopen_a_spent
 def test_trials_with_a_different_window_or_hash_are_unaffected(change: dict[str, Any]) -> None:
     mine, theirs = _family(TRIAL), _family(OTHER, version="2", **change)
 
-    status = _derive(mine, theirs, _sealed(O1, trial_id=OTHER), trial_id=TRIAL)
+    status = _derive(mine, theirs, _sealed(FAR, trial_id=OTHER), trial_id=TRIAL)
 
     assert status.state is HoldoutState.LOCKED
     assert holdout_sharing_trials(TRIAL, (mine, theirs)) == frozenset()
+
+
+def test_a_different_holdout_over_the_same_bars_contaminates_once_opened() -> None:
+    """A different hash is a different holdout, but opening it read the same market: once
+    another trial's opening read bars inside this window, this window is seen (Phase 12)."""
+
+    mine, theirs = _family(TRIAL), _family(OTHER, version="2", hash_="8" * 64)
+
+    status = _derive(mine, theirs, _sealed(O1, trial_id=OTHER), trial_id=TRIAL)
+
+    assert status.state is HoldoutState.CONTAMINATED
 
 
 def test_a_start_that_differs_is_a_different_holdout() -> None:
@@ -1057,15 +1122,72 @@ def test_gate_two_with_an_opened_holdout_but_an_absent_measurement_is_unavailabl
     assert "not both supplied" in gate.reason
 
 
-def test_gate_nine_is_unavailable_for_every_candidate_and_the_capacity_enum_has_one_member() -> (
-    None
-):
-    assert set(CapacityStatus) == {CapacityStatus.UNAVAILABLE}
+def test_gate_nine_is_unavailable_with_no_declared_model() -> None:
     gate = _gates(_evidence())[9]
 
     assert gate.status is GateStatus.UNAVAILABLE
     assert gate.measured_value is None
     assert "no model" in gate.reason
+
+
+_CAPACITY_SPEC = CapacitySpec(
+    model="tick_volume_participation_v1",
+    lots_per_tick=Decimal("0.01"),
+    target_equity=Decimal(200000),
+    max_participation=Decimal("0.05"),
+    impact_points_at_full_participation=Decimal(4),
+    max_impact_fraction_of_edge=Decimal("0.5"),
+)
+
+
+def _capacity(**overrides: object) -> StatisticalEvidence:
+    fields: dict[str, object] = {
+        "status": CapacityStatus.MEASURED,
+        "reason": "measured",
+        "spec": _CAPACITY_SPEC,
+        "fills": 4,
+        "zero_volume_fills": 0,
+        "max_participation": Decimal("0.05"),
+        "impact_cost": Decimal(150),
+        "net_edge": Decimal(300),
+        "impact_fraction_of_edge": Decimal("0.5"),
+    }
+    fields.update(overrides)
+    return _evidence().model_copy(update={"capacity": CapacityDiagnostic(**fields)})
+
+
+def test_gate_nine_passes_at_both_declared_limits() -> None:
+    gate = _gates(_capacity())[9]
+
+    assert gate.status is GateStatus.PASS
+    assert gate.measured_value == 0.05
+    assert gate.threshold == 0.05
+
+
+@pytest.mark.parametrize(
+    ("overrides", "names"),
+    [
+        ({"max_participation": Decimal("0.0501")}, "exceeds the declared 0.05"),
+        ({"impact_fraction_of_edge": Decimal("0.5001")}, "above the declared 0.5"),
+        ({"zero_volume_fills": 1}, "zero tick volume"),
+        ({"net_edge": Decimal(-1), "impact_fraction_of_edge": None}, "no edge to spend"),
+    ],
+    ids=["participation", "impact-budget", "zero-volume", "no-edge"],
+)
+def test_gate_nine_fails_on_each_declared_limit(overrides: dict, names: str) -> None:
+    gate = _gates(_capacity(**overrides))[9]
+
+    assert gate.status is GateStatus.FAIL
+    assert names in gate.reason
+
+
+def test_gate_nine_names_every_failing_clause() -> None:
+    gate = _gates(_capacity(max_participation=Decimal(1), impact_fraction_of_edge=Decimal(1)))[9]
+
+    assert gate.status is GateStatus.FAIL
+    assert "exceeds the declared" in gate.reason
+    assert "above the declared" in gate.reason
+    assert gate.measured_value == 1.0
 
 
 def test_without_statistical_evidence_every_research_gate_is_unavailable_and_says_so() -> None:

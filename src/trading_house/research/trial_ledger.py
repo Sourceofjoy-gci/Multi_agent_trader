@@ -160,11 +160,37 @@ class RegimeSpec(CanonicalModel):
         return self
 
 
+def _is_absent(value: object) -> bool:
+    """``Field(exclude_if=...)``: an absent optional field leaves no key in the bytes, so a
+    protocol registered before the field existed keeps its canonical digest."""
+
+    return value is None
+
+
+class HoldoutCollection(str, Enum):  # noqa: UP042
+    """When the holdout's data comes into being relative to its lock (Phase 12).
+
+    ``retrospective``: the bars already exist when the holdout is locked, so the lock declares
+    their hash. ``prospective``: the window starts after the lock -- nobody can have seen data
+    that did not exist yet -- so there is no hash to declare; the opening computes it.
+    """
+
+    RETROSPECTIVE = "retrospective"
+    PROSPECTIVE = "prospective"
+
+
+def _is_retrospective(value: object) -> bool:
+    return value is HoldoutCollection.RETROSPECTIVE
+
+
 class HoldoutSpec(CanonicalModel):
     state: HoldoutState
     start: datetime | None = None
     end: datetime | None = None
     dataset_sha256: NonEmptyStr | None = None
+    collection: HoldoutCollection = Field(
+        default=HoldoutCollection.RETROSPECTIVE, exclude_if=_is_retrospective
+    )
 
     @field_validator("start", "end")
     @classmethod
@@ -172,7 +198,26 @@ class HoldoutSpec(CanonicalModel):
         return _utc(value) if value is not None else None
 
     @model_validator(mode="after")
+    def a_prospective_holdout_declares_no_hash(self) -> Self:
+        """A hash of bars that do not exist yet can only be invented; and a prospective holdout
+        with no window has nothing to collect."""
+
+        if self.collection is not HoldoutCollection.PROSPECTIVE:
+            return self
+        if self.dataset_sha256 is not None:
+            raise ValueError("a prospective holdout cannot declare the hash of future data")
+        if self.start is None or self.end is None:
+            raise ValueError("a prospective holdout requires its window")
+        if self.start >= self.end:
+            raise ValueError("holdout start must precede end")
+        if self.state is HoldoutState.NOT_DEFINED:
+            raise ValueError("a prospective holdout is a locked one")
+        return self
+
+    @model_validator(mode="after")
     def dates_match_state(self) -> Self:
+        if self.collection is HoldoutCollection.PROSPECTIVE:
+            return self
         parts = (self.start, self.end, self.dataset_sha256)
         any_set = any(part is not None for part in parts)
         all_set = all(part is not None for part in parts)
@@ -188,6 +233,29 @@ class HoldoutSpec(CanonicalModel):
         if self.start is not None and self.end is not None and self.start >= self.end:
             raise ValueError("holdout start must precede end")
         return self
+
+
+class CapacitySpec(CanonicalModel):
+    """A declared capital-capacity model (umbrella 7.7 and gate 9), frozen at registration.
+
+    ``tick_volume_participation_v1``: each fill takes ``lots x scale`` from a bar on which the
+    market traded ``tick_volume x lots_per_tick`` lots, where ``scale`` is ``target_equity`` over
+    the run's own equity (constant-notional lots scale linearly with equity). Two predeclared
+    limits: no fill may take more than ``max_participation`` of its bar, and square-root market
+    impact -- ``impact_points_at_full_participation x sqrt(participation)`` points a fill --
+    may cost at most ``max_impact_fraction_of_edge`` of the run's net P&L at that scale.
+
+    ``lots_per_tick`` is the operator's assumption, not a measurement: MetaTrader 5's tick
+    volume counts price updates, not lots. That is why it must be declared before any result
+    exists, and why a protocol that declares nothing leaves capacity unavailable.
+    """
+
+    model: Literal["tick_volume_participation_v1"]
+    lots_per_tick: PositiveDecimal
+    target_equity: PositiveDecimal
+    max_participation: Annotated[Decimal, Field(gt=0, le=1)]
+    impact_points_at_full_participation: Annotated[Decimal, Field(ge=0)]
+    max_impact_fraction_of_edge: Annotated[Decimal, Field(gt=0, le=1)]
 
 
 class TrialSpec(CanonicalModel):
@@ -211,6 +279,8 @@ class TrialProtocol(CanonicalModel):
     regimes: RegimeSpec
     holdout: HoldoutSpec
     candidates: tuple[TrialSpec, ...]
+    # Phase 12. Absent leaves no key, so every protocol registered before it keeps its digest.
+    capacity: CapacitySpec | None = Field(default=None, exclude_if=_is_absent)
 
     @model_validator(mode="after")
     def candidate_family_is_complete_and_unique(self) -> Self:

@@ -1,4 +1,4 @@
-# Trading House — Phase 11 Safe Mode and Kill Switches
+# Trading House — Phase 12 Capacity Model and Unseen Holdout
 
 > **This repository can place orders, and only ever against a demo account.**
 > Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
@@ -9,7 +9,9 @@
 > portfolio, so every limit the constitution signs is now enforced, and
 > `order submit` re-checks a decision against the live account before sending.
 > Phase 11 adds safe mode, kill switches at four scopes, latched drawdown
-> halts, and webhook alerts; only a named person clears a halt.
+> halts, and webhook alerts; only a named person clears a halt. Phase 12 makes
+> gate 9 measurable against a declared capacity model, and makes "unseen" a
+> checked property of a holdout, including one locked before its data exists.
 >
 > **There is still no funded account, LLM agent, or demonstrated edge.** The
 > MT5 gateway refuses every non-demo login, and MetaTrader 5 is reachable from
@@ -1648,7 +1650,8 @@ position that was still open (and so is not among the trades) when a run ended.
 
 `capacity` states `unavailable` for any registered candidate and gives its reason:
 a protocol can declare no volume-to-lots model, and tick volume alone is never
-presented as capital capacity. No proxy figure is produced, because a number nobody
+presented as capital capacity. (Since Phase 12 a protocol can declare one, and
+capacity is then measured; without a declaration this paragraph still holds.) No proxy figure is produced, because a number nobody
 can use honestly is noise in a later gate's input. An unregistered trial is refused
 as `scenario-report` refuses it.
 
@@ -2160,7 +2163,8 @@ uv run trading-house research trial holdout --trial-id T
 - **Gate 2 (the holdout) and gate 9 (capacity) are `UNAVAILABLE` for every candidate today**,
   so every decision is `REJECTED` today. No holdout has ever been opened for any candidate:
   the machinery is proven on synthetic locked windows only (8D2 adds the one-time opening).
-  No volume-to-lots model can be declared, so capacity is `unavailable`.
+  Before Phase 12 no volume-to-lots model could be declared, so capacity was `unavailable`;
+  it still is for every candidate registered before Phase 12.
 - **Before Phase 8E every `backtest run` sealed no dataset hash**, so a prospective trial run
   through the repository's own commands carried the reason "dataset-content hash is
   unavailable" as well. That is now true only of legacy imports and of runs sealed before 8E;
@@ -2286,7 +2290,8 @@ uv run trading-house research package verify --file package.json
 ### What 8D2 cannot do
 
 - **No real candidate can reach `RESEARCH_PASSED` or `PAPER_APPROVED` today.** Gate 9 (capacity)
-  is `UNAVAILABLE` for every candidate and is a research gate, so no real decision allows an
+  is `UNAVAILABLE` for every candidate registered so far (Phase 12 lets a new one declare a
+  model) and is a research gate, so no real decision allows an
   opening and no real opening exists. The opening and the package rules are proven by tests that
   put a decision on the chain through a named test helper
   (`tests/integration/research/synthetic_decision.py`): it builds a sealed report whose nine gates
@@ -2399,12 +2404,15 @@ judges any trial a ledger declares, a legacy import included: a Phase 7 artifact
 `REJECTED`, stage `SANDBOX`, with every reason its evidence supports (a test shows all six).
 
 **What blocks promotion.** No candidate can currently be promoted. Three things are missing, and
-each lives outside this repository:
+since Phase 12 each lives outside this repository's code:
 
-1. **A capacity model.** Gate 9 needs a declared volume-to-lots model, and no protocol can declare
-   one; capacity is `UNAVAILABLE` for every candidate, so none reaches `RESEARCH_PASSED`.
+1. **A capacity declaration.** Gate 9 needs a declared volume-to-lots model. Since Phase 12 a
+   protocol can declare one (`capacity`, see *Phase 12*), but no registered candidate has, so
+   capacity is `UNAVAILABLE` for every candidate and none reaches `RESEARCH_PASSED`.
 2. **A real locked holdout with a computable dataset hash.** No holdout has ever been collected for
-   any candidate. Since Phase 8E the code can hash a stored bar window and refuses a run or an
+   any candidate. Since Phase 12 a holdout must also be unseen by every sealed run on its
+   instrument, which rules out EURUSD after 2022-09-16 retrospectively; a prospective holdout
+   can be locked now and opened once its window has passed. Since Phase 8E the code can hash a stored bar window and refuses a run or an
    opening whose stored bars do not hash to the declared digest, but there is still no collected
    holdout window to lock and hash. A run sealed before 8E carries no dataset hash, which is its
    own blocking reason, as is every legacy import.
@@ -2427,7 +2435,8 @@ which proves what bytes the replay read and nothing about where they came from.
 
 **What a human must supply.** The capacity model (a volume-to-lots declaration in a new
 protocol, which needs a new trial), a collected and locked holdout window with its dataset hash
-(`research dataset digest` prints it from the store),
+(`research dataset digest` prints it from the store) or a prospective window locked before its
+data exists (`research trial holdout-check` says whether either would derive as unseen),
 and the authorization, capital authorization and signature references, in that order. Until all
 three exist the framework answers as it was built to: `REJECTED`, stage `SANDBOX`, with the
 reasons.
@@ -2626,6 +2635,77 @@ uv run trading-house control flatten --operator ana
 - `operator` is whoever you say you are, recorded verbatim. `system` is
   reserved for the system's own halts.
 
+## Phase 12 — the capacity model and an unseen holdout
+
+Design: [Phase 12](docs/superpowers/specs/2026-10-04-phase-12-capacity-and-holdout-design.md).
+
+Two of the three promotion blockers were in this repository's code; both are closed.
+
+**Capacity is declared, then measured.** A protocol may carry a `capacity` block, written
+before any result exists:
+
+```json
+"capacity": {
+  "model": "tick_volume_participation_v1",
+  "lots_per_tick": "0.01",
+  "target_equity": "200000",
+  "max_participation": "0.05",
+  "impact_points_at_full_participation": "4",
+  "max_impact_fraction_of_edge": "0.5"
+}
+```
+
+A run under that protocol seals each fill's bar `tick_volume` beside its trades
+(`EvidenceBundle.liquidity`). Gate 9 then scales the run to `target_equity` and measures:
+
+- each fill's share of its bar (`lots / (tick_volume × lots_per_tick)`);
+- a square-root impact cost, `k × √participation` points per fill;
+- the net edge at that scale.
+
+It fails, naming every failing clause, on:
+
+- a fill on a zero-volume bar;
+- participation above the limit;
+- a non-positive edge;
+- impact above its declared share of the edge.
+
+`lots_per_tick` is the protocol's assumption, not a fact this code checks: MT5 tick volume
+counts price updates, not lots. Without a `capacity` block, or for any bundle sealed before
+Phase 12, capacity stays `unavailable` with its reason.
+
+**A holdout is unseen only if nothing in the chain read it.** On top of 8D2's open-once rule, a
+holdout now derives `contaminated` when its window reaches into its own research window, or when
+any sealed run on the same instrument, by any trial, read a bar inside it. Windows are inclusive
+bar open times, the bars `backtest run` replays. Phase 7's legacy runs read EURUSD from 2022-09-16
+to 2026-09-25, so a retrospective EURUSD holdout must lie before that span.
+
+**A prospective holdout is locked before its data exists.** It declares a window and no hash:
+
+```json
+"holdout": {
+  "state": "locked",
+  "collection": "prospective",
+  "start": "2026-11-02T00:00:00Z",
+  "end": "2027-01-29T23:00:00Z"
+}
+```
+
+It derives `contaminated` if its window started before the ledger recorded the registration. The
+ledger's own `recorded_at` is used, not a declared time. Once the window has passed and its bars
+are ingested, `open-holdout` seals each level with the digest the run computed over them, and
+`decide` requires the 1.5x and 2.0x openings to carry the same one.
+
+### Commands
+
+```bash
+# Before registering: would this protocol's holdout derive as unseen? Names every reason not.
+uv run trading-house research trial holdout-check --protocol protocol.json
+# The measured capacity of a registered candidate whose protocol declares a model.
+uv run trading-house research trial capacity --trial-id trial-1
+```
+
+`holdout-check` sees only the chain. A person who studied a chart of the window is invisible to it.
+
 ## Operator commands
 
 ```bash
@@ -2656,7 +2736,8 @@ uv run trading-house --help
 | `trading-house research trial report` | Print the validation report the trial's last recorded decision names, re-read from the evidence store. Read only; 17 if the report is missing or altered, 21 if no decision is recorded |
 | `trading-house research trial holdout` | Print the holdout state derived from the chain for a declared trial: not defined, locked, opened, consumed or contaminated, with the reason. Read only |
 | `trading-house research trial open-holdout` | Open the locked holdout once: run the protocol's cost grid over its holdout window as three attempts and seal three bundles whose provenance says the holdout was opened, with the digest each run computed over the holdout window's stored bars (Phase 8E). Takes `scenarios`' options and no window or cost option. Refuses before any write unless the derived holdout is locked and the latest decision is the research pass (21), a window outside the stored bars, stored bars that do not hash to the declared holdout dataset hash (19), an edited `--protocol` file, other replay inputs than the research baseline's, or an invalid option (19 or 2). A second invocation is refused. `decide` then reads the opened 1.5x and 2.0x bundles |
-| `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `unavailable`, with its reason |
+| `trading-house research trial capacity` | State the capacity diagnostic for a registered candidate: `measured` against its protocol's declared model (max participation, impact cost, net edge at the target equity, impact share of edge, zero-volume fills), or `unavailable` with its reason |
+| `trading-house research trial holdout-check` | Before registering: say whether `--protocol`'s locked holdout would derive as unseen today, naming every reason it would not (reaches into its research window, a sealed run on the instrument already read it, a prospective window that has already begun). Read only |
 | `trading-house research trial import-legacy` | Import a preserved Phase 7 result as `LEGACY_UNPREGISTERED` evidence, idempotently |
 | `trading-house research trial show` | Replay one trial's chain rows and the evidence they reference |
 | `trading-house research trial count` | Report audit attempts, selection lotteries and effective specifications |

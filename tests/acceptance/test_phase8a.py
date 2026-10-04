@@ -114,6 +114,7 @@ TRIAL_COMMANDS = (
     "decide",
     "report",
     "holdout",
+    "holdout-check",
     "open-holdout",
     "verify",
 )

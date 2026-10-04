@@ -32,11 +32,17 @@ from pydantic import Field, NonNegativeInt, ValidationError, model_validator
 from trading_house.core.errors import PromotionRefusedError
 from trading_house.core.values import CanonicalModel, FiniteFloat, NonEmptyStr
 from trading_house.research.canonical import canonical_sha256
+from trading_house.research.holdout_window import (
+    RecordedAt,
+    SealedWindow,
+    research_reaches_into,
+)
 from trading_house.research.packages import PromotionStage, StrategyPackage, StrategySpec
 from trading_house.research.trial_ledger import (
     CostAttributionStatus,
     EvidenceSealedPayload,
     GateDecidedPayload,
+    HoldoutCollection,
     HoldoutState,
     LedgerEvent,
     LegacyImportedPayload,
@@ -174,14 +180,20 @@ def _status(state: HoldoutState, reason: str, opened: int = 0) -> HoldoutStatus:
 
 
 HoldoutKey = tuple[object, object, str]
-"""A declared holdout's identity: its start, its end and its dataset hash."""
+"""A declared holdout's identity: its start, its end and its dataset hash -- or, for a
+prospective holdout, which has no hash until it is opened, the series it will be."""
 
 
 def _holdout_key(protocol: TrialProtocol) -> HoldoutKey | None:
     """The identity of a declared holdout; ``None`` if the protocol declares no dates or hash."""
 
     spec = protocol.holdout
-    if spec.start is None or spec.end is None or spec.dataset_sha256 is None:
+    if spec.start is None or spec.end is None:
+        return None
+    if spec.collection is HoldoutCollection.PROSPECTIVE:
+        data = protocol.data
+        return (spec.start, spec.end, f"prospective:{data.instrument_id}:{data.timeframe.value}")
+    if spec.dataset_sha256 is None:
         return None
     return (spec.start, spec.end, spec.dataset_sha256)
 
@@ -215,6 +227,9 @@ def derive_holdout(
     events: Sequence[LedgerEvent],
     sealed_holdout_states: Mapping[str, HoldoutState],
     sealed_levels: Mapping[str, Decimal],
+    *,
+    sealed_windows: Mapping[str, SealedWindow],
+    registered_at: RecordedAt | None,
 ) -> HoldoutStatus:
     """The holdout state of one trial, replayed from the chain (P-8). Never stored.
 
@@ -242,9 +257,20 @@ def derive_holdout(
     and 2.0x, all opened). The 8D1 text counted every opened bundle as an opening, which made
     that opening contaminate itself on its second bundle; a second opening is one that runs
     a cost level the first already ran.
+
+    Phase 12 adds what "unseen" means, from evidence the chain holds. A holdout is
+    contaminated when its window reaches into the protocol's own research window; when ANY
+    sealed bundle in the chain, of any trial, read bars of the same instrument (any timeframe)
+    inside it, other than this holdout's own opening; and, for a prospective holdout, when its
+    window starts before the registration was recorded -- the lock must come before the data.
+    ``sealed_windows`` must hold every sealed digest in the chain, and ``registered_at`` is
+    the ledger's own ``recorded_at`` for the trial's first registration (never a declared
+    time): both are refusals when missing, never skipped checks. The chain can only show
+    what this system ran. A person who studied a chart of the window is invisible to it.
     """
 
     registered: list[tuple[str, HoldoutState]] = []
+    registered_protocol: TrialProtocol | None = None
     legacy = False
     for event in events:
         payload = event.payload
@@ -252,6 +278,7 @@ def derive_holdout(
             candidate.trial_id == trial_id for candidate in payload.protocol.candidates
         ):
             registered.append((canonical_sha256(payload.protocol), payload.protocol.holdout.state))
+            registered_protocol = payload.protocol
         elif isinstance(payload, LegacyImportedPayload) and event.trial_id == trial_id:
             legacy = True
     if legacy:
@@ -273,6 +300,11 @@ def derive_holdout(
             f"the protocol registered its holdout as {protocol_state.value}: an opening "
             "before the research gates is an inspection before lock",
         )
+    if registered_protocol is None:  # pragma: no cover - registered is non-empty above
+        raise PromotionRefusedError()
+    unseen = _seen_before_lock(registered_protocol, registered_at)
+    if unseen is not None:
+        return _status(HoldoutState.CONTAMINATED, unseen)
 
     sharing = holdout_sharing_trials(trial_id, events)
     for event in events:
@@ -287,6 +319,9 @@ def derive_holdout(
                     HoldoutState.CONTAMINATED,
                     f"this holdout was opened by trial {event.trial_id}",
                 )
+    read = _read_by_another_run(registered_protocol, trial_id, sharing, events, sealed_windows)
+    if read is not None:
+        return _status(HoldoutState.CONTAMINATED, read)
     opened: dict[str, Decimal] = {}
     consumed = False
     for event in events:
@@ -337,6 +372,102 @@ def derive_holdout(
     if protocol_state is HoldoutState.LOCKED:
         return _status(HoldoutState.LOCKED, "the protocol locked a holdout; nothing has opened it")
     return _status(HoldoutState.NOT_DEFINED, "the protocol defines no holdout")
+
+
+def _seen_before_lock(protocol: TrialProtocol, registered_at: RecordedAt | None) -> str | None:
+    """Why the declared window cannot be unseen by its own protocol, or ``None``."""
+
+    spec = protocol.holdout
+    if spec.start is None or spec.end is None:
+        return None
+    data = protocol.data
+    if research_reaches_into(data.start, data.end, spec.start, spec.end):
+        return (
+            f"the holdout window [{spec.start}, {spec.end}] reaches into the research window "
+            f"[{data.start}, {data.end}] it is meant to be unseen by"
+        )
+    if spec.collection is HoldoutCollection.PROSPECTIVE:
+        if registered_at is None:
+            raise PromotionRefusedError() from ValueError(
+                "a prospective holdout needs its registration's recorded time to derive"
+            )
+        if spec.start < registered_at:
+            return (
+                f"the prospective holdout starts at {spec.start}, before its lock was recorded "
+                f"at {registered_at}: part of its data existed when it was locked"
+            )
+    return None
+
+
+def _read_by_another_run(
+    protocol: TrialProtocol,
+    trial_id: str,
+    sharing: frozenset[str],
+    events: Sequence[LedgerEvent],
+    sealed_windows: Mapping[str, SealedWindow],
+) -> str | None:
+    """Which sealed run already read bars inside the holdout window, or ``None``."""
+
+    spec = protocol.holdout
+    if spec.start is None or spec.end is None:
+        return None
+    own = {trial_id, *sharing}
+    for event in events:
+        payload = event.payload
+        if not isinstance(payload, EvidenceSealedPayload):
+            continue
+        window = sealed_windows.get(payload.evidence_sha256)
+        if window is None:
+            raise PromotionRefusedError() from ValueError(
+                f"sealed evidence {payload.evidence_sha256} has no window to derive from"
+            )
+        if window.opened and event.trial_id in own:
+            continue
+        if window.instrument_id == protocol.data.instrument_id and window.reaches_into(
+            spec.start, spec.end
+        ):
+            return (
+                f"trial {event.trial_id}'s sealed run read {window.instrument_id} "
+                f"{window.timeframe.value} bars from {window.start} to {window.end}, inside the "
+                "holdout window"
+            )
+    return None
+
+
+def holdout_preflight(
+    protocol: TrialProtocol,
+    events: Sequence[LedgerEvent],
+    sealed_windows: Mapping[str, SealedWindow],
+    *,
+    now: RecordedAt,
+) -> tuple[str, ...]:
+    """Why ``protocol``'s holdout would not derive as unseen if registered at ``now``.
+
+    The same rules ``derive_holdout`` applies, asked before registration so an operator can
+    choose a window the chain has not read. ``now`` stands in for the registration's recorded
+    time, which can only be later -- so a prospective window that starts before ``now`` is
+    already too late. Empty means nothing in the chain rules the window out; a person who
+    studied a chart of it is still invisible here.
+    """
+
+    spec = protocol.holdout
+    if spec.state is not HoldoutState.LOCKED or spec.start is None or spec.end is None:
+        return ("the protocol declares no locked holdout",)
+    reasons = [
+        reason
+        for reason in (
+            _seen_before_lock(protocol, now),
+            _read_by_another_run(
+                protocol,
+                trial_id="",
+                sharing=frozenset(candidate.trial_id for candidate in protocol.candidates),
+                events=events,
+                sealed_windows=sealed_windows,
+            ),
+        )
+        if reason is not None
+    ]
+    return tuple(reasons)
 
 
 # --- the gates -----------------------------------------------------------------------------
@@ -647,16 +778,94 @@ def _coverage_gate(evidence: StatisticalEvidence) -> GateResult:
 
 
 def _capacity_gate(evidence: StatisticalEvidence) -> GateResult:
-    # ponytail: ``CapacityStatus`` has one member, so this gate is UNAVAILABLE by
-    # construction, and a test pins the enum so that adding a member fails there and sends
-    # whoever widens it to this function. Branch on the status when a volume-to-lots model
-    # can be declared; until then no other answer exists to give.
+    """Gate 9 (umbrella 7.8): the declared model passes its predeclared participation and
+    cost-budget limits (Phase 12).
+
+    ``UNAVAILABLE`` when nothing was measured -- no declared model, no liquidity record --
+    with the measurement's own reason. Otherwise every clause is checked and every failing
+    one is named; the value and threshold reported are the first failure's, or participation
+    on a pass. A fill on a zero-volume bar fails: it took from a market nobody measured.
+    A non-positive edge at scale fails the cost budget: there is nothing to spend on impact.
+    """
+
+    capacity = evidence.capacity
+    digests = (evidence.evidence.baseline,)
+    if capacity.status is CapacityStatus.UNAVAILABLE:
+        return _gate(
+            9,
+            GATE_NAMES[9],
+            GateStatus.UNAVAILABLE,
+            f"capacity is {CapacityStatus.UNAVAILABLE.value}: {capacity.reason}",
+            evidence=digests,
+        )
+    spec = capacity.spec
+    participation = capacity.max_participation
+    if spec is None or participation is None or capacity.zero_volume_fills is None:
+        return _gate(
+            9,
+            GATE_NAMES[9],
+            GateStatus.UNAVAILABLE,
+            "capacity was measured without the model or the participation it measured",
+            evidence=digests,
+        )
+    failures: list[tuple[str, float | None, float | None]] = []
+    if capacity.zero_volume_fills:
+        failures.append(
+            (
+                f"{capacity.zero_volume_fills} of {capacity.fills} fills were on bars reporting "
+                "zero tick volume",
+                float(capacity.zero_volume_fills),
+                0.0,
+            )
+        )
+    if participation > spec.max_participation:
+        failures.append(
+            (
+                f"max participation {participation} exceeds the declared {spec.max_participation}",
+                float(participation),
+                float(spec.max_participation),
+            )
+        )
+    fraction = capacity.impact_fraction_of_edge
+    if fraction is None:
+        # The measured value is the edge itself, against zero: a FAIL must carry one.
+        failures.append(
+            (
+                f"the net edge at the target equity is {capacity.net_edge}: no edge to spend on "
+                "market impact",
+                None if capacity.net_edge is None else float(capacity.net_edge),
+                0.0,
+            )
+        )
+    elif fraction > spec.max_impact_fraction_of_edge:
+        failures.append(
+            (
+                f"modelled impact is {fraction} of the net edge, above the declared "
+                f"{spec.max_impact_fraction_of_edge}",
+                float(fraction),
+                float(spec.max_impact_fraction_of_edge),
+            )
+        )
+    if failures:
+        _, value, threshold = failures[0]
+        return _gate(
+            9,
+            GATE_NAMES[9],
+            GateStatus.FAIL,
+            "; ".join(reason for reason, _, _ in failures),
+            value=value,
+            threshold=threshold,
+            evidence=digests,
+        )
     return _gate(
         9,
         GATE_NAMES[9],
-        GateStatus.UNAVAILABLE,
-        f"capacity is {CapacityStatus.UNAVAILABLE.value}: {evidence.capacity.reason}",
-        evidence=(evidence.evidence.baseline,),
+        GateStatus.PASS,
+        f"max participation {participation} is within {spec.max_participation} and modelled "
+        f"impact is {fraction} of the net edge, within {spec.max_impact_fraction_of_edge}",
+        value=float(participation),
+        threshold=float(spec.max_participation),
+        evidence=digests,
     )
 
 

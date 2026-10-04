@@ -386,5 +386,5 @@ def statistical_evidence(inputs: ValidationInputs) -> StatisticalEvidence:
             basis_is_mark_to_market=grade,
         ),
         scenario_expectancy=tuple(scenarios),
-        capacity=capacity_diagnostic(protocol),
+        capacity=capacity_diagnostic(protocol, bundle),
     )

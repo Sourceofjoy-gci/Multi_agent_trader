@@ -63,6 +63,7 @@ from trading_house.research.backtest.costs_attribution import (
     CostAttribution,
     attribution_disagreement,
 )
+from trading_house.research.backtest.liquidity import Liquidity
 from trading_house.research.backtest.mark import DailyReturnPoint as DailyReturnPoint
 from trading_house.research.backtest.mark import EquitySeries
 from trading_house.research.backtest.result import BacktestResult
@@ -258,6 +259,23 @@ class EvidenceBundle(CanonicalModel):
     sizing: SizingMode = Field(
         default=SizingMode.CONSTANT_NOTIONAL, exclude_if=is_constant_notional
     )
+    # What the market offered at each fill (Phase 12), sealed when the run's protocol
+    # declares a capacity model to read it. ``exclude_if`` for the reason given on
+    # ``mark_to_market``: every bundle sealed without it keeps its bytes. Absent means the
+    # bundle cannot answer a capacity question, which the capacity measurement says.
+    liquidity: Liquidity | None = Field(default=None, exclude_if=_is_absent)
+
+    @model_validator(mode="after")
+    def the_liquidity_is_the_trades(self) -> Self:
+        """One record per trade, in order: a capacity figure over other trades is nobody's."""
+
+        if self.liquidity is None:
+            return self
+        if [item.proposal_id for item in self.liquidity.trades] != [
+            trade.proposal_id for trade in self.result.trades
+        ]:
+            raise ValueError("liquidity must be recorded for exactly the result's trades")
+        return self
 
     @model_validator(mode="after")
     def a_compounding_bundle_is_mark_to_market(self) -> Self:

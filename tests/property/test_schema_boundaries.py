@@ -52,6 +52,7 @@ from trading_house.research.backtest.mark import EquityObservation
 from trading_house.research.backtest.result import BacktestResult, SimulatedTrade
 from trading_house.research.backtest.snapshot import FeatureSnapshot
 from trading_house.research.evidence import EvidenceProvenance
+from trading_house.research.holdout_window import SealedWindow
 from trading_house.research.trial_ledger import (
     CostSpec,
     DataSpec,
@@ -291,6 +292,13 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "actor": "operator",
         "halt_id": "h-1",
         "entered_at": AWARE,
+    },
+    SealedWindow: {
+        "instrument_id": "fx.eurusd",
+        "timeframe": Timeframe.H1,
+        "start": AWARE,
+        "end": AWARE + timedelta(days=1),
+        "opened": False,
     },
     OrderStamp: {
         "book": "fx_scalp",
