@@ -1,6 +1,6 @@
 # Phase 9 — Volatility-Breakout Swing on EURUSD H1
 
-**Status:** approved design
+**Status:** implemented; evidence pending
 **Date:** 2026-10-03
 **Predecessor:** Phase 8, statistical validation and the promotion workflow
 (`docs/superpowers/specs/2026-09-25-phase-8-validation-design.md` and its 8a–8e children)
