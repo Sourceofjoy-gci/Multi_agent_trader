@@ -2406,7 +2406,7 @@ judges any trial a ledger declares, a legacy import included: a Phase 7 artifact
 **What blocks promotion.** No candidate can currently be promoted. Three things are missing, and
 since Phase 12 each lives outside this repository's code:
 
-1. **A capacity declaration.** Gate 9 needs a declared volume-to-lots model. Since Phase 12 a
+1. **A capacity model.** Gate 9 needs a declared volume-to-lots model. Since Phase 12 a
    protocol can declare one (`capacity`, see *Phase 12*), but no registered candidate has, so
    capacity is `UNAVAILABLE` for every candidate and none reaches `RESEARCH_PASSED`.
 2. **A real locked holdout with a computable dataset hash.** No holdout has ever been collected for
