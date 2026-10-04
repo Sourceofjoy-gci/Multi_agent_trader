@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -2248,8 +2249,10 @@ def test_import_legacy_exposes_the_clock_a_retry_must_reuse() -> None:
 
     result = runner.invoke(cli.app, ["research", "trial", "import-legacy", "--help"])
 
+    # Typer forces Rich colour under GITHUB_ACTIONS, which splits the option
+    # name with escape codes.
     assert result.exit_code == 0
-    assert "--registered-at" in result.stdout
+    assert "--registered-at" in re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
 
 
 # --- F1: the registered protocol's data scope must match the strategy's registry scope -----
