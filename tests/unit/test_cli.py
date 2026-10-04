@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1342,6 +1343,33 @@ def test_the_arms_parameters_are_not_command_line_options() -> None:
         "--timeframe",
     ):
         assert option not in result.stdout
+
+
+_SESSION_MOMENTUM_STDOUT_SHA256: dict[str, str] = {
+    "none": "e63735e7eb35057f29430c342015d0b7a07656e269ed49e37dab2a62728efea5",
+    "fixed_target": "b2ee31204ef895554c1573bc8f0d6e3c97fbf352016c8cea483b481af14d4e87",
+    "chandelier": "4d5779e25b4f1be99f6f26c35ccae02e48a4788b58c8ece0f425ea7a344cf982",
+}
+"""sha256 of ``backtest run``'s whole stdout for Session Momentum on the session ramp,
+captured before Phase 9 changed anything. Phase 9 moves the snapshot, the engine, the
+registry and the CLI scope; the recorded Phase 7 evidence stays reproducible only if
+these bytes never move."""
+
+
+@pytest.mark.parametrize("arm", ["none", "fixed_target", "chandelier"])
+@pytest.mark.usefixtures("_dsn")
+def test_session_momentum_backtest_output_is_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    from tests.unit.research.backtest.conftest import FakeBarReader
+
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(_session_bars()))
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--exit-policy": arm}))
+
+    assert result.exit_code == 0, result.stderr
+    actual = hashlib.sha256(result.stdout.encode()).hexdigest()
+    assert actual == _SESSION_MOMENTUM_STDOUT_SHA256[arm], f"{arm}: {actual}"
 
 
 @pytest.mark.usefixtures("_dsn")
