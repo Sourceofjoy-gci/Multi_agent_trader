@@ -68,13 +68,18 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
         stop distance = 0.00100 (the structural term is the widest of 8.2's
             four), so 100 ticks at $1 a tick a lot
         book equity = 100000 x 0.45, risked at 0.75% = $337.50
-        lots = 337.50 / 100 = 3.375, floored to the 0.01 grid = 3.37
-        gross = 1 tick x 3.37 = $3.37 a trade (ramp_price(32) - ramp_price(21)
+        risk lots = 337.50 / 100 = 3.375
+        leverage cap (Phase 10) = 5 x 45000 = $225,000 of notional; one lot at
+            the bar-20 reference 1.10020 is 110,020, so 225000 / 110020 =
+            2.045..., floored to the 0.01 grid = 2.04. The cap binds: 3.375
+            lots would be 8.25x the book.
+        gross = 1 tick x 2.04 = $2.04 a trade (ramp_price(32) - ramp_price(21)
             is 11 points, less the two half-spreads crossed on entry and exit
             -- 11 - 5 - 5 = 1 point)
-        commission = 2 sides x 3.37 lots x $3.50 = $23.59 a trade
+        commission = 2 sides x 2.04 lots x $3.50 = $14.28 a trade
         swap = 0 (opened and closed the same calendar day)
-        net = 3.37 - 23.59 = -$20.22 a trade, -$40.44 over the run
+        net = 2.04 - 14.28 = -$12.24 a trade, -$24.48 over the run
+        (The bar-40 reference 1.10040 caps at 2.0447..., also 2.04.)
     """
 
     outcome = _outcome(bars=_ramp(60), strategy=ToyStrategy(every_n=20))
@@ -85,32 +90,33 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     assert result.trades[0].exit_price == ramp_price(32) - HALF_SPREAD
     assert result.trades[1].entry_price == ramp_price(41) + HALF_SPREAD
     assert result.trades[1].exit_price == ramp_price(52) - HALF_SPREAD
-    # D-3: the lot size comes off the risk engine's decision. Sized against
-    # firm equity instead of the book's 0.45 slice it would be 7.50 lots.
-    assert [trade.lots for trade in result.trades] == [Decimal("3.37"), Decimal("3.37")]
-    assert result.trades[0].gross_pnl == Decimal("3.37")
-    assert result.trades[0].commission == Decimal("23.59")
+    # D-3: the lot size comes off the risk engine's decision, leverage cap
+    # included. Capped against firm equity instead of the book's 0.45 slice it
+    # would be 4.54 lots.
+    assert [trade.lots for trade in result.trades] == [Decimal("2.04"), Decimal("2.04")]
+    assert result.trades[0].gross_pnl == Decimal("2.04")
+    assert result.trades[0].commission == Decimal("14.28")
     assert result.trades[0].swap == Decimal(0)
     # The one line that carries the run's arithmetic. Restating it per trade
     # would add nothing: SimulatedTrade already refuses a net its own terms do
     # not produce and BacktestResult already refuses a net that is not the sum
     # of the trades', so every per-trade restatement is true by construction.
     # Only the hand-computed absolute can fail.
-    assert result.net_pnl == Decimal("-40.44")
+    assert result.net_pnl == Decimal("-24.48")
     assert result.bars_seen == 60
     # Phase 8B1: one mark per processed bar, and the run closed flat, so the
     # final observation reconciles to net PnL. Both trades were TIME exits, so
-    # cumulative realized at the close is exactly the -40.44 above.
+    # cumulative realized at the close is exactly the -24.48 above.
     assert len(outcome.equity.observations) == outcome.result.bars_seen
     assert outcome.equity.is_flat is True
-    assert outcome.equity.observations[-1].cumulative_realized_pnl == Decimal("-40.44")
+    assert outcome.equity.observations[-1].cumulative_realized_pnl == Decimal("-24.48")
     assert outcome.equity.observations[-1].unrealized_pnl == Decimal(0)
-    assert outcome.equity.observations[-1].equity == Decimal("100000") + Decimal("-40.44")
+    assert outcome.equity.observations[-1].equity == Decimal("100000") + Decimal("-24.48")
     # Phase 8B2a: the decomposition reconstructs the number above exactly. A
     # fill-model regression fails a hand-computed value, not a shape. The raw
     # move is 11 points and the two crossed half-spreads are 5 and 5, so
-    # market = 11 x 3.37 = 37.07, spread = 10 x 3.37 = 33.70, slippage = 0, and
-    # 37.07 - 33.70 = 3.37. Only the absolutes are asserted: the identity and
+    # market = 11 x 2.04 = 22.44, spread = 10 x 2.04 = 20.40, slippage = 0, and
+    # 22.44 - 20.40 = 2.04. Only the absolutes are asserted: the identity and
     # the per-trade pairing are already guaranteed by ``BacktestOutcome``'s
     # construction, and the identity holds for any pair of numbers a symmetric
     # bug produced. A falsified split is refused in
@@ -120,8 +126,8 @@ def test_a_known_answer_run_produces_exactly_the_hand_computed_trades() -> None:
     # half-spread from its own exit bar.
     assert all(entry.spread_cost > 0 for entry in attribution.trades)
     assert all(entry.slippage_cost == 0 for entry in attribution.trades)
-    assert attribution.trades[0].market_pnl == Decimal("37.07")
-    assert attribution.trades[0].spread_cost == Decimal("33.70")
+    assert attribution.trades[0].market_pnl == Decimal("22.44")
+    assert attribution.trades[0].spread_cost == Decimal("20.40")
     assert attribution.trades[0].slippage_cost == Decimal(0)
 
 
@@ -191,7 +197,7 @@ def test_an_assembled_run_materializes_the_source_once_and_keeps_the_known_answe
     assert (source.coverage_calls, source.bars_calls) == (1, 1)
     assert result.trades[0].entry_price == ramp_price(21) + HALF_SPREAD
     assert result.trades[0].exit_price == ramp_price(32) - HALF_SPREAD
-    assert result.net_pnl == Decimal("-40.44")
+    assert result.net_pnl == Decimal("-24.48")
 
 
 def test_one_position_at_a_time_and_an_exit_frees_the_slot_on_its_own_bar() -> None:
@@ -347,10 +353,10 @@ def test_a_bar_that_hits_the_stop_and_the_deadline_together_is_charged_the_stop(
     assert result.trades[0].exit_price == stop
     assert result.trades[0].exit_at == bars[deadline_bar].event_time
     # Phase 8B2a: a stop crosses no spread, so the attribution carries the
-    # entry's half-spread alone -- 5 points at $1 a point on 3.37 lots. The two
+    # entry's half-spread alone -- 5 points at $1 a point on 2.04 lots. The two
     # TIME exits of the known-answer run above pay twice this, and the asymmetry
     # is the model rather than a residual to be smoothed away.
-    assert outcome.attribution.trades[0].spread_cost == Decimal("16.85")
+    assert outcome.attribution.trades[0].spread_cost == Decimal("10.20")
 
 
 SLIPPAGE_POINTS = Decimal(4)
@@ -400,9 +406,9 @@ def test_a_run_that_charges_slippage_attributes_both_legs_of_it() -> None:
     conftest default, and the only value ``_ramp``'s hand-computed prices are
     built around — so there the exit leg is a term nothing can see and a sum of
     one leg is indistinguishable
-    from a sum of two. Here it is 4 points a side: 4 points x 3.37 lots at $1 a
-    point is 13.48 a leg, 26.96 a trade, and the trade's own reported gross
-    moves from the known-answer run's +3.37 to -23.59 by exactly that 26.96.
+    from a sum of two. Here it is 4 points a side: 4 points x 2.04 lots at $1 a
+    point is 8.16 a leg, 16.32 a trade, and the trade's own reported gross
+    moves from the known-answer run's +2.04 to -14.28 by exactly that 16.32.
     The legs are asserted separately as well as summed, so a half-decomposition
     is a named failure rather than a wrong total nobody can place.
     """
@@ -419,10 +425,10 @@ def test_a_run_that_charges_slippage_attributes_both_legs_of_it() -> None:
     assert outcome.result.trades[0].exit_price == ramp_price(32) - HALF_SPREAD - SLIPPAGE_OFFSET
     for split, trade in zip(outcome.attribution.trades, outcome.result.trades, strict=True):
         entry_leg, exit_leg = _slippage_legs_in_money(trade.side, trade.lots)
-        assert (entry_leg, exit_leg) == (Decimal("13.48"), Decimal("13.48"))
+        assert (entry_leg, exit_leg) == (Decimal("8.16"), Decimal("8.16"))
         assert split.slippage_cost == entry_leg + exit_leg
-    assert outcome.attribution.trades[0].slippage_cost == Decimal("26.96")
-    assert outcome.result.trades[0].gross_pnl == Decimal("-23.59")
+    assert outcome.attribution.trades[0].slippage_cost == Decimal("16.32")
+    assert outcome.result.trades[0].gross_pnl == Decimal("-14.28")
 
 
 def test_a_short_is_charged_the_same_two_legs_with_the_signs_inverted() -> None:
@@ -433,7 +439,7 @@ def test_a_short_is_charged_the_same_two_legs_with_the_signs_inverted() -> None:
     slips UP, and the two signs invert while both are still charged. The ramp
     rises, so the short's ``market_pnl`` is negative and its gross is worse
     than the raw move by the same three terms a long's is --
-    -37.07 - 33.70 - 26.96 = -97.73.
+    -22.44 - 20.40 - 16.32 = -59.16.
     """
 
     outcome = _outcome(
@@ -447,11 +453,11 @@ def test_a_short_is_charged_the_same_two_legs_with_the_signs_inverted() -> None:
     assert outcome.result.trades[0].exit_price == ramp_price(32) + HALF_SPREAD + SLIPPAGE_OFFSET
     for split, trade in zip(outcome.attribution.trades, outcome.result.trades, strict=True):
         entry_leg, exit_leg = _slippage_legs_in_money(trade.side, trade.lots)
-        assert (entry_leg, exit_leg) == (Decimal("13.48"), Decimal("13.48"))
+        assert (entry_leg, exit_leg) == (Decimal("8.16"), Decimal("8.16"))
         assert split.slippage_cost == entry_leg + exit_leg
-    assert outcome.attribution.trades[0].market_pnl == Decimal("-37.07")
-    assert outcome.attribution.trades[0].slippage_cost == Decimal("26.96")
-    assert outcome.result.trades[0].gross_pnl == Decimal("-97.73")
+    assert outcome.attribution.trades[0].market_pnl == Decimal("-22.44")
+    assert outcome.attribution.trades[0].slippage_cost == Decimal("16.32")
+    assert outcome.result.trades[0].gross_pnl == Decimal("-59.16")
 
 
 def test_a_position_still_open_when_the_bars_run_out_produces_no_trade() -> None:
@@ -1130,19 +1136,38 @@ def test_a_candidate_closer_than_the_brokers_minimum_distance_is_clamped() -> No
 # --- Phase 8B3: scenario identity in the run id, and the compounding arm -----
 
 _PRE_CHANGE_RUN_ID = "81300ddd2be308e006ab418e38565fb81b0b78313edc6ed408baa635d759cd0e"
-_PRE_CHANGE_DIGEST = "91a237e8fd17fb3761a8c87cb45021f87a2eea65066466ffc59d8bdb97e8bcac"
-_PRE_CHANGE_OUTCOME_SHA256 = "0393c5ab2b317348b3b03dbee8177e04378f1e0845cf77f7e5104586f5703676"
+_PRE_CHANGE_DIGEST = "5bfb2e1c2f6d55ed88c279b7fd2a8de8acc115991951b2676416b4857c86e5f4"
+_PRE_CHANGE_OUTCOME_SHA256 = "d010574f71838b458c56611b9f36e9c594089cc27cab970dd482790cddb399ad"
+"""The run id is a request's identity and has not moved since 8B3. The digest
+and the outcome bytes were re-pinned in Phase 10, when the signed gross-leverage
+cap resized this run's trades from 3.37 to 2.04 lots; before that they were
+``91a237e8...`` and ``0393c5ab...``. What this pins is still that the 8B3 change
+moved nothing a constant-notional run serialises -- now against Phase 10's
+trades rather than Phase 6's."""
 
-_EQUITY = Decimal("1000000")
+_EQUITY = Decimal("5000000")
 """Large enough that the lot grid (0.01) is finer than one trade's effect on
-equity: 33.75 lots unrounded, and a 40-point winner moves equity by ~0.11%."""
+equity: 84.375 lots unrounded (under the contract's 100-lot maximum), so one
+trade's few hundredths of a percent of equity is several grid steps."""
 
 
 def _long_hold(*, side: Side = Side.BUY) -> ToyStrategy:
     """Re-enters the bar after every exit, holding 30 bars. On the rising ramp a
-    long wins (~40 points against a 10-point spread) and a short loses."""
+    long wins (~40 points against a 10-point spread) and a short loses.
 
-    return ToyStrategy(every_n=1, max_holding_seconds=1800, side=side)
+    A 200-point stop rather than the toy's 100, so the risk budget binds and the
+    leverage cap does not: 16875 / 200 = 84.375 lots is about 9.3M notional,
+    under the 11.25M that 5x of the book's 2.25M admits. The cap is priced at
+    the entry reference, which climbs with the ramp, so a run it bound would
+    change lots with price as well as with equity -- and these tests are about
+    equity."""
+
+    return ToyStrategy(
+        every_n=1,
+        max_holding_seconds=1800,
+        side=side,
+        invalidation_distance=Decimal("0.00200"),
+    )
 
 
 def test_a_constant_notional_run_keeps_its_pre_change_identity() -> None:

@@ -10,7 +10,13 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from tests.unit.risk.conftest import NOW, _contract, _facts, _proposal
+from tests.unit.risk.conftest import (
+    NOW,
+    _contract,
+    _facts,
+    _proposal,
+    _without_leverage_cap,
+)
 from trading_house.constitution.models import Constitution
 from trading_house.core.clock import FixedClock
 from trading_house.core.schemas import ExecutableRiskDecision, RejectedRiskDecision, Side
@@ -371,6 +377,10 @@ def test_an_off_grid_entry_sizes_from_the_one_tick_stop_it_emits(constitution) -
     Sizing from the pre-quantisation 0.00001 instead approves 75 lots, whose
     loss at the emitted 1.09999 is 112.50 -- 50% over the signed budget, while
     ``risk_money`` still reports 75.00.
+
+    Leverage lifted: 50 lots is 5.5M notional against the scalp book's 300,000
+    at 10x, so under the signed limits the cap sizes this trade (2.72 lots) and
+    the distance under test no longer reaches the volume.
     """
 
     contract = _contract()
@@ -378,7 +388,7 @@ def test_an_off_grid_entry_sizes_from_the_one_tick_stop_it_emits(constitution) -
         entry_price_ref=Decimal("1.100005"), invalidation_price=Decimal("1.100000")
     )
 
-    decision = _engine(constitution).evaluate(
+    decision = _engine(_without_leverage_cap(constitution)).evaluate(
         proposal,
         contract=contract,
         # tick_spread_points is zeroed too: R-8's gate compares the current

@@ -1412,14 +1412,18 @@ def test_the_arms_parameters_are_not_command_line_options() -> None:
 
 
 _SESSION_MOMENTUM_STDOUT_SHA256: dict[str, str] = {
-    "none": "e63735e7eb35057f29430c342015d0b7a07656e269ed49e37dab2a62728efea5",
-    "fixed_target": "b2ee31204ef895554c1573bc8f0d6e3c97fbf352016c8cea483b481af14d4e87",
-    "chandelier": "4d5779e25b4f1be99f6f26c35ccae02e48a4788b58c8ece0f425ea7a344cf982",
+    "none": "63b1b4552b699ed8b7b7e5c17c2d55753969b36fce7a443632b72f6877337c15",
+    "fixed_target": "28d8ffc4cb8bc99abf26f9d2760504a242fdc025102b995ea86bd0a520250df9",
+    "chandelier": "f2d4f3548e9da2bee0323605372827965b822cc45e73cd4240ad4e7a95228ba1",
 }
-"""sha256 of ``backtest run``'s whole stdout for Session Momentum on the session ramp,
-captured before Phase 9 changed anything. Phase 9 moves the snapshot, the engine, the
-registry and the CLI scope; the recorded Phase 7 evidence stays reproducible only if
-these bytes never move."""
+"""sha256 of ``backtest run``'s whole stdout for Session Momentum on the session ramp.
+
+Captured before Phase 9 (``e63735e7...``, ``b2ee3120...``, ``4d5779e2...``) and held
+through it. Re-pinned once, deliberately, in Phase 10: the risk engine now enforces the
+signed gross-leverage cap, which resizes this ramp's trades, so the current code no
+longer reproduces Phase 7's recorded bytes. Those runs stay sealed and verifiable as
+evidence of what was run; a rerun today is a different, smaller-sized run. From here
+these bytes must not move again without the same kind of stated reason."""
 
 
 @pytest.mark.parametrize("arm", ["none", "fixed_target", "chandelier"])

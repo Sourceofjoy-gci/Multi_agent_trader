@@ -149,11 +149,17 @@ def test_the_simulated_margin_port_never_binds() -> None:
 
 # --- Phase 8E: the bundle carries the digest the engine computed ---------------------------
 
-_PRE_8E_BUNDLE_AT_1_0 = "096285bf69b7e21f72204b028381369ec77b68104650fcca1ad670b4d0ffeffd"
-_PRE_8E_BUNDLE_AT_1_5 = "4884c76ad2d29a27ebdd7b5ffe87a4485b6b5d445ebd444c168de89550dc66ac"
+_NO_DIGEST_BUNDLE_AT_1_0 = "d91ce2acf3bc46f2fa102b727998b5215d95af5d4a451eecbb79fa602b951654"
+_NO_DIGEST_BUNDLE_AT_1_5 = "92d4d0f78b396316c28bd8282611dc3a5078a44973b14318a3242b655df52197"
 """``canonical_sha256`` of ``test_scenarios._bundle_at(_protocol(), BARS, level, trial_id=...)``
-as built by the code at the commit before Phase 8E (``a843646``), where every bundle's
-provenance carried no dataset hash. Read off that commit's tree, not from this one."""
+with no dataset hash in its provenance.
+
+At Phase 8E these were read off the tree of the commit before it (``a843646``:
+``096285bf...`` and ``4884c76a...``), which proved that clearing the new field gave
+back the bytes 8B/8D had sealed. Phase 10 re-pinned them from its own tree, because
+the signed gross-leverage cap resized the ramp's trades and so moved the result inside
+every bundle. They now pin that a no-digest bundle's bytes do not drift, not that they
+equal a pre-8E file."""
 
 
 def _outcome_and_bars() -> tuple[BacktestOutcome, tuple[Bar, ...]]:
@@ -206,12 +212,12 @@ def test_an_outcome_without_a_digest_seals_none() -> None:
 
 @pytest.mark.parametrize(
     ("level", "pinned"),
-    [(Decimal(1), _PRE_8E_BUNDLE_AT_1_0), (Decimal("1.5"), _PRE_8E_BUNDLE_AT_1_5)],
+    [(Decimal(1), _NO_DIGEST_BUNDLE_AT_1_0), (Decimal("1.5"), _NO_DIGEST_BUNDLE_AT_1_5)],
 )
-def test_a_bundle_whose_provenance_carries_no_digest_keeps_its_pre_8e_bytes(
+def test_a_bundle_whose_provenance_carries_no_digest_keeps_its_pinned_bytes(
     level: Decimal, pinned: str
 ) -> None:
-    """Nothing but the provenance field moved: clear it and the bundle is the one 8B/8D sealed."""
+    """Clear the provenance field and the bundle's bytes are the pinned ones."""
 
     bundle = _bundle_at(_protocol(), RAMP, level, trial_id="trial-1", dataset_sha256=None)
 

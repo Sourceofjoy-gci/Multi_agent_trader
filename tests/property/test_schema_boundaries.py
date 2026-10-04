@@ -69,6 +69,7 @@ from trading_house.research.trial_ledger import (
     TrialSpec,
     ValidationSpec,
 )
+from trading_house.risk.portfolio import OrderStamp
 
 AWARE = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
@@ -280,6 +281,10 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "value": 1.5,
         "observed_at": AWARE,
         "availability_time": AWARE,
+    },
+    OrderStamp: {
+        "book": "fx_scalp",
+        "submitted_at": AWARE,
     },
     AgentBelief: {
         "belief_id": "b-1",

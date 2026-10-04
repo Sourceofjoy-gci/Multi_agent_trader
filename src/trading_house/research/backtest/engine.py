@@ -84,6 +84,7 @@ from trading_house.research.backtest.strategy import (
     Strategy,
 )
 from trading_house.risk.engine import MarginPort, RiskEngine
+from trading_house.risk.portfolio import PortfolioState
 from trading_house.risk.sizing import quantise_down, quantise_up
 
 _BEFORE_ANY_BAR: datetime = datetime.min.replace(tzinfo=UTC)
@@ -526,6 +527,11 @@ class Backtester:
                 median_spread_points=snapshot.median_spread_points,
                 tick_spread_points=snapshot.tick_spread_points,
                 tick_time=snapshot.tick_time,
+                # Flat by decision, not by omission (Phase 10 design, 5.1):
+                # decisions are taken only when flat, and a drawdown halt in a
+                # replay would cap a losing rule's reported loss. Research
+                # measures the rule; the halts are the live overlay on it.
+                portfolio=PortfolioState.flat((proposal.book,)),
             )
             if isinstance(decision, RejectedRiskDecision):
                 rejections.append(decision.reasons)

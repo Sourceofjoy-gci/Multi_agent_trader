@@ -16,10 +16,13 @@ from trading_house.constitution.models import Constitution
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.schemas import Side, TradeProposal
 from trading_house.core.values import AssetClass
+from trading_house.risk.portfolio import PortfolioState
 
 CONFIG_DIR = Path(__file__).resolve().parents[3] / "config"
 
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+
+BOOKS = ("fx_scalp", "fx_swing", "equity_swing", "sleeve")
 
 
 @pytest.fixture(scope="session")
@@ -96,6 +99,25 @@ def _facts(**overrides: object) -> dict[str, object]:
         "median_spread_points": Decimal("10"),
         "tick_spread_points": Decimal("10"),
         "tick_time": NOW,
+        "portfolio": PortfolioState.flat(BOOKS),
     }
     facts.update(overrides)
     return facts
+
+
+def _without_leverage_cap(constitution: Constitution) -> Constitution:
+    """The signed constitution with both gross-leverage ceilings lifted.
+
+    For a test about the risk-budget arithmetic at a stop so tight that the
+    budget alone sizes past the book's leverage. Under the real limits the cap
+    binds there (Phase 10) and the volume stops depending on the distance under
+    test. Only the leverage fields move; nothing here is ever signed or loaded.
+    """
+
+    unbounded = Decimal("1000000")
+    books = {
+        book_id: book.model_copy(update={"max_gross_leverage": unbounded})
+        for book_id, book in constitution.books.items()
+    }
+    firm = constitution.firm.model_copy(update={"max_gross_leverage": unbounded})
+    return constitution.model_copy(update={"books": books, "firm": firm})

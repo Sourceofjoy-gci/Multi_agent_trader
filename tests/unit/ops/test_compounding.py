@@ -100,11 +100,13 @@ def _final_equity_moved_by(delta: str) -> Callable[[dict[str, Any]], None]:
 
 def test_the_report_carries_both_runs_and_the_signed_difference() -> None:
     report = _report(compounding=_final_equity_moved_by("250"))
-    assert report.constant_notional.final_equity == Decimal("100448.8840")
-    assert report.compounding.final_equity == Decimal("100698.8840")
+    # 448.8840 before Phase 10; the signed gross-leverage cap now sizes this
+    # ramp's one trade, so it earns less.
+    assert report.constant_notional.final_equity == Decimal("100271.7280")
+    assert report.compounding.final_equity == Decimal("100521.7280")
     assert report.final_equity_difference == Decimal("250")
     assert report.constant_notional.trades == 1
-    assert report.constant_notional.net_pnl == Decimal("448.8840")
+    assert report.constant_notional.net_pnl == Decimal("271.7280")
     assert report.constant_notional.attempt_id == "att-scenarios-1"
     assert report.spec_sha256 == canonical_sha256(_protocol().candidates[0])
 

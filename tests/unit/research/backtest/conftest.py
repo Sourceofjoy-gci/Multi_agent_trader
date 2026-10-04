@@ -391,6 +391,13 @@ class ToyStrategy:
     inverts and still charges both -- is only reachable by selling, and one
     field buys it where a subclass would have to restate the whole proposal."""
 
+    invalidation_distance: Decimal = Decimal("0.00100")
+    """How far the wrong side of the reference the proposal puts its
+    invalidation. 0.00100 by default: a 100-point stop sizes 3.375 lots from
+    the fx_swing budget, which the book's signed 5x gross leverage caps at 2.04
+    (Phase 10), so the default runs exercise the cap. A test about sizing from
+    equity widens it until the budget, not the cap, is what binds."""
+
     required_features: frozenset[FeatureBlock] = frozenset()
     """Which optional feature blocks the backtester computes for this toy. Empty
     by default, like Session Momentum, so every existing engine test keeps the
@@ -435,7 +442,9 @@ class ToyStrategy:
             # other arrangement, which is the proposal-level mirror of a stop
             # that a falling market would have to reach through.
             invalidation_price=(
-                entry - Decimal("0.00100") if self.side is Side.BUY else entry + Decimal("0.00100")
+                entry - self.invalidation_distance
+                if self.side is Side.BUY
+                else entry + self.invalidation_distance
             ),
             target_r_multiple=self.target_r_multiple,
             max_holding_seconds=self.proposal_holding_seconds or self.max_holding_seconds,

@@ -9,6 +9,7 @@ account and therefore cannot appear in the pure path.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -24,7 +25,13 @@ from trading_house.core.schemas import (
     Side,
     TradeProposal,
 )
-from trading_house.core.values import PositiveQuantity, Quantity
+from trading_house.core.values import BookId, PositiveQuantity, Quantity
+from trading_house.risk.portfolio import (
+    PortfolioState,
+    cluster_keys,
+    loss_to_stop,
+    notional_money,
+)
 from trading_house.risk.sizing import (
     compute_stop_distance,
     compute_volume,
@@ -65,6 +72,22 @@ class RejectionReason(str, Enum):  # noqa: UP042
     EDGE_BELOW_FLOOR = "edge_below_floor"
     HOLDING_EXCEEDS_BOOK_LIMIT = "holding_exceeds_book_limit"
     SWAP_EXCEEDS_EDGE_FRACTION = "swap_exceeds_edge_fraction"
+    # Phase 10: the portfolio the new order joins. The first six need only the
+    # state; the rest need the candidate's risk and notional, so they run after
+    # sizing on the volume actually approved.
+    UNMEASURED_OPEN_RISK = "unmeasured_open_risk"
+    PNL_UNAVAILABLE = "pnl_unavailable"
+    CONSECUTIVE_REJECTS_EXCEEDED = "consecutive_rejects_exceeded"
+    ORDER_RATE_EXCEEDED = "order_rate_exceeded"
+    MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"
+    DAILY_LOSS_STOP = "daily_loss_stop"
+    BOOK_DRAWDOWN_HALT = "book_drawdown_halt"
+    FIRM_DRAWDOWN_HALT = "firm_drawdown_halt"
+    AGGREGATE_OPEN_RISK = "aggregate_open_risk"
+    SINGLE_INSTRUMENT_RISK = "single_instrument_risk"
+    CORRELATED_CLUSTER_RISK = "correlated_cluster_risk"
+    BOOK_GROSS_LEVERAGE = "book_gross_leverage"
+    FIRM_GROSS_LEVERAGE = "firm_gross_leverage"
 
 
 class MarginPort(Protocol):
@@ -110,6 +133,7 @@ class RiskEngine:
         median_spread_points: Decimal,
         tick_spread_points: Decimal,
         tick_time: datetime,
+        portfolio: PortfolioState,
     ) -> RiskDecision:
         # The prelude returns immediately: without a book, a matching contract
         # or an equity, no later check has anything to compute against.
@@ -173,6 +197,8 @@ class RiskEngine:
             reasons,
             passed,
         )
+        for ok, reason in self._state_checks(proposal.book, book, portfolio):
+            _record(ok, reason, reasons, passed)
         if reasons:
             return self._reject(proposal, reasons, passed)
 
@@ -277,11 +303,39 @@ class RiskEngine:
             # the floored value can never drop below the minimum.
             volume = quantise_down(contract.quantity_max, contract.quantity_increment)
 
+        # Phase 10: gross leverage is a ceiling on size, like quantity_max, so
+        # it resizes rather than rejects. A tight stop sizes a large position
+        # from the risk budget alone, and on a single trade that can already
+        # exceed the book's signed leverage with nothing else open. Floored to
+        # the grid, so the result never exceeds either headroom; if what is
+        # left is below the minimum lot, the binding limit names the refusal.
+        leverage_cap = self._leverage_cap(
+            proposal.book, book, portfolio, contract, firm_equity, proposal.entry_price_ref
+        )
+        if volume > leverage_cap.volume:
+            if leverage_cap.volume < contract.quantity_min:
+                return self._reject(proposal, list(leverage_cap.binding), passed)
+            volume = leverage_cap.volume
+            resized = True
+
         # Not necessarily a whole number of ticks: an off-grid entry leaves a
         # fractional remainder, and the loss is proportional to the true price
         # distance, not to a tidied one.
         ticks = effective_distance / contract.price_increment
         risk_money = ticks * contract.value_per_price_increment * volume
+
+        for ok, reason in self._exposure_checks(
+            proposal.book,
+            book,
+            portfolio,
+            contract=contract,
+            firm_equity=firm_equity,
+            risk_money=risk_money,
+            notional=notional_money(volume, proposal.entry_price_ref, contract),
+        ):
+            _record(ok, reason, reasons, passed)
+        if reasons:
+            return self._reject(proposal, reasons, passed)
         return RISK_DECISION_ADAPTER.validate_python(
             {
                 "verdict": "RESIZED" if resized else "APPROVED",
@@ -420,6 +474,7 @@ class RiskEngine:
         median_spread_points: Decimal,
         tick_spread_points: Decimal,
         tick_time: datetime,
+        portfolio: PortfolioState,
     ) -> RiskDecision:
         """``evaluate`` plus the master spec's 8.1 free-margin headroom rule.
 
@@ -436,6 +491,7 @@ class RiskEngine:
             median_spread_points=median_spread_points,
             tick_spread_points=tick_spread_points,
             tick_time=tick_time,
+            portfolio=portfolio,
         )
         if isinstance(decision, RejectedRiskDecision):
             return decision
@@ -454,3 +510,257 @@ class RiskEngine:
                 proposal, [RejectionReason.INSUFFICIENT_FREE_MARGIN_HEADROOM], checks_passed
             )
         return decision
+
+    def recheck_portfolio(
+        self,
+        decision: RiskDecision,
+        *,
+        book_id: BookId,
+        side: Side,
+        contract: InstrumentContract,
+        firm_equity: Decimal,
+        price: Decimal,
+        portfolio: PortfolioState,
+    ) -> RiskDecision:
+        """The portfolio gates alone, for a decision made earlier.
+
+        ``order submit`` is handed a decision rather than a proposal, and the
+        portfolio may have moved since it was made -- ten decision files sized
+        while flat would otherwise open ten positions. Risk is the larger of
+        the decision's own and the loss from ``price`` (the quote it would fill
+        at) to its stop, so a quote that drifted toward the stop cannot lower
+        the risk the decision was sized for. Returns the decision unchanged, or
+        a rejection naming every portfolio gate that refused.
+        """
+
+        if isinstance(decision, RejectedRiskDecision):
+            return decision
+        book = self._constitution.books.get(book_id)
+        if book is None:
+            return self._reject_decision(decision, [RejectionReason.UNKNOWN_BOOK], [])
+        if firm_equity <= 0:
+            return self._reject_decision(decision, [RejectionReason.NON_POSITIVE_EQUITY], [])
+        quantity = decision.approved_quantity.amount
+        risk_money = max(
+            decision.risk_money,
+            loss_to_stop(
+                quantity=quantity,
+                from_price=price,
+                stop=decision.stop_loss_price,
+                is_buy=side is Side.BUY,
+                contract=contract,
+            ),
+        )
+        reasons: list[RejectionReason] = []
+        passed: list[RejectionReason] = []
+        checks = [
+            *self._state_checks(book_id, book, portfolio),
+            *self._exposure_checks(
+                book_id,
+                book,
+                portfolio,
+                contract=contract,
+                firm_equity=firm_equity,
+                risk_money=risk_money,
+                notional=notional_money(quantity, price, contract),
+            ),
+        ]
+        for ok, reason in checks:
+            _record(ok, reason, reasons, passed)
+        if reasons:
+            return self._reject_decision(decision, reasons, passed)
+        return decision
+
+    def _state_checks(
+        self, book_id: BookId, book: BookLimits, portfolio: PortfolioState
+    ) -> list[tuple[bool, RejectionReason]]:
+        """The gates that need only what is already open, lost and sent."""
+
+        firm = self._constitution.firm
+        now = self._clock.now()
+        pnl_known = (
+            portfolio.book_pnl is not None
+            and book_id in portfolio.book_pnl
+            and portfolio.firm_drawdown is not None
+        )
+        rate_ok = portfolio.orders_in_window(now) < firm.max_orders_per_minute
+        if isinstance(book.limits, ScalpLimits):
+            rate_ok = rate_ok and (
+                portfolio.orders_in_window(now, book=book_id) < book.limits.max_orders_per_minute
+            )
+        return [
+            (portfolio.unmeasured_positions == 0, RejectionReason.UNMEASURED_OPEN_RISK),
+            (pnl_known, RejectionReason.PNL_UNAVAILABLE),
+            (
+                portfolio.consecutive_rejects < firm.max_consecutive_rejects,
+                RejectionReason.CONSECUTIVE_REJECTS_EXCEEDED,
+            ),
+            (rate_ok, RejectionReason.ORDER_RATE_EXCEEDED),
+            (
+                len(portfolio.book_exposures(book_id)) < book.max_concurrent_positions,
+                RejectionReason.MAX_CONCURRENT_POSITIONS,
+            ),
+        ]
+
+    def _exposure_checks(
+        self,
+        book_id: BookId,
+        book: BookLimits,
+        portfolio: PortfolioState,
+        *,
+        contract: InstrumentContract,
+        firm_equity: Decimal,
+        risk_money: Decimal,
+        notional: Decimal,
+    ) -> list[tuple[bool, RejectionReason]]:
+        """The gates that need the candidate's own risk and notional.
+
+        Each asks whether the candidate could be the order that breaches its
+        limit, and each holds at equality. The daily and drawdown halts count
+        every open position's risk to its stop as well as what is already lost,
+        which is what makes them ceilings rather than triggers that fire after
+        the damage (Phase 10 design, section 4).
+        """
+
+        firm = self._constitution.firm
+        hundred = Decimal(100)
+        book_equity = firm_equity * book.capital_fraction
+        book_open = portfolio.open_risk(book=book_id)
+        firm_open = portfolio.open_risk()
+
+        def within(amount: Decimal, pct: Decimal, equity: Decimal) -> bool:
+            return amount * hundred <= pct * equity
+
+        checks: list[tuple[bool, RejectionReason]] = []
+        pnl = None if portfolio.book_pnl is None else portfolio.book_pnl.get(book_id)
+        # Unknown P&L is already a refusal (PNL_UNAVAILABLE); the halts that
+        # read it are not evaluated against a number nobody computed.
+        if pnl is not None:
+            checks.append(
+                (
+                    within(
+                        pnl.loss_today() + book_open + risk_money,
+                        book.daily_loss_stop_pct,
+                        book_equity,
+                    ),
+                    RejectionReason.DAILY_LOSS_STOP,
+                )
+            )
+            checks.append(
+                (
+                    within(
+                        pnl.drawdown + book_open + risk_money,
+                        book.max_drawdown_halt_pct,
+                        book_equity,
+                    ),
+                    RejectionReason.BOOK_DRAWDOWN_HALT,
+                )
+            )
+        if portfolio.firm_drawdown is not None:
+            checks.append(
+                (
+                    within(
+                        portfolio.firm_drawdown + firm_open + risk_money,
+                        firm.max_total_drawdown_halt_pct,
+                        firm_equity,
+                    ),
+                    RejectionReason.FIRM_DRAWDOWN_HALT,
+                )
+            )
+        checks.extend(
+            [
+                (
+                    within(firm_open + risk_money, firm.max_aggregate_open_risk_pct, firm_equity),
+                    RejectionReason.AGGREGATE_OPEN_RISK,
+                ),
+                (
+                    within(
+                        portfolio.instrument_risk(contract.instrument_id) + risk_money,
+                        firm.max_single_instrument_risk_pct,
+                        firm_equity,
+                    ),
+                    RejectionReason.SINGLE_INSTRUMENT_RISK,
+                ),
+                (
+                    all(
+                        within(
+                            portfolio.cluster_risk(key) + risk_money,
+                            firm.max_correlated_cluster_risk_pct,
+                            firm_equity,
+                        )
+                        for key in sorted(cluster_keys(contract))
+                    ),
+                    RejectionReason.CORRELATED_CLUSTER_RISK,
+                ),
+                (
+                    portfolio.notional(book=book_id) + notional
+                    <= book.max_gross_leverage * book_equity,
+                    RejectionReason.BOOK_GROSS_LEVERAGE,
+                ),
+                (
+                    portfolio.notional() + notional <= firm.max_gross_leverage * firm_equity,
+                    RejectionReason.FIRM_GROSS_LEVERAGE,
+                ),
+            ]
+        )
+        return checks
+
+    def _reject_decision(
+        self,
+        decision: RiskDecision,
+        reasons: Sequence[RejectionReason],
+        passed: Sequence[RejectionReason],
+    ) -> RejectedRiskDecision:
+        return RejectedRiskDecision(
+            verdict="REJECTED",
+            proposal_id=decision.proposal_id,
+            reasons=tuple(reason.value for reason in reasons),
+            checks_passed=tuple(check.value for check in passed),
+            constitution_version=self._constitution.version,
+            approved_quantity=Quantity(amount=Decimal(0), unit="lots"),
+            risk_money=Decimal(0),
+            risk_pct_of_book=Decimal(0),
+        )
+
+    def _leverage_cap(
+        self,
+        book_id: BookId,
+        book: BookLimits,
+        portfolio: PortfolioState,
+        contract: InstrumentContract,
+        firm_equity: Decimal,
+        price: Decimal,
+    ) -> _LeverageCap:
+        """The largest on-grid volume both gross-leverage limits still admit."""
+
+        per_lot = notional_money(Decimal(1), price, contract)
+        headrooms = (
+            (
+                book.max_gross_leverage * firm_equity * book.capital_fraction
+                - portfolio.notional(book=book_id),
+                RejectionReason.BOOK_GROSS_LEVERAGE,
+            ),
+            (
+                self._constitution.firm.max_gross_leverage * firm_equity - portfolio.notional(),
+                RejectionReason.FIRM_GROSS_LEVERAGE,
+            ),
+        )
+        volumes = {
+            reason: (
+                quantise_down(headroom / per_lot, contract.quantity_increment)
+                if headroom > 0
+                else Decimal(0)
+            )
+            for headroom, reason in headrooms
+        }
+        cap = min(volumes.values())
+        binding = tuple(
+            reason for reason, volume in volumes.items() if volume < contract.quantity_min
+        )
+        return _LeverageCap(volume=cap, binding=binding)
+
+
+@dataclass(frozen=True, slots=True)
+class _LeverageCap:
+    volume: Decimal
+    binding: tuple[RejectionReason, ...]
