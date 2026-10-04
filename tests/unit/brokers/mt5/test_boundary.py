@@ -16,9 +16,11 @@ from trading_house.brokers.mt5.boundary import (
     Mt5Tick,
     TerminalPort,
     deal_entry_of,
+    equity_of,
     establish_utc_offset,
     mt5_timeframe_code,
     server_time_to_utc,
+    trade_mode_of,
     utc_offset_seconds,
 )
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
@@ -28,6 +30,8 @@ EXPECTED_PORT_METHODS = {
     "initialize",
     "shutdown",
     "account_trade_mode",
+    # Phase 10: the portfolio's percentage limits are measured against it.
+    "account_equity",
     "autotrading_enabled",
     "terminal_connected",
     "server_utc_offset_seconds",
@@ -120,6 +124,9 @@ def test_position_dto_carries_the_magic_used_for_book_attribution() -> None:
         tp=None,
         is_buy=True,
         opened_at=datetime(2026, 8, 25, 9, 0, tzinfo=UTC),
+        price_current=1.1,
+        profit=0.0,
+        swap=0.0,
     )
     assert position.magic == 110001
 
@@ -177,6 +184,10 @@ def test_deal_carries_the_fields_reconciliation_matches_on() -> None:
         is_buy=True,
         dealt_at=dealt,
         entry=0,
+        profit=0.0,
+        commission=0.0,
+        swap=0.0,
+        fee=0.0,
     )
 
     assert (deal.magic, deal.server_symbol, deal.volume, deal.dealt_at) == (
@@ -361,3 +372,18 @@ def test_the_probe_gives_up_instead_of_waiting_forever() -> None:
         establish_utc_offset(lambda: 1.0, lambda: 0.0, sleeps.append, max_attempts=3)
 
     assert len(sleeps) == 3
+
+
+class _Account:
+    equity = 98765.4
+    trade_mode = 0
+
+
+def test_an_unreadable_account_has_no_equity_and_no_trade_mode() -> None:
+    assert equity_of(None) is None
+    assert trade_mode_of(None) == -1
+
+
+def test_a_readable_account_reports_both() -> None:
+    assert equity_of(_Account()) == 98765.4
+    assert trade_mode_of(_Account()) == 0

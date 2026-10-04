@@ -21,9 +21,11 @@ from trading_house.brokers.mt5.boundary import (
     Mt5SendResult,
     Mt5SymbolInfo,
     Mt5Tick,
+    equity_of,
     establish_utc_offset,
     mt5_timeframe_code,
     server_time_to_utc,
+    trade_mode_of,
 )
 
 
@@ -55,8 +57,10 @@ class Mt5Terminal:
         return False if info is None else bool(info.connected)
 
     def account_trade_mode(self) -> int:
-        account = mt5.account_info()
-        return -1 if account is None else int(account.trade_mode)
+        return trade_mode_of(mt5.account_info())
+
+    def account_equity(self) -> float | None:
+        return equity_of(mt5.account_info())
 
     def autotrading_enabled(self) -> bool:
         # terminal_info().trade_allowed is the AutoTrading toolbar toggle;
@@ -157,6 +161,9 @@ class Mt5Terminal:
                 tp=float(p.tp) or None,
                 is_buy=int(p.type) == 0,
                 opened_at=self._to_utc(p.time),
+                price_current=float(p.price_current),
+                profit=float(p.profit),
+                swap=float(p.swap),
             )
             for p in raw
         )
@@ -207,6 +214,10 @@ class Mt5Terminal:
                 is_buy=int(d.type) == 0,
                 dealt_at=self._to_utc(d.time),
                 entry=int(d.entry),
+                profit=float(d.profit),
+                commission=float(d.commission),
+                swap=float(d.swap),
+                fee=float(d.fee),
             )
             for d in raw
         )

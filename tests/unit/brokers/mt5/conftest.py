@@ -40,8 +40,10 @@ class FakeTerminal:
         send_result: Mt5SendResult | None = None,
         deals: Sequence[Mt5Deal] = (),
         positions: Sequence[Mt5Position] = (),
+        equity: float | None = 100000.0,
     ) -> None:
         self.trade_mode = trade_mode
+        self.equity = equity
         self.initialises = initialises
         self.shutdown_calls = 0
         self.gate = threading.Event()
@@ -64,6 +66,9 @@ class FakeTerminal:
 
     def account_trade_mode(self) -> int:
         return self.trade_mode
+
+    def account_equity(self) -> float | None:
+        return self.equity
 
     def terminal_connected(self) -> bool:
         return True
@@ -156,6 +161,9 @@ def position_terminal() -> FakeTerminal:
                     tp=1.1100,
                     is_buy=True,
                     opened_at=_OPENED_AT,
+                    price_current=1.1000,
+                    profit=0.0,
+                    swap=0.0,
                 ),
                 Mt5Position(
                     ticket=1002,
@@ -167,6 +175,9 @@ def position_terminal() -> FakeTerminal:
                     tp=None,
                     is_buy=False,
                     opened_at=_OPENED_AT,
+                    price_current=1.2000,
+                    profit=0.0,
+                    swap=0.0,
                 ),
             )
 

@@ -61,3 +61,17 @@ def test_the_deal_entry_constants_are_what_the_mapping_assumes() -> None:
 
 def test_a_deal_exposes_its_entry_direction() -> None:
     assert "entry" in dir(mt5.TradeDeal)
+
+
+def test_the_money_fields_the_portfolio_reads_exist() -> None:
+    """Phase 10's portfolio reads a deal's four money fields, a position's mark
+    and profit, and the account's equity. A renamed one would raise inside the
+    terminal rather than read as zero, but only on a live account."""
+
+    deal_fields = dir(mt5.TradeDeal)
+    for name in ("profit", "commission", "swap", "fee"):
+        assert name in deal_fields
+    position_fields = dir(mt5.TradePosition)
+    for name in ("price_current", "profit", "swap"):
+        assert name in position_fields
+    assert "equity" in dir(mt5.AccountInfo)

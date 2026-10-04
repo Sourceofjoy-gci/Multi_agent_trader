@@ -275,3 +275,45 @@ def test_the_lock_is_released_when_the_sequence_ends(database: DatabaseHarness) 
         pass
     with submission_lock(factory):
         pass  # must not raise
+
+
+# --- Phase 10: what the portfolio's order rate and reject streak read ------------------
+
+
+def test_submissions_since_names_each_submissions_book_after_the_start(
+    ledger: PostgresIntentLedger,
+) -> None:
+    early = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+    late = datetime(2026, 10, 4, 12, 0, 30, tzinfo=UTC)
+    ledger.append("a", IntentState.SUBMITTING, early, {"book": "fx_scalp"})
+    ledger.append("b", IntentState.SUBMITTING, late, {"book": "fx_swing"})
+    ledger.append("b", IntentState.CONFIRMED, late, {})
+
+    assert ledger.submissions_since(early) == (("fx_swing", late),)
+    assert [book for book, _ in ledger.submissions_since(datetime(2026, 1, 1, tzinfo=UTC))] == [
+        "fx_scalp",
+        "fx_swing",
+    ]
+
+
+def test_the_reject_streak_counts_rejections_since_the_last_confirmation(
+    ledger: PostgresIntentLedger,
+) -> None:
+    at = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+
+    def settle(intent_id: str, state: IntentState) -> None:
+        ledger.append(intent_id, IntentState.SUBMITTING, at, {"book": "fx_scalp"})
+        ledger.append(intent_id, state, at, {})
+
+    assert ledger.consecutive_rejects() == 0
+    settle("r1", IntentState.REJECTED)
+    settle("r2", IntentState.REJECTED)
+    assert ledger.consecutive_rejects() == 2
+    settle("c1", IntentState.CONFIRMED)
+    assert ledger.consecutive_rejects() == 0
+    settle("r3", IntentState.REJECTED)
+    # FAILED is the reconciler's verdict on a lost order, not a venue refusal:
+    # it neither extends the streak nor breaks it.
+    settle("f1", IntentState.FAILED)
+    settle("r4", IntentState.REJECTED)
+    assert ledger.consecutive_rejects() == 2

@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 
 from tests.unit.brokers.mt5.conftest import FakeTerminal
 from trading_house import cli
-from trading_house.brokers.mt5.boundary import TerminalPort
+from trading_house.brokers.mt5.boundary import Mt5Position, Mt5SymbolInfo, TerminalPort
 from trading_house.core.schemas import ApprovedRiskDecision, RejectedRiskDecision
 from trading_house.core.values import IntentState, PositiveQuantity, Quantity
 from trading_house.database.connection import open_runtime_connection
@@ -276,3 +276,69 @@ def test_order_commands_never_echo_credentials(database: DatabaseHarness, tmp_pa
     rendered = result.stdout + result.stderr
     assert database.runtime_dsn not in rendered
     assert "integration-runtime-password" not in rendered
+
+
+class _UnprotectedAccountTerminal(FakeTerminal):
+    """A connected demo account already holding one fx_scalp EURUSD position
+    with no broker stop -- the one open position whose risk nobody can bound."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            positions=(
+                Mt5Position(
+                    ticket=9001,
+                    magic=110042,
+                    server_symbol="EURUSD",
+                    volume=0.1,
+                    price_open=1.1,
+                    sl=0.0,
+                    tp=None,
+                    is_buy=True,
+                    opened_at=NOW,
+                    price_current=1.1,
+                    profit=0.0,
+                    swap=0.0,
+                ),
+            )
+        )
+
+    def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None:
+        return Mt5SymbolInfo(
+            name=server_symbol,
+            digits=5,
+            point=0.00001,
+            trade_tick_size=0.00001,
+            trade_tick_value_loss=1.0,
+            volume_min=0.01,
+            volume_step=0.01,
+            volume_max=100.0,
+            trade_stops_level=0,
+            trade_freeze_level=0,
+            trade_mode=4,
+            trade_exemode=2,
+            filling_mode=3,
+            currency_base="EUR",
+            currency_profit="USD",
+        )
+
+
+@pytest.mark.usefixtures("_fresh_ledger")
+def test_order_submit_rechecks_the_portfolio_before_any_intent_exists(
+    database: DatabaseHarness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 10 at its enforcement point. The decision file was sized against
+    some earlier portfolio; the account now holds a position with no stop, so
+    its risk cannot be bounded and every new order is refused -- with the gate
+    named, and before ``OrderManager`` writes SUBMITTING."""
+
+    terminal = _UnprotectedAccountTerminal()
+    monkeypatch.setattr(cli, "_mt5_terminal_factory", lambda: lambda _probe: terminal)
+
+    result = runner.invoke(cli.app, _submit_args(_decision_file(tmp_path / "d.json")))
+
+    assert result.exit_code == cli.ExitCode.PORTFOLIO_RISK, result.stdout + result.stderr
+    error = json.loads(result.stderr)
+    assert error["detail"] == "portfolio risk limits refuse this order"
+    assert "unmeasured_open_risk" in error["reasons"].split(",")
+    assert terminal.sent == []
+    assert _ledger(database).current_state("new-1") is None

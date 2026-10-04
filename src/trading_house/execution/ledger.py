@@ -136,6 +136,29 @@ def _event_from_row(row: tuple[Any, ...]) -> IntentEvent:
     )
 
 
+# Phase 10: the order-rate window counts SUBMITTING rows, which are written
+# before the venue is called and so count every order that could have reached
+# it, accepted or not.
+_SUBMISSIONS_SINCE_SQL = """
+SELECT payload->>'book', event_time
+FROM execution.intent_events
+WHERE state = 'SUBMITTING' AND event_time > %s
+ORDER BY seq
+"""
+
+# Venue rejections since the last confirmation. FAILED is the reconciler's
+# verdict on a lost order, not the broker refusing one, so it neither counts
+# toward the streak nor breaks it.
+_CONSECUTIVE_REJECTS_SQL = """
+SELECT count(*)
+FROM execution.intent_events
+WHERE state = 'REJECTED'
+  AND seq > COALESCE(
+      (SELECT max(seq) FROM execution.intent_events WHERE state = 'CONFIRMED'), 0
+  )
+"""
+
+
 class PostgresIntentLedger:
     """Append-only access to the intent ledger."""
 
@@ -218,6 +241,30 @@ class PostgresIntentLedger:
         finally:
             connection.close()
         return tuple(row[0] for row in rows)
+
+    def submissions_since(self, start: datetime) -> tuple[tuple[str, datetime], ...]:
+        """``(book, submitted_at)`` for every submission after ``start``."""
+
+        connection = self._connect()
+        try:
+            with connection, connection.cursor() as cursor:
+                cursor.execute(_SUBMISSIONS_SINCE_SQL, (start,))
+                rows = cursor.fetchall()
+        finally:
+            connection.close()
+        return tuple((row[0], row[1]) for row in rows)
+
+    def consecutive_rejects(self) -> int:
+        """Venue rejections since the last confirmed order."""
+
+        connection = self._connect()
+        try:
+            with connection, connection.cursor() as cursor:
+                cursor.execute(_CONSECUTIVE_REJECTS_SQL)
+                row = cursor.fetchone()
+        finally:
+            connection.close()
+        return 0 if row is None else int(row[0])
 
 
 @contextmanager

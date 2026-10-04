@@ -20,6 +20,7 @@ from trading_house.brokers.mt5.boundary import (
 from trading_house.brokers.mt5.contracts import (
     asset_class_for,
     decimal_of,
+    position_mark_of,
     position_record_of,
     supported_fills,
     to_instrument_contract,
@@ -267,6 +268,9 @@ def _mt5_position(**overrides: object) -> Mt5Position:
         "tp": 1.11000,
         "is_buy": True,
         "opened_at": datetime(2026, 8, 25, tzinfo=UTC),
+        "price_current": 1.10200,
+        "profit": 20.0,
+        "swap": -1.5,
     }
     fields.update(overrides)
     return Mt5Position(**fields)  # type: ignore[arg-type]
@@ -279,3 +283,15 @@ def test_a_zero_stop_becomes_none_not_zero() -> None:
 
     assert position_record_of(_mt5_position(sl=0.0)).stop_loss is None
     assert position_record_of(_mt5_position(sl=1.09700)).stop_loss == Decimal("1.09700")
+
+
+def test_a_mark_carries_the_brokers_price_and_profit_plus_swap() -> None:
+    mark = position_mark_of(_mt5_position())
+
+    assert mark.current_price == Decimal("1.102")
+    assert mark.unrealized_money == Decimal("18.5")
+    assert mark.stop_loss == Decimal("1.095")
+
+
+def test_a_mark_with_a_zero_stop_has_no_stop() -> None:
+    assert position_mark_of(_mt5_position(sl=0.0)).stop_loss is None

@@ -87,6 +87,9 @@ class _StubTerminal:
     def account_trade_mode(self) -> int:
         return self.trade_mode
 
+    def account_equity(self) -> float | None:
+        return 100000.0
+
     def terminal_connected(self) -> bool:
         return True
 
@@ -163,6 +166,9 @@ class _TerminalWithAPosition(_StubTerminal):
                 tp=None,
                 is_buy=True,
                 opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+                price_current=1.10000,
+                profit=0.0,
+                swap=0.0,
             ),
         )
 

@@ -174,6 +174,37 @@ class PositionRecord:
     opened_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DealMoney:
+    """What one broker deal did to the balance, for the portfolio's P&L.
+
+    Separate from ``DealRecord`` because the reconciler matches deals and never
+    needs their money, and the portfolio needs their money and never matches
+    them. ``net_money`` is profit plus commission, swap and fee.
+    """
+
+    magic: int
+    dealt_at: datetime
+    net_money: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PositionMark:
+    """One open position as the risk engine's portfolio sees it: where the
+    broker marks it now, and what that is worth. Separate from
+    ``PositionRecord`` for the reason ``DealMoney`` is separate from
+    ``DealRecord``. ``stop_loss`` is ``None`` when the broker reports no stop,
+    exactly as on ``PositionRecord``."""
+
+    magic: int
+    server_symbol: str
+    volume: Decimal
+    is_buy: bool
+    stop_loss: Decimal | None
+    current_price: Decimal
+    unrealized_money: Decimal
+
+
 class RecoveryAction(str, Enum):  # noqa: UP042
     """The only three responses to a venue rejection.
 

@@ -713,6 +713,9 @@ class _StubTerminal:
     def account_trade_mode(self) -> int:
         return self.trade_mode
 
+    def account_equity(self) -> float | None:
+        return 100000.0
+
     def terminal_connected(self) -> bool:
         return True
 

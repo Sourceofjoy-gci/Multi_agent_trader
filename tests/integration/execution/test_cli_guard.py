@@ -92,6 +92,9 @@ class _GuardTerminal(FakeTerminal):
                 tp=0.0,
                 is_buy=True,
                 opened_at=NOW,
+                price_current=1.1000,
+                profit=0.0,
+                swap=0.0,
             ),
         )
 

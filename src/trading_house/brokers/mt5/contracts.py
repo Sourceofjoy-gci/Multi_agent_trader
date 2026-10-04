@@ -28,13 +28,14 @@ from trading_house.brokers.mt5.boundary import (
     SYMBOL_TRADE_MODE_FULL,
     SYMBOL_TRADE_MODE_LONGONLY,
     SYMBOL_TRADE_MODE_SHORTONLY,
+    Mt5Deal,
     Mt5Position,
     Mt5SymbolInfo,
 )
 from trading_house.core.errors import ConfigurationError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.values import AssetClass, InstrumentId
-from trading_house.core.venue import PositionRecord
+from trading_house.core.venue import DealMoney, PositionMark, PositionRecord
 
 
 def decimal_of(value: float) -> Decimal:
@@ -153,4 +154,34 @@ def position_record_of(position: Mt5Position) -> PositionRecord:
         open_price=decimal_of(position.price_open),
         is_buy=position.is_buy,
         opened_at=position.opened_at,
+    )
+
+
+def position_mark_of(position: Mt5Position) -> PositionMark:
+    """Map one broker position into the portfolio's shape. The no-stop zero
+    becomes ``None`` for the reason ``position_record_of`` gives."""
+
+    return PositionMark(
+        magic=position.magic,
+        server_symbol=position.server_symbol,
+        volume=decimal_of(position.volume),
+        is_buy=position.is_buy,
+        stop_loss=decimal_of(position.sl) if position.sl != 0.0 else None,
+        current_price=decimal_of(position.price_current),
+        unrealized_money=decimal_of(position.profit) + decimal_of(position.swap),
+    )
+
+
+def deal_money_of(deal: Mt5Deal) -> DealMoney:
+    """One deal's effect on the balance: profit plus commission, swap and fee."""
+
+    return DealMoney(
+        magic=deal.magic,
+        dealt_at=deal.dealt_at,
+        net_money=(
+            decimal_of(deal.profit)
+            + decimal_of(deal.commission)
+            + decimal_of(deal.swap)
+            + decimal_of(deal.fee)
+        ),
     )

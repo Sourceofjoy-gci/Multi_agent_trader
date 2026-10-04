@@ -25,6 +25,7 @@ class ExitCode(IntEnum):
     SCENARIO_EVIDENCE = 19
     STATISTICAL_INPUT = 20
     PROMOTION_REFUSED = 21
+    PORTFOLIO_RISK = 22
 
 
 class TradingHouseError(Exception):
@@ -267,3 +268,20 @@ class TrialLedgerIntegrityError(TradingHouseError):
     """
 
     public_message = "trial ledger integrity verification failed"
+
+
+class PortfolioRiskRefusedError(TradingHouseError):
+    """Raised when ``order submit``'s portfolio re-check refuses a decision.
+
+    Phase 10. The decision was sized when it was made; the portfolio it would
+    join has been read again since, and a signed limit refuses it there. Names
+    the refusing gates: each is a closed enum value, so naming them carries no
+    free text, and an operator told only "refused" cannot tell a daily stop
+    from a stale P&L read.
+    """
+
+    public_message = "portfolio risk limits refuse this order"
+
+    def __init__(self, reasons: Sequence[str]) -> None:
+        self.reasons = tuple(reasons)
+        Exception.__init__(self, f"{self.public_message}: {', '.join(self.reasons)}")

@@ -213,6 +213,11 @@ class Mt5Position:
     tp: float | None
     is_buy: bool
     opened_at: datetime
+    # Phase 10: what the position is worth now, as the broker marks it.
+    # ``profit`` excludes swap, which MT5 reports separately.
+    price_current: float
+    profit: float
+    swap: float
 
 
 def sltp_request(
@@ -272,6 +277,12 @@ class Mt5Deal:
     is_buy: bool
     dealt_at: datetime
     entry: int
+    # Phase 10: the deal's money, in account currency. MT5 reports the four
+    # separately; their sum is what the deal did to the balance.
+    profit: float
+    commission: float
+    swap: float
+    fee: float
 
 
 # MetaTrader 5's own DEAL_ENTRY_* constants, mirrored so this module never
@@ -290,6 +301,28 @@ def deal_entry_of(raw: int) -> DealEntry:
     return entry
 
 
+class _AccountLike(Protocol):
+    @property
+    def equity(self) -> float: ...
+    @property
+    def trade_mode(self) -> int: ...
+
+
+def equity_of(account: _AccountLike | None) -> float | None:
+    """The account's equity, or ``None`` when ``account_info()`` could not be
+    read. Here rather than in ``terminal.py`` so the one branch is tested."""
+
+    return None if account is None else float(account.equity)
+
+
+def trade_mode_of(account: _AccountLike | None) -> int:
+    """The account's trade mode, or -1 -- which no mode is -- when
+    ``account_info()`` could not be read. The demo gate refuses -1 like any
+    other non-demo answer."""
+
+    return -1 if account is None else int(account.trade_mode)
+
+
 @runtime_checkable
 class TerminalPort(Protocol):
     """Every MetaTrader 5 call the gateway makes. Nothing wider."""
@@ -297,6 +330,7 @@ class TerminalPort(Protocol):
     def initialize(self) -> bool: ...
     def shutdown(self) -> None: ...
     def account_trade_mode(self) -> int: ...
+    def account_equity(self) -> float | None: ...
     def autotrading_enabled(self) -> bool: ...
     def terminal_connected(self) -> bool: ...
     def server_utc_offset_seconds(self) -> int: ...

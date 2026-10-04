@@ -58,6 +58,7 @@ from trading_house.core.errors import (
     IntentAlreadySubmittedError,
     MigrationMismatchError,
     NonDemoAccountError,
+    PortfolioRiskRefusedError,
     PromotionRefusedError,
     ScenarioEvidenceError,
     SchemaValidationError,
@@ -128,6 +129,7 @@ from trading_house.ops.ledger import (
     seal_bundle,
 )
 from trading_house.ops.package import package_from_chain, verify_package
+from trading_house.ops.portfolio import recheck_submission
 from trading_house.ops.scenarios import (
     ScenarioReport,
     baseline_at,
@@ -162,6 +164,7 @@ from trading_house.research.trial_ledger import (
     TrialSpec,
 )
 from trading_house.research.validation.capacity import capacity_diagnostic
+from trading_house.risk.engine import RiskEngine
 from trading_house.settings import RuntimeSettings
 from trading_house.strategies.registry import strategy_scope
 
@@ -203,6 +206,7 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     ScenarioEvidenceError: ExitCode.SCENARIO_EVIDENCE,
     StatisticalInputError: ExitCode.STATISTICAL_INPUT,
     PromotionRefusedError: ExitCode.PROMOTION_REFUSED,
+    PortfolioRiskRefusedError: ExitCode.PORTFOLIO_RISK,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --
     # but they are all "the run you asked for cannot be simulated honestly", and
@@ -292,6 +296,14 @@ def _execute(operation: Callable[[], dict[str, JsonValue]]) -> dict[str, JsonVal
             BacktestRefused.public_message,
             EXIT_CODES[BacktestRefused],
             refusal=error.kind.value,
+        ) from None
+    except PortfolioRiskRefusedError as error:
+        # The refusing gates are RejectionReason values, a closed enum, so the
+        # key carries no free text from a DSN, a path or a broker message.
+        raise _fail(
+            error.public_message,
+            EXIT_CODES[PortfolioRiskRefusedError],
+            reasons=",".join(error.reasons),
         ) from None
     except UnresolvedIntentsError as error:
         # str(error) names the offending intent ids; the class-level
@@ -976,6 +988,22 @@ def order_submit(
             instrument_binding = binding.instruments.get(instrument)
             if book_binding is None or instrument_binding is None:
                 raise ConfigurationError()
+            # Phase 10: the decision was sized against the portfolio as it
+            # was then. Read it again, under the lock and after the gate, and
+            # refuse before an intent exists if a signed limit now would.
+            constitution = _constitution().constitution
+            recheck_submission(
+                RiskEngine(constitution, clock),
+                approved,
+                venue=adapter,
+                history=ledger,
+                binding=binding,
+                books=tuple(constitution.books),
+                book=book,
+                instrument_id=instrument,
+                side=side,
+                now=clock.now(),
+            )
             venue_ref = Mt5VenueRef(
                 venue=Venue.MT5,
                 magic=derive_magic(intent_id, book_binding.magic_range),

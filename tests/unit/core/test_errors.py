@@ -9,6 +9,7 @@ from trading_house.core.errors import (
     ExitCode,
     MigrationMismatchError,
     NonDemoAccountError,
+    PortfolioRiskRefusedError,
     SchemaValidationError,
     SignatureVerificationError,
     StatisticalInputError,
@@ -87,3 +88,13 @@ def test_broker_exit_codes_are_distinct_and_new() -> None:
     assert ExitCode.BROKER == 8
     assert ExitCode.ACCOUNT_MODE == 9
     assert len({member.value for member in ExitCode}) == len(list(ExitCode))
+
+
+def test_a_portfolio_refusal_names_its_gates_and_has_its_own_code() -> None:
+    error = PortfolioRiskRefusedError(("daily_loss_stop", "aggregate_open_risk"))
+
+    assert ExitCode.PORTFOLIO_RISK == 22
+    assert error.reasons == ("daily_loss_stop", "aggregate_open_risk")
+    assert str(error) == (
+        "portfolio risk limits refuse this order: daily_loss_stop, aggregate_open_risk"
+    )

@@ -29,7 +29,9 @@ from trading_house.brokers.mt5.boundary import (
     sltp_request,
 )
 from trading_house.brokers.mt5.contracts import (
+    deal_money_of,
     decimal_of,
+    position_mark_of,
     position_record_of,
     to_instrument_contract,
 )
@@ -42,8 +44,10 @@ from trading_house.core.instruments import FillPolicy, InstrumentContract
 from trading_house.core.schemas import OrderIntent, PositionState, Side
 from trading_house.core.values import BookId, InstrumentId, PositiveQuantity, Price, QuantityUnit
 from trading_house.core.venue import (
+    DealMoney,
     DealRecord,
     ExecutionOutcome,
+    PositionMark,
     PositionRecord,
     PrecheckResult,
     RejectReason,
@@ -595,6 +599,35 @@ class Mt5BrokerAdapter:
         if positions is None:
             return None
         return tuple(position_record_of(position) for position in positions)
+
+    def account_equity(self) -> Decimal | None:
+        """The account's equity, or ``None`` when it could not be read.
+
+        Phase 10's portfolio measures every percentage limit against this, so
+        an unreadable equity is a refusal at the gate, never a zero.
+        """
+
+        equity = self._gateway.call(Priority.RECONCILE, lambda t: t.account_equity())
+        return None if equity is None else decimal_of(equity)
+
+    def deal_money_since(self, start: datetime) -> tuple[DealMoney, ...] | None:
+        """Every deal's money from ``start`` to now, or ``None`` when the
+        history could not be read -- the same blindness ``deals_since`` keeps."""
+
+        deals = self._gateway.call(
+            Priority.RECONCILE, lambda t: t.history_deals(start, self._clock.now())
+        )
+        if deals is None:
+            return None
+        return tuple(deal_money_of(deal) for deal in deals)
+
+    def position_marks(self) -> tuple[PositionMark, ...] | None:
+        """Every open position as the broker marks it now, or ``None``."""
+
+        positions = self._gateway.call(Priority.RECONCILE, lambda t: t.positions())
+        if positions is None:
+            return None
+        return tuple(position_mark_of(position) for position in positions)
 
     def reconcile(self, book: BookId) -> ReconciliationReport:
         """Match every venue position relevant to ``book`` against the intent

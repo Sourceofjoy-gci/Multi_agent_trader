@@ -31,10 +31,10 @@ Each field was validated when the constitution loaded, and then read by nothing.
 
 1. **One pure gate, in one place.** `RiskEngine.evaluate` and `evaluate_for_execution` take a required `portfolio: PortfolioState`. Every limit in §1 is a deterministic check with its own `RejectionReason`. `checks_passed` lists every check that was ruled out, as before. There is no flag that switches the gate off: the only way to pass a check is to pass a state that clears it.
 2. **The live order path re-checks before sending.** `order submit` builds a `PortfolioState` from the broker and the intent ledger, after the clean-ledger gate (I-20) and inside the submission lock. It then runs `RiskEngine.recheck_portfolio` against the decision it was handed. A refusal is exit 22, with the reasons named.
-3. **Unknown is a refusal, not a zero.** The gate refuses rather than guessing in three cases:
-   - an open position whose risk cannot be measured (no broker stop, or a symbol the signed binding does not name);
-   - P&L the system cannot read;
-   - an account equity it cannot read.
+3. **Unknown is a refusal, not a zero.** The gate refuses rather than guessing in these cases:
+   - an open position whose risk cannot be measured (no broker stop, or a symbol the signed binding does not name) refuses as `unmeasured_open_risk`;
+   - deal history the system cannot read refuses as `pnl_unavailable`;
+   - an open-position list or an account equity the terminal cannot produce leaves no portfolio to judge at all. That is `BrokerUnavailableError` (exit 8).
 
 ## 3. `PortfolioState`
 
@@ -96,12 +96,16 @@ Each limit is checked so that the candidate cannot be the order that breaches it
 | `aggregate_open_risk` | `firm open risk + candidate risk <= max_aggregate_open_risk_pct% of firm equity` |
 | `single_instrument_risk` | `open risk on the instrument (all books) + candidate risk <= max_single_instrument_risk_pct%` |
 | `correlated_cluster_risk` | For each candidate key: `open risk sharing the key + candidate risk <= max_correlated_cluster_risk_pct%` |
-| `book_gross_leverage` | `(book notional + candidate notional) / book equity <= book max_gross_leverage` |
-| `firm_gross_leverage` | `(firm notional + candidate notional) / firm equity <= firm max_gross_leverage` |
+| `book_gross_leverage` | `(book notional + candidate notional) / book equity <= book max_gross_leverage`. Resizes in `evaluate`; refuses in `recheck_portfolio` |
+| `firm_gross_leverage` | `(firm notional + candidate notional) / firm equity <= firm max_gross_leverage`. Same |
 
 Why the daily and drawdown halts include open risk: the constitution's own validator already requires `max_concurrent_positions * risk_per_trade_pct <= daily_loss_stop_pct`, so that a correlated cluster is "arrested by the stop, not breaching it". Comparing only realised loss to the stop would let three fresh positions take a book that has already lost 2% through a 2.5% stop. Counting worst-case open risk is what makes each halt a ceiling rather than a trigger that fires after the damage is done.
 
-The first six checks need only the state, so they join the existing independent-gate batch. The rest need the candidate's risk and notional, so they run after sizing, on the volume actually approved. A breach **rejects**; it does not resize down to the remaining headroom. Resizing to fit is a sizing policy and a later decision.
+The first five checks need only the state, so they join the existing independent-gate batch. The rest need the candidate's risk and notional, so they run after sizing, on the volume actually approved.
+
+**Gross leverage resizes; everything else rejects.** Leverage is a ceiling on size, the same kind as `quantity_max`. In `evaluate`, the volume is floored to the largest on-grid size that both leverage headrooms admit, and the verdict is `RESIZED`. If less than one minimum lot of room is left, the binding limit names the refusal. A risk headroom (daily, drawdown, aggregate, instrument, cluster) is not resized into: a trade sized to whatever risk other positions happen to leave is a sizing policy, and a later decision. `recheck_portfolio` refuses on leverage rather than resizing, because `order submit` sends the decision it was given or nothing.
+
+This cap binds on a single trade with nothing else open whenever a tight stop sizes past `max_gross_leverage`. At `fx_swing`'s 0.75% budget and 5x cap, that is any EURUSD stop under about 16.5 pips. Before this phase the backtester sized such trades from the risk budget alone. The known-answer fixtures' 10-pip stop sized 3.37 lots, about 8.2x the book, where the cap admits 2.04. Every pinned backtest number that moved was re-derived and re-pinned with that reason stated. Phase 7's sealed evidence stays verifiable as what was run, but the current code no longer reproduces its bytes.
 
 ## 5. Where each state comes from
 
@@ -129,7 +133,7 @@ The gap this leaves is named, not hidden. Gate 7 rejects a firm-equity drawdown 
   If any read returns `None` ("could not see"), the field is `None` and the gate refuses.
 - **Order stamps** (`IntentLedger.submissions_since(now - 60s)`): `SUBMITTING` rows, with their book.
 - **Rejects** (`IntentLedger.consecutive_rejects()`): `REJECTED` rows after the last `CONFIRMED` row.
-- **Firm equity** (`adapter.account_equity()`): `None` refuses.
+- **Firm equity** (`adapter.account_equity()`). Unreadable equity or an unreadable position list raises `BrokerUnavailableError`.
 
 `recheck_portfolio` is used because `order submit` receives a decision, not a proposal. It needs a risk and a notional for the decision as it would execute now. Risk is the larger of the decision's own `risk_money` and the loss from the current quote (ask for a buy, bid for a sell) to the decision's stop. A quote that drifted toward the stop cannot lower the risk the decision was sized for. Notional is quantity at the same quote.
 
@@ -147,7 +151,7 @@ These fields and methods are needed, and nothing else:
 
 - **No latching.** A halt holds while its arithmetic says so. A book with no open positions can only recover drawdown by trading, which the halt forbids, so in practice it latches. A position still open can still pull it back under the line. A latched, human-unlocked halt is SAFE_MODE's job (review §3.2).
 - **No swing overnight or weekend limits** (`max_overnight_positions`, `max_weekend_exposure_pct`, `gap_risk_multiple`). These need a calendar of when the position will be held, which this phase does not model. They stay declared and unenforced, and are listed here so that nobody reads the table in §4 as complete.
-- **No resize-to-fit** (§4).
+- **No resize-to-fit on risk headroom** (§4). Leverage alone resizes.
 - **No deposit or withdrawal accounting.** Drawdown is built from system-owned deals only. Balance operations and manual trades' P&L are outside it. A manual trade's *open risk* is inside every firm limit.
 - **The automated runner is not built.** `order submit` is the only live caller today. The strategy runner (review §3.3) will call `evaluate_for_execution` with the same live builder.
 
@@ -158,6 +162,6 @@ These fields and methods are needed, and nothing else:
   - book open risk plus today's loss stays within the daily stop;
   - firm open risk stays within the aggregate limit;
   - every cluster stays within its limit.
-- **Backtester:** every existing known-answer and digest test runs unchanged.
+- **Backtester:** the existing known-answer and digest tests run with the flat portfolio. The ones the leverage cap moved are re-derived by hand (2.04 lots), and the compounding tests widen their stop so they keep testing equity rather than the cap.
 - **Live builder:** fake adapter and fake ledger. Unmeasured, unknown-P&L and unknown-equity cases refuse; book attribution by magic range; today's slice at UTC midnight.
 - **CLI:** `order submit` refuses with exit 22 and names the reasons, before any intent is written.

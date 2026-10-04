@@ -23,7 +23,14 @@ from trading_house.core.clock import SystemClock
 from trading_house.core.errors import BrokerError, BrokerUnavailableError, ConfigurationError
 from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
-from trading_house.core.venue import Mt5VenueRef, PositionRecord, RejectReason, Venue
+from trading_house.core.venue import (
+    DealMoney,
+    Mt5VenueRef,
+    PositionMark,
+    PositionRecord,
+    RejectReason,
+    Venue,
+)
 from trading_house.marketdata.models import Timeframe
 
 _MAGIC_RANGE = (110000, 119999)  # fx_scalp's declared range, below
@@ -199,6 +206,9 @@ def test_reconcile_reports_a_manually_opened_position_as_unmatched() -> None:
                     tp=None,
                     is_buy=True,
                     opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+                    price_current=1.1000,
+                    profit=0.0,
+                    swap=0.0,
                 ),
             )
 
@@ -601,6 +611,9 @@ class _SinglePositionTerminal(FakeTerminal):
                 tp=1.11000,
                 is_buy=True,
                 opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+                price_current=1.10000,
+                profit=0.0,
+                swap=0.0,
             ),
         )
 
@@ -711,6 +724,9 @@ def _position(*, ticket: int, sl: float, is_buy: bool, tp: float | None = None) 
         tp=tp,
         is_buy=is_buy,
         opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+        price_current=1.10000,
+        profit=0.0,
+        swap=0.0,
     )
 
 
@@ -941,6 +957,88 @@ def test_positions_now_maps_open_positions_to_neutral_records(
         open_price=Decimal("1.1"),
         is_buy=True,
         opened_at=datetime(2026, 8, 25, tzinfo=UTC),
+    )
+
+
+# --- Phase 10: what the portfolio reads ---------------------------------------
+
+
+def test_account_equity_is_read_as_a_decimal_and_an_unreadable_one_as_none() -> None:
+    adapter, gateway = _adapter(FakeTerminal(equity=100123.45))
+    blind, blind_gateway = _adapter(FakeTerminal(equity=None))
+    try:
+        assert adapter.account_equity() == Decimal("100123.45")
+        assert blind.account_equity() is None
+    finally:
+        gateway.stop()
+        blind_gateway.stop()
+
+
+def test_deal_money_is_profit_commission_swap_and_fee_and_blindness_is_none() -> None:
+    deal = Mt5Deal(
+        ticket=1,
+        order_ticket=2,
+        position_ticket=3,
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=0.1,
+        price=1.1,
+        is_buy=False,
+        dealt_at=datetime(2026, 8, 25, tzinfo=UTC),
+        entry=1,
+        profit=25.0,
+        commission=-0.7,
+        swap=-1.2,
+        fee=-0.1,
+    )
+
+    class _BlindTerminal(FakeTerminal):
+        def history_deals(self, start: datetime, end: datetime) -> Sequence[Mt5Deal] | None:
+            return None
+
+    adapter, gateway = _adapter(FakeTerminal(deals=(deal,)))
+    blind, blind_gateway = _adapter(_BlindTerminal())
+    try:
+        money = adapter.deal_money_since(datetime(2026, 8, 1, tzinfo=UTC))
+        assert blind.deal_money_since(datetime(2026, 8, 1, tzinfo=UTC)) is None
+    finally:
+        gateway.stop()
+        blind_gateway.stop()
+
+    assert money == (
+        DealMoney(
+            magic=110042,
+            dealt_at=datetime(2026, 8, 25, tzinfo=UTC),
+            net_money=Decimal("23.0"),
+        ),
+    )
+
+
+def test_position_marks_carry_the_brokers_mark_and_blindness_is_none(
+    position_terminal: FakeTerminal,
+) -> None:
+    class _BlindTerminal(FakeTerminal):
+        def positions(self) -> Sequence[Mt5Position] | None:
+            return None
+
+    adapter, gateway = _adapter(position_terminal)
+    blind, blind_gateway = _adapter(_BlindTerminal())
+    try:
+        marks = adapter.position_marks()
+        assert blind.position_marks() is None
+    finally:
+        gateway.stop()
+        blind_gateway.stop()
+
+    assert marks is not None
+    assert marks[0] == PositionMark(
+        magic=110042,
+        server_symbol="EURUSD",
+        volume=Decimal("0.1"),
+        is_buy=True,
+        stop_loss=Decimal("1.095"),
+        current_price=Decimal("1.1"),
+        unrealized_money=Decimal("0.0"),
     )
 
 

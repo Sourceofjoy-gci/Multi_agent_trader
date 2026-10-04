@@ -54,6 +54,9 @@ POSITIONS = (
         tp=1.1100,
         is_buy=True,
         opened_at=NOW,
+        price_current=1.1000,
+        profit=0.0,
+        swap=0.0,
     ),
     Mt5Position(
         ticket=1002,
@@ -65,6 +68,9 @@ POSITIONS = (
         tp=None,
         is_buy=False,
         opened_at=NOW,
+        price_current=1.2000,
+        profit=0.0,
+        swap=0.0,
     ),
 )
 

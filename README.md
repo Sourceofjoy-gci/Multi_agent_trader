@@ -1,11 +1,13 @@
-# Trading House — Phase 9 Volatility Breakout
+# Trading House — Phase 10 Portfolio Risk
 
 > **This repository can place orders, and only ever against a demo account.**
 > Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
 > sizing, an idempotent order path, a position guard, and a deterministic
 > backtester that replays stored bars through the same risk engine. Phase 9
 > registers a second strategy, a volatility breakout on EURUSD H1, still
-> untested on real data.
+> untested on real data. Phase 10 gives the risk engine a view of the
+> portfolio, so every limit the constitution signs is now enforced, and
+> `order submit` re-checks a decision against the live account before sending.
 >
 > **There is still no funded account, LLM agent, or demonstrated edge.** The
 > MT5 gateway refuses every non-demo login, and MetaTrader 5 is reachable from
@@ -570,12 +572,10 @@ no snapshot trails nothing.
 Interior gaps are deliberately **not** refused: FX closes every weekend, so a
 gap rule would refuse every run spanning a Saturday.
 
-**`max_concurrent_positions` is enforced nowhere at decision time.** It appears
-only in a constitution self-consistency validator, and neither risk-engine entry
-point takes open-position state. This is a live-system gap, not a backtest one.
-D-7 sidesteps it — the simulator holds one position at a time, so it can never
-report concurrency the live path does not limit — and closing it belongs to
-whichever phase gives the risk engine a portfolio view.
+**`max_concurrent_positions` was enforced nowhere at decision time until Phase
+10**, which gives both risk-engine entry points the portfolio and enforces it
+with every other portfolio limit; see *Phase 10*. D-7 still holds — the simulator
+holds one position at a time and passes an explicitly flat portfolio.
 
 **The result is reproducible across processes, not across changes.**
 `tests/integration/research/test_backtest_determinism.py` runs the command
@@ -2500,6 +2500,64 @@ the Phase 8 sequence — `scenarios`, `validate`, `decide`, and `open-holdout`
 only on `RESEARCH_PASSED` — with `--strategy vol_breakout_eurusd_h1`. A loss
 completes the phase: no tuning, and no rerun under the same id.
 
+## Phase 10 — the portfolio-aware risk engine
+
+Design: [Phase 10](docs/superpowers/specs/2026-10-04-phase-10-portfolio-risk-design.md).
+
+The signed constitution declared twelve portfolio limits that no decision ever
+read. `RiskEngine.evaluate` and `evaluate_for_execution` now take a required
+`PortfolioState` (`risk/portfolio.py`) — what is open, what has been made and
+lost, and what was sent — and enforce all of them, each with its own rejection
+reason:
+
+| Reason | Limit |
+|---|---|
+| `max_concurrent_positions` | The book's open positions |
+| `daily_loss_stop` | Today's loss **plus every open position's risk to its stop** plus the candidate, within the book's daily stop |
+| `book_drawdown_halt`, `firm_drawdown_halt` | Drawdown plus open risk plus the candidate, within the halt |
+| `aggregate_open_risk`, `single_instrument_risk`, `correlated_cluster_risk` | Firm-wide open risk, per instrument, and per currency leg (`ccy:USD` for anything quoted in or against USD); positions no book owns count here too |
+| `book_gross_leverage`, `firm_gross_leverage` | Notional over equity. **Resizes** the position, like `quantity_max`, rather than rejecting |
+| `order_rate_exceeded`, `consecutive_rejects_exceeded` | The firm's (and a scalp book's) orders in the last minute; venue rejections since the last confirmation |
+| `unmeasured_open_risk`, `pnl_unavailable` | An open position with no stop or on an unbound symbol; P&L nobody could read. **Unknown is a refusal, never a zero** |
+
+The halts count open risk as well as realised loss, so each is a ceiling and
+not a trigger that fires after the damage: three fresh positions cannot take a
+book that has already lost 2% through a 2.5% stop.
+
+**The leverage cap moved the backtester's numbers.** A tight stop sizes a large
+position from the risk budget alone, and on EURUSD at `fx_swing`'s 0.75% and 5x
+any stop under about 16.5 pips sizes past the book's signed leverage with
+nothing else open. The known-answer fixtures' 10-pip trade was 3.37 lots, about
+8.2x the book, and is now 2.04. Every pinned number that moved was re-derived
+and re-pinned with the reason in place. Session Momentum's pinned stdout is
+among them: Phase 7's sealed evidence still verifies as what was run, but the
+current code sizes those trades smaller and no longer reproduces its bytes.
+
+**The backtester passes a flat portfolio, by decision.** It takes decisions only
+when flat, and a drawdown halt in a replay would cap a losing rule's reported
+loss: research measures the rule, and the halts are the live overlay on it. The
+gap this leaves is named in the design (section 5.1). Gate 7's 10% firm drawdown
+is looser than a book halt, `fx_swing`'s 10% of a 0.45 slice being 4.5% of firm
+equity. Tightening the gate is a new validation policy, so it is a new trial.
+
+**`order submit` re-checks before it sends.** Inside the submission lock and
+after the clean-ledger gate (I-20), it builds the live portfolio
+(`ops/portfolio.py`) from the broker's positions, deal history and equity, and
+from the intent ledger's recent submissions and reject streak. It then runs
+`RiskEngine.recheck_portfolio` on the decision file, priced at the quote the
+order would cross. A refusal is exit 22, with the gates named, and no intent is
+written:
+
+```json
+{"detail": "portfolio risk limits refuse this order", "reasons": "unmeasured_open_risk", "status": "error"}
+```
+
+What this does not do: halts do not latch (that is SAFE_MODE's job); the swing
+overnight, weekend and gap limits stay declared and unenforced; drawdown is built
+from system-owned deals only, so balance operations and manual trades' P&L are
+outside it (their open risk is not); and the only live caller is `order submit`,
+because the automated strategy runner does not exist yet.
+
 ## Operator commands
 
 ```bash
@@ -2630,6 +2688,7 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 19 | `sealed scenarios do not match the declared cost grid` | A candidate's sealed scenarios are not the ones its preregistration declared: a level missing or duplicated, a summary that is not `COMPLETE` or carries no per-trade split, a baseline that is not the declared one, a stressed level that changed something other than the multiplier, a window the protocol did not declare, a grid whose runs disagree about what they were or which specification they were pinned to, a trial no registration names, or a trial two registrations name | **Do not read the grid as this candidate's evidence.** Every document verifies; the *set* is wrong. Which check fired is on the error's private cause for a log reader, and the remedy differs: a level never run is a new attempt through `research trial scenarios` at a fresh `--attempt-prefix`. A level run **twice** has no remedy — the second document is at that level and completeness refuses the candidate for good, because the only fix would be surgery on the evidence root and the chain. `scenarios` and `compounding` no longer produce that state: they skip a level already sealed under their own attempt id and refuse one sealed under another. Anything else is a registration that cannot be amended. Note that a **missing** document is exit 17, not this one |
 | 20 | `sealed evidence is not a usable statistical input` | A sealed run cannot be turned into a statistical input or cut as its protocol declares: no series, days that are not contiguous, a value that is not finite, fewer than 30 days, a missing basis, a trade that exits outside the series, or a policy that cannot be applied (for example more CPCV folds than days) | **Do not measure this run.** The evidence is intact and is the candidate's own; it is too short or malformed to measure. Which refusal fired is on the error's private cause. No default is substituted |
 | 21 | `promotion step refused` | The policy digest an evaluation was asked to run under is not the one the constants in force give (a threshold moved after the trial's first report), a decision or holdout derivation was handed an incomplete or inconsistent set, a trial is both legacy-imported and preregistered, or `report` was asked for a trial with no recorded decision | **Do not edit the constants to make it run.** A policy change needs a new trial. The specifics ride on the error's private cause for a log reader |
+| 22 | `portfolio risk limits refuse this order` | `order submit`'s re-check of the live portfolio refused the decision; the payload's `reasons` names each refusing gate | Read the reasons. `unmeasured_open_risk` means a position has no stop or sits on a symbol the binding does not name: protect or close it. `pnl_unavailable` means deal history could not be read: check the terminal. A limit reason means the account is at that limit: wait for positions to close, or for the next UTC day for the daily stop. **Do not edit the constitution to make it pass** |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates
