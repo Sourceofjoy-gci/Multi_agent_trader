@@ -5,6 +5,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+import typer.rich_utils
 from alembic import command
 from alembic.config import Config
 from hypothesis import HealthCheck, settings
@@ -39,6 +40,12 @@ settings.register_profile(
     "trading_house", deadline=None, suppress_health_check=[HealthCheck.too_slow]
 )
 settings.load_profile("trading_house")
+
+# Typer forces Rich's terminal mode whenever GITHUB_ACTIONS is set, which puts
+# ANSI styling inside every option name in ``--help`` output: a substring
+# assertion then fails in CI, and a ``not in`` one passes without checking
+# anything. Typer reads this at render time, so import order does not matter.
+typer.rich_utils.FORCE_TERMINAL = False
 
 
 def printed_strings(*streams: str) -> str:
