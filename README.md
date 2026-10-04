@@ -1,10 +1,11 @@
-# Trading House — Phase 7 Session Momentum
+# Trading House — Phase 9 Volatility Breakout
 
 > **This repository can place orders, and only ever against a demo account.**
 > Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
 > sizing, an idempotent order path, a position guard, and a deterministic
-> backtester that replays stored bars through the same risk engine. Phase 7
-> registers the first real strategy and the three-arm runner that measures it.
+> backtester that replays stored bars through the same risk engine. Phase 9
+> registers a second strategy, a volatility breakout on EURUSD H1, still
+> untested on real data.
 >
 > **There is still no funded account, LLM agent, or demonstrated edge.** The
 > MT5 gateway refuses every non-demo login, and MetaTrader 5 is reachable from
@@ -216,7 +217,9 @@ way in, requests are paged around the broker's own request-size ceiling, and
 every read is filtered by an explicit `availability_time` (I-17) — a bar
 stamped 09:00 was not knowable until 09:01, and no consumer read path can see
 it before then. Storage never rewrites a row; a revised broker history is
-counted as a conflict, not silently applied.
+counted as a conflict, not silently applied. A bar that closes after its
+ingest run's `finished_at` is refused by a trigger (migration 0008), which binds
+a superuser too: a run cannot vouch for a bar it could not have fetched.
 
 ### Commands
 
@@ -2457,6 +2460,45 @@ appends no row, and names no digest.
 - **What is not vouched.** `LEGACY_IMPORTED` and `EVIDENCE_SEALED`,
   `RESULT_RECORDED` and `FAILED` digests remain client-asserted; only starts feed
   `trial_counters`. No migration and no new event type were added.
+
+## Phase 9 — Volatility-breakout swing on EURUSD H1
+
+Phase 9 registers the second strategy, `vol_breakout_eurusd_h1` (design:
+[Phase 9](docs/superpowers/specs/2026-10-03-phase-9-volatility-breakout-design.md)).
+It is a hypothesis, not a claim of edge, and **has not yet been run on real
+data.**
+
+**The rule.** Bollinger bands of 20 H1 closes at 2 population sigma. A squeeze
+bar's bandwidth equals the minimum of the 125 bars ending at it. Go long when a
+squeeze happened within the last 10 bars, the close crosses above the upper band
+from inside it, and the close is above the 200-bar mean; short is the mirror.
+No signals on bars opening 21:00–24:00 UTC (a 20:00-bar signal still fills at the
+21:00 open, at that bar's recorded spread). Invalidation is the middle band, the
+book is `fx_swing`, and the time stop is five calendar days. The exit A/B is
+`none`, `fixed_target` at 2.0R, and `chandelier` at 3.0 ATR with a 10-point
+step — three trials.
+
+**Scope comes from the registry.** Each registered strategy declares its
+instrument, timeframe and exit-arm parameters in `strategies/registry.py`.
+`backtest run`, `research trial scenarios`, `compounding` and `open-holdout`
+read them from there; none of them is a command-line option.
+
+**Features are opt-in.** A strategy names the feature blocks it needs in
+`required_features`. Only the breakout asks for `bollinger`, so Session
+Momentum's snapshots and its recorded results are unchanged.
+
+### Running it
+
+The H1 history must be stored first:
+
+```bash
+uv run trading-house data backfill --instrument fx.eurusd --timeframe H1 --from 2010-01-01
+```
+
+Then register the trial and its protocol **before any real backtest**, and run
+the Phase 8 sequence — `scenarios`, `validate`, `decide`, and `open-holdout`
+only on `RESEARCH_PASSED` — with `--strategy vol_breakout_eurusd_h1`. A loss
+completes the phase: no tuning, and no rerun under the same id.
 
 ## Operator commands
 

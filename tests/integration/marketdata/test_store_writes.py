@@ -225,3 +225,52 @@ def test_the_run_ledger_records_what_the_write_actually_did(
         row = cursor.fetchone()
 
     assert row == (0, 0)
+
+
+def test_a_run_cannot_vouch_for_a_bar_that_closed_after_it_finished(
+    bar_store: BarStore,
+) -> None:
+    """A run can only have fetched bars that had closed by the time it finished.
+
+    ``seed`` finishes its run at NINE + 1h, so the bar opening at minute 59
+    closes exactly then and is accepted, while one opening at minute 60 closes
+    after the run was over: no fetch that run made could have returned it.
+    """
+
+    import psycopg
+
+    run_id = uuid4()
+    seed(bar_store, [_bar(59)], run_id=run_id)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        bar_store.append_bars([_bar(60)], run_id=run_id)
+
+
+def test_a_superuser_cannot_file_later_bars_under_a_finished_run(
+    bar_store: BarStore, database: DatabaseHarness
+) -> None:
+    """The 2026-10-01 incident, replayed: a hand-typed superuser INSERT that
+    extended a finished run with 2,880 synthetic bars dated after it.
+
+    A grant cannot stop a superuser and the store was never in the path, so
+    the refusal has to live in the table itself.
+    """
+
+    import psycopg
+
+    run_id = uuid4()
+    seed(bar_store, [_bar(0)], run_id=run_id)
+    later = NINE + timedelta(days=1)
+
+    with (
+        psycopg.connect(database.test_superuser_dsn, autocommit=True) as connection,
+        connection.cursor() as cursor,
+        pytest.raises(psycopg.errors.CheckViolation),
+    ):
+        cursor.execute(
+            "INSERT INTO marketdata.bars (instrument_id, timeframe, event_time, "
+            "availability_time, open, high, low, close, tick_volume, spread, "
+            "real_volume, quality, ingest_run_id) "
+            "VALUES ('fx.eurusd', 'M1', %s, %s, 1.1, 1.1, 1.1, 1.1, 100, 10, 0, 'OK', %s)",
+            (later, later + timedelta(minutes=1), run_id),
+        )

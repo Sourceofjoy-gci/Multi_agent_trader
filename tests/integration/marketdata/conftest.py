@@ -72,6 +72,9 @@ def seed(
     back afterward knows which one to look for.
     """
 
+    # A run finishes after every bar it stores has closed (migration 0008), so
+    # a caller seeding a later series gets a run that finished after it.
+    finished_at = max([NINE + timedelta(hours=1), *(bar.availability_time for bar in bars)])
     run = IngestRun(
         run_id=run_id or uuid4(),
         instrument_id=_INSTRUMENT_ID,
@@ -79,7 +82,7 @@ def seed(
         requested_from=NINE,
         requested_to=NINE + timedelta(hours=1),
         started_at=NINE,
-        finished_at=NINE + timedelta(hours=1),
+        finished_at=finished_at,
         earliest_event_time=None,
         bars_returned=len(bars),
         bars_stored=0,

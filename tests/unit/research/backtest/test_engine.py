@@ -26,6 +26,7 @@ from tests.unit.research.backtest.conftest import (
 )
 from trading_house.core.errors import EquityEvidenceError, TimestampError
 from trading_house.core.schemas import Side
+from trading_house.core.snapshot import FeatureBlock
 from trading_house.marketdata.models import Bar, BarQuality, Timeframe, duration
 from trading_house.research.backtest import engine
 from trading_house.research.backtest.costs import slippage_price_offset
@@ -1341,3 +1342,25 @@ def test_an_in_coverage_window_holding_no_bar_is_a_statistical_input_refusal() -
         )
     assert EXIT_CODES[StatisticalInputError] is ExitCode.STATISTICAL_INPUT
     assert int(ExitCode.STATISTICAL_INPUT) == 20
+
+
+# --- Phase 9: optional feature blocks ------------------------------------------
+
+
+def test_a_strategy_that_declares_bollinger_gets_the_block_from_its_first_snapshot() -> None:
+    """The block needs 200 bars, so the first snapshot is bar 199's -- not bar
+    20's, which is when ATR alone would allow one."""
+
+    strategy = ToyStrategy(every_n=10_000, required_features=frozenset({FeatureBlock.BOLLINGER}))
+    _run(bars=_ramp(260), strategy=strategy)
+
+    assert len(strategy.seen) == 260 - 199
+    assert all(snapshot.bollinger is not None for snapshot in strategy.seen)
+
+
+def test_a_strategy_that_declares_nothing_gets_no_block() -> None:
+    strategy = ToyStrategy(every_n=10_000)
+    _run(bars=_ramp(260), strategy=strategy)
+
+    assert len(strategy.seen) == 260 - FIRST_SNAPSHOT_BAR
+    assert all(snapshot.bollinger is None for snapshot in strategy.seen)

@@ -19,6 +19,7 @@ from trading_house.constitution.models import Constitution
 from trading_house.core.errors import CoverageError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.schemas import Side, TradeProposal
+from trading_house.core.snapshot import FeatureBlock
 from trading_house.core.values import AssetClass
 from trading_house.features.engine import WARMUP_MULTIPLE
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
@@ -235,6 +236,45 @@ def _session_ramp(n: int = 65) -> tuple[Bar, ...]:
     )
 
 
+def _breakout_h1() -> tuple[Bar, ...]:
+    """360 H1 bars with exactly one long volatility breakout, at bar 230.
+
+    See the Phase 9 plan, Task 7, for the arithmetic: a wide rising swing,
+    a 30-bar squeeze at 1.10400, a close at 1.10700, and a flat tail long enough
+    for the five-day time stop to close the trade inside the series.
+    """
+
+    origin = datetime(2026, 9, 7, 0, 0, tzinfo=UTC)
+    closes: list[Decimal] = []
+    for index in range(360):
+        if index < 200:
+            swing = Decimal("0.00080") if index % 2 else Decimal("-0.00080")
+            closes.append(Decimal("1.10000") + Decimal("0.00002") * index + swing)
+        elif index < 230:
+            closes.append(Decimal("1.10400") + (POINT * 5 if index % 2 else -POINT * 5))
+        elif index == 230:
+            closes.append(Decimal("1.10700"))
+        else:
+            closes.append(Decimal("1.10700") + (POINT * 5 if index % 2 else -POINT * 5))
+    return tuple(
+        Bar(
+            instrument_id="fx.eurusd",
+            timeframe=Timeframe.H1,
+            event_time=origin + timedelta(hours=index),
+            availability_time=origin + timedelta(hours=index + 1),
+            open=close,
+            high=close + POINT * 10,
+            low=close - POINT * 10,
+            close=close,
+            tick_volume=100,
+            spread=RAMP_SPREAD_POINTS,
+            real_volume=0,
+            quality=BarQuality.OK,
+        )
+        for index, close in enumerate(closes)
+    )
+
+
 @dataclass(slots=True)
 class FakeBarReader:
     """A ``BarReader`` over a list held in memory.
@@ -350,6 +390,11 @@ class ToyStrategy:
     toy strategy because §3.3's sell-side claim -- that the two legs' slippage
     inverts and still charges both -- is only reachable by selling, and one
     field buys it where a subclass would have to restate the whole proposal."""
+
+    required_features: frozenset[FeatureBlock] = frozenset()
+    """Which optional feature blocks the backtester computes for this toy. Empty
+    by default, like Session Momentum, so every existing engine test keeps the
+    snapshots -- and the pinned identities -- it had before Phase 9."""
 
     seen: list[FeatureSnapshot] = field(default_factory=list)
 

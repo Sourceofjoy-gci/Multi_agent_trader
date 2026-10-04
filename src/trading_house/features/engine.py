@@ -12,9 +12,15 @@ from bisect import bisect_left
 from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Final, Protocol
 
 from trading_house.core.errors import CoverageError, InsufficientHistoryError
+from trading_house.core.snapshot import BollingerFeatures
+from trading_house.features.indicators.bollinger import (
+    population_stdev,
+    simple_mean,
+    squared_bandwidth,
+)
 from trading_house.features.indicators.spread import median_spread_points as _median_spread
 from trading_house.features.indicators.volatility import wilder_atr
 from trading_house.features.sessions import (
@@ -42,6 +48,18 @@ bars, not 10,080, because the weekend is closed. Asking wide and slicing back
 is what makes the answer independent of gaps; three covers weekends with room
 for holidays.
 """
+
+BOLLINGER_PERIOD: Final[int] = 20
+BOLLINGER_WIDTH: Final[Decimal] = Decimal(2)
+SQUEEZE_LOOKBACK: Final[int] = 125
+SQUEEZE_RECENCY: Final[int] = 10
+TREND_PERIOD: Final[int] = 200
+BOLLINGER_WINDOW: Final[int] = max(
+    TREND_PERIOD, BOLLINGER_PERIOD + SQUEEZE_LOOKBACK + SQUEEZE_RECENCY - 1
+)
+"""One fixed window for the whole block (I-18): 200 for the trend mean, and
+the squeeze scan needs only 154. The Phase 9 spec freezes every number here;
+changing one is a new strategy version and a new trial, not a tweak."""
 
 
 class BarReader(Protocol):
@@ -200,6 +218,50 @@ class FeatureEngine:
         """Zero on the session's first closed bar."""
 
         return len(self._current_session_bars(instrument_id, timeframe, as_of=as_of)) - 1
+
+    def bollinger(
+        self, instrument_id: str, timeframe: Timeframe, *, as_of: datetime
+    ) -> BollingerFeatures:
+        """The Bollinger block over the last ``BOLLINGER_WINDOW`` bars at ``as_of``."""
+
+        closes = [
+            bar.close
+            for bar in self._window(instrument_id, timeframe, count=BOLLINGER_WINDOW, as_of=as_of)
+        ]
+        last = len(closes) - 1
+
+        def band(index: int) -> list[Decimal]:
+            return closes[index - BOLLINGER_PERIOD + 1 : index + 1]
+
+        first_scanned = last - SQUEEZE_RECENCY - SQUEEZE_LOOKBACK + 1
+        # ponytail: ~135 squared bandwidths of 20 closes per bar (~1.5 ms/bar measured);
+        # cache by bar index across calls if a run's wall time matters.
+        squared = {
+            index: squared_bandwidth(band(index), BOLLINGER_WIDTH)
+            for index in range(first_scanned, last + 1)
+        }
+
+        def is_squeeze(index: int) -> bool:
+            lookback = range(index - SQUEEZE_LOOKBACK + 1, index + 1)
+            return squared[index] <= min(squared[k] for k in lookback)
+
+        squeezes = [i for i in range(last - SQUEEZE_RECENCY, last + 1) if is_squeeze(i)]
+        middle, sigma = simple_mean(band(last)), population_stdev(band(last))
+        previous_middle = simple_mean(band(last - 1))
+        previous_sigma = population_stdev(band(last - 1))
+        offset = BOLLINGER_WIDTH * sigma
+        previous_offset = BOLLINGER_WIDTH * previous_sigma
+        return BollingerFeatures(
+            middle=middle,
+            upper=middle + offset,
+            lower=middle - offset,
+            bandwidth=2 * offset / middle,
+            previous_close=closes[last - 1],
+            previous_upper=previous_middle + previous_offset,
+            previous_lower=previous_middle - previous_offset,
+            bars_since_squeeze=last - squeezes[-1] if squeezes else None,
+            sma_200=simple_mean(closes[-TREND_PERIOD:]),
+        )
 
     @staticmethod
     def _window_is_complete(

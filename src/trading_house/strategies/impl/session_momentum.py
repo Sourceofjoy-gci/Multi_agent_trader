@@ -8,7 +8,7 @@ from typing import Final
 
 from trading_house.core.exits import ExitPolicy, FixedTargetPolicy, NoExitPolicy
 from trading_house.core.schemas import Side, TradeProposal
-from trading_house.core.snapshot import FeatureSnapshot
+from trading_house.core.snapshot import FeatureBlock, FeatureSnapshot
 from trading_house.core.values import BookId, PositiveQuantity
 from trading_house.features.sessions import Session
 from trading_house.strategies.spec import StrategySpec
@@ -73,6 +73,7 @@ class SessionMomentum:
     book: Final[BookId] = "fx_swing"
     horizon_seconds: Final[int] = 32_400
     max_holding_seconds: Final[int] = 31_500
+    required_features: Final[frozenset[FeatureBlock]] = frozenset()
     expected_return_bps: Final[float] = 5.0
     expected_return_stdev_bps: Final[float] = 2.0
     expected_cost_bps: Final[float] = 1.0

@@ -13,7 +13,7 @@ from trading_house.strategies.registry import REGISTERED_STRATEGY_IDS, registere
 
 
 def test_the_registry_contains_the_real_strategy_and_not_the_toy() -> None:
-    assert frozenset({SESSION_MOMENTUM_ID}) == REGISTERED_STRATEGY_IDS
+    assert SESSION_MOMENTUM_ID in REGISTERED_STRATEGY_IDS
     assert "toy" not in REGISTERED_STRATEGY_IDS
 
 
