@@ -131,12 +131,12 @@ estimates, as Phase 7's were.
 |---|---|---|
 | `expected_return_bps` | 20.0 | prior |
 | `expected_return_stdev_bps` | 10.0 | prior |
-| `expected_cost_bps` | 1.0 | Phase 7 cost assumptions |
+| `expected_cost_bps` | 3.0 | Total, including swap: 1.0 non-swap (Phase 7 cost assumptions) + 2.0 swap; TradeProposal requires swap <= total cost |
 | `expected_swap_cost_bps` | 2.0 | ≈3 days long at −7.7 points/day ≈ 0.65 bps/day |
 | `win_probability` | 0.45 | prior |
 
 These must clear the `fx_swing` limits: edge after cost ≥ 2.0 bps and swap ≤ 20%
-of expected edge. They do: edge 20 − 1 = 19 bps ≥ 2, and swap 2 / 19 ≈ 10.5% ≤ 20%
+of expected edge. They do: edge 20 − 3 = 17 bps ≥ 2, and swap 2 / 17 ≈ 11.8% ≤ 20%
 (`risk/engine.py:305-355`).
 
 ### 4.5 Judgements, labelled as such

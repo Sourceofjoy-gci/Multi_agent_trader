@@ -26,6 +26,11 @@ from trading_house.strategies.impl.session_momentum import (
     SESSION_MOMENTUM_SPEC,
     SessionMomentum,
 )
+from trading_house.strategies.impl.vol_breakout import (
+    VOL_BREAKOUT_ID,
+    VOL_BREAKOUT_SPEC,
+    VolBreakout,
+)
 from trading_house.strategies.spec import StrategySpec
 
 
@@ -67,6 +72,16 @@ _REGISTRY: Final[dict[str, _Entry]] = {
             instrument_id="fx.eurusd",
             timeframe="M15",
             fixed_target=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
+            chandelier=_SWING_CHANDELIER,
+        ),
+    ),
+    VOL_BREAKOUT_ID: _Entry(
+        spec=VOL_BREAKOUT_SPEC,
+        factory=VolBreakout,
+        scope=StrategyScope(
+            instrument_id="fx.eurusd",
+            timeframe="H1",
+            fixed_target=FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("2.0")),
             chandelier=_SWING_CHANDELIER,
         ),
     ),

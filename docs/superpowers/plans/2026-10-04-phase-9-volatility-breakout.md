@@ -18,7 +18,7 @@
 - **`strategies/` may import `core/`, `features/`, `risk/` and `strategies/` only** (`tests/acceptance/test_architecture.py:120`). In particular it may **not** import `marketdata` — so `Timeframe` never appears under `strategies/`; a scope carries the timeframe as its string value (`"H1"`) and `cli.py` converts it.
 - **`research/backtest/` may import `core/`, `marketdata/`, `features/`, `risk/`** and itself only.
 - **`features/` may not import `brokers/` or `risk/`.** Every public function under `features/indicators/` must be annotated `-> Decimal` (`tests/acceptance/test_phase2.py`).
-- Every frozen strategy number comes from the spec §4 verbatim: Bollinger 20 bars, 2σ population; squeeze = bandwidth equal to the minimum of the 125 bars ending at it (ties count); squeeze recency 10 bars; trend mean 200 bars; invalidation = middle band; `horizon_seconds = max_holding_seconds = 432_000`; book `fx_swing`; arms `none`, `fixed_target` 2.0R, `chandelier` 3.0 ATR / 10 points; priors 20.0 / 10.0 / 1.0 / 2.0 swap / 0.45 win. **No other values. No sweeps.**
+- Every frozen strategy number comes from the spec §4 verbatim: Bollinger 20 bars, 2σ population; squeeze = bandwidth equal to the minimum of the 125 bars ending at it (ties count); squeeze recency 10 bars; trend mean 200 bars; invalidation = middle band; `horizon_seconds = max_holding_seconds = 432_000`; book `fx_swing`; arms `none`, `fixed_target` 2.0R, `chandelier` 3.0 ATR / 10 points; priors 20.0 / 10.0 / 3.0 total cost (1.0 non-swap + 2.0 swap) / 2.0 swap / 0.45 win. **No other values. No sweeps.**
 - **Session Momentum must not move.** Its three CLI outputs are pinned in Task 1 and must stay byte-identical through every later task. `tests/unit/research/backtest/test_engine.py:1131-1133` pins the engine's own identity and must also stay green.
 - **Do not re-sign or edit `config/risk_constitution.yaml`.** No task needs it. A task that believes it does stops and reports.
 - **No credential, DSN, account number or raw broker message in any error, log or payload.** Commands print deterministic key-sorted JSON.
@@ -1210,7 +1210,7 @@ class VolBreakout:
     required_features: Final[frozenset[FeatureBlock]] = frozenset({FeatureBlock.BOLLINGER})
     expected_return_bps: Final[float] = 20.0
     expected_return_stdev_bps: Final[float] = 10.0
-    expected_cost_bps: Final[float] = 1.0
+    expected_cost_bps: Final[float] = 3.0
     expected_swap_cost_bps: Final[float] = 2.0
     win_probability: Final[float] = 0.45
 

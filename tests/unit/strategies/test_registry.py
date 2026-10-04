@@ -41,3 +41,16 @@ def test_an_unregistered_strategy_has_no_scope() -> None:
 def test_an_unknown_arm_is_refused() -> None:
     with pytest.raises(ConfigurationError):
         strategy_scope("session_momentum_eurusd").exit_arm("martingale")
+
+
+def test_the_breakout_is_registered_on_eurusd_h1_with_its_own_arms() -> None:
+    scope = strategy_scope("vol_breakout_eurusd_h1")
+
+    assert scope.instrument_id == "fx.eurusd"
+    assert scope.timeframe == "H1"
+    assert scope.exit_arm("fixed_target") == FixedTargetPolicy(
+        kind="fixed_target", r_multiple=Decimal("2.0")
+    )
+    assert scope.exit_arm("chandelier") == ChandelierPolicy(
+        kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
+    )
