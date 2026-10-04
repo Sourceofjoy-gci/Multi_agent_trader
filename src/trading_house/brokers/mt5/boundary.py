@@ -130,6 +130,20 @@ def server_time_to_utc(server_epoch: float, offset_seconds: int | None) -> datet
     return datetime.fromtimestamp(server_epoch, UTC) - timedelta(seconds=offset_seconds)
 
 
+def utc_to_server_time(instant: datetime, offset_seconds: int | None) -> datetime:
+    """The inverse of ``server_time_to_utc``, for times sent *to* MetaTrader 5.
+
+    MetaTrader 5 compares a passed datetime's epoch against its own
+    server-frame epochs, so an unshifted UTC window fetches the bars of a
+    window ``offset`` earlier. Measured on FBS-Demo (UTC+3), 2026-10-04: a UTC
+    10:00-11:00 M15 request returned the bars that opened 07:00-08:00 UTC.
+    """
+
+    if offset_seconds is None:
+        raise BrokerUnavailableError
+    return instant + timedelta(seconds=offset_seconds)
+
+
 @dataclass(frozen=True, slots=True)
 class Mt5SymbolInfo:
     """The subset of ``symbol_info()`` that determines tradability and sizing."""

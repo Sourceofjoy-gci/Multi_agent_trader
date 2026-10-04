@@ -63,7 +63,11 @@ def _bar(minute: int, quality: BarQuality = BarQuality.OK) -> Bar:
 
 
 def seed(
-    store: PostgresBarStore, bars: Sequence[Bar], *, run_id: UUID | None = None
+    store: PostgresBarStore,
+    bars: Sequence[Bar],
+    *,
+    run_id: UUID | None = None,
+    finished_at: datetime | None = None,
 ) -> WriteResult:
     """Record a minimal valid run, append ``bars`` against it, finalize the
     run with what the write actually did, and return the write result.
@@ -72,17 +76,19 @@ def seed(
     back afterward knows which one to look for.
     """
 
-    # A run finishes after every bar it stores has closed (migration 0008), so
-    # a caller seeding a later series gets a run that finished after it.
-    finished_at = max([NINE + timedelta(hours=1), *(bar.availability_time for bar in bars)])
+    # A run's [requested_from, requested_to) holds every bar it stores
+    # (migration 0009), and it finishes after every one has closed (0008), so
+    # a caller seeding another series gets a run that requested and outlived it.
+    requested_from = min([NINE, *(bar.event_time for bar in bars)])
+    requested_to = max([NINE + timedelta(hours=1), *(bar.availability_time for bar in bars)])
     run = IngestRun(
         run_id=run_id or uuid4(),
         instrument_id=_INSTRUMENT_ID,
         timeframe=Timeframe.M1,
-        requested_from=NINE,
-        requested_to=NINE + timedelta(hours=1),
+        requested_from=requested_from,
+        requested_to=requested_to,
         started_at=NINE,
-        finished_at=finished_at,
+        finished_at=finished_at or requested_to,
         earliest_event_time=None,
         bars_returned=len(bars),
         bars_stored=0,

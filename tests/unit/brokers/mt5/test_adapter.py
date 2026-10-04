@@ -10,6 +10,7 @@ from trading_house.brokers.base import BrokerAdapter
 from trading_house.brokers.mt5.adapter import ConfirmedIntentSource, Mt5BrokerAdapter
 from trading_house.brokers.mt5.boundary import (
     TRADE_ACTION_SLTP,
+    Mt5Bar,
     Mt5CheckResult,
     Mt5Deal,
     Mt5Position,
@@ -439,6 +440,42 @@ def test_the_terminal_receives_minutes_not_an_already_translated_code() -> None:
         gateway.stop()
 
     assert [req[1] for req in terminal.rate_requests] == [60, 1440]
+
+
+def test_history_excludes_the_bar_opening_at_end() -> None:
+    """MetaTrader 5's range query is end-inclusive; ingest tiles and counts
+    windows as ``[start, end)``. ``update`` ends its window at the open of the
+    still-forming bar, so passing the inclusive answer through would store
+    that bar, half-built, permanently."""
+
+    start = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+    end = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)
+
+    class _InclusiveTerminal(FakeTerminal):
+        def copy_rates_range(
+            self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
+        ) -> tuple[Mt5Bar, ...]:
+            return tuple(
+                Mt5Bar(
+                    event_time=at,
+                    open=1.1,
+                    high=1.1,
+                    low=1.1,
+                    close=1.1,
+                    tick_volume=1,
+                    spread=0,
+                    real_volume=0,
+                )
+                for at in (start, end)
+            )
+
+    adapter, gateway = _adapter(_InclusiveTerminal())
+    try:
+        bars = adapter.history("fx.eurusd", Timeframe.H1, start, end)
+    finally:
+        gateway.stop()
+
+    assert [bar.event_time for bar in bars] == [start]
 
 
 # --- submit() ----------------------------------------------------------
