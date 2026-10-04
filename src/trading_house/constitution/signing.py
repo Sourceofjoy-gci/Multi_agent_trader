@@ -6,6 +6,7 @@ nothing about YAML, the constitution schema, or any particular file's meaning.
 
 import base64
 import os
+import sys
 from binascii import Error as Base64Error
 from pathlib import Path
 
@@ -140,8 +141,10 @@ def _write_new_file(destination: Path, contents: bytes, mode: int) -> None:
         flags |= os.O_NOFOLLOW
     descriptor = os.open(destination, flags, mode)
     try:
-        if os.name == "posix":
-            os.fchmod(descriptor, mode)  # type: ignore[attr-defined]
+        # sys.platform, not os.name: mypy narrows on it, so fchmod type-checks
+        # on Linux and the branch is skipped on Windows, with no ignore needed.
+        if sys.platform != "win32":
+            os.fchmod(descriptor, mode)
         _write_all(descriptor, contents)
         os.fsync(descriptor)
     finally:
