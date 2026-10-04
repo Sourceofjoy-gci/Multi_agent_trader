@@ -27,8 +27,9 @@ VOL_BREAKOUT_SPEC: Final[StrategySpec] = StrategySpec(
         "Bollinger 20 bars, 2 population sigma. A squeeze bar's bandwidth equals the minimum of "
         "the 125 bars ending at it (ties count). Long when a squeeze occurred within the last 10 "
         "bars, the close is above the upper band, the previous close was at or below its own "
-        "upper band, and the close is above the 200-bar mean; short is the mirror. No entry on "
-        "bars opening 21:00-24:00 UTC."
+        "upper band, and the close is above the 200-bar mean; short is the mirror. No signals on "
+        "bars opening 21:00-24:00 UTC (a 20:00-bar signal still fills at the 21:00 open, at that "
+        "bar's recorded spread)."
     ),
     exit_rule=(
         "Invalidation at the middle band; the risk-engine stop; a 432000-second time stop; "
@@ -46,8 +47,9 @@ VOL_BREAKOUT_SPEC: Final[StrategySpec] = StrategySpec(
         "arm, or if the Phase 8 gates reject it; no tuning or promotion follows a rejection."
     ),
     regime_constraints=(
-        "The risk spread, spread-to-stop and tick-staleness gates apply; no entries in the "
-        "21:00-24:00 UTC rollover window, which is fixed in UTC and carries the DST limitation."
+        "The risk spread, spread-to-stop and tick-staleness gates apply; no signals on bars "
+        "opening 21:00-24:00 UTC (a 20:00-bar signal still fills at the 21:00 open, at that "
+        "bar's recorded spread), which is fixed in UTC and carries the DST limitation."
     ),
     trail_decision="Pending the three-arm A/B: none, fixed_target 2.0R, chandelier 3.0 ATR.",
     trial_count=3,

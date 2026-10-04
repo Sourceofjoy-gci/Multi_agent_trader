@@ -234,6 +234,8 @@ class FeatureEngine:
             return closes[index - BOLLINGER_PERIOD + 1 : index + 1]
 
         first_scanned = last - SQUEEZE_RECENCY - SQUEEZE_LOOKBACK + 1
+        # ponytail: ~135 squared bandwidths of 20 closes per bar (~1.5 ms/bar measured);
+        # cache by bar index across calls if a run's wall time matters.
         squared = {
             index: squared_bandwidth(band(index), BOLLINGER_WIDTH)
             for index in range(first_scanned, last + 1)

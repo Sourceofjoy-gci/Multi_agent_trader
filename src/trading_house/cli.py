@@ -1258,7 +1258,8 @@ def backtest_run(
         ),
     ] = None,
 ) -> None:
-    """Replay one registered strategy over stored EURUSD M15 bars.
+    """Replay one registered strategy over the stored bars of its registry instrument and
+    timeframe.
 
     Every cost is a required option. ``CostModel`` defaults exactly one field --
     ``stress_multiplier``, the 1.5x-2x sensitivity knob section 12 asks for --
@@ -1390,6 +1391,36 @@ def _declared_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
     if candidate is None:
         raise ConfigurationError()
     return candidate
+
+
+def _refuse_scope_mismatch(protocol: TrialProtocol) -> None:
+    """A registered ``data`` scope must be the strategy's own, never a borrowed one.
+
+    ``TrialProtocol.data.instrument_id``/``timeframe`` are otherwise never compared
+    with anything. A protocol copied from another strategy's registration -- a
+    Phase 7 file with ``timeframe: M15`` reused for an H1 strategy -- would
+    otherwise be accepted, and the append-only ledger would permanently record a
+    protocol that misdescribes the data its runs replayed. Called before anything
+    is written: at ``register``, the earliest point, and inside ``_seal_levels``,
+    which every run-producing command funnels through.
+
+    An unregistered ``strategy_id`` is not this check's problem to raise: at
+    ``register`` a protocol may preregister a strategy that is not (yet, or
+    ever) in the code registry -- ``register`` has never required one, and a
+    run-producing command raises its own ``ConfigurationError`` for an unknown
+    strategy before it would ever reach here. Silent on that case rather than
+    refusing it under this rule.
+    """
+
+    try:
+        scope = strategy_scope(protocol.strategy_id)
+    except ConfigurationError:
+        return
+    if (protocol.data.instrument_id, protocol.data.timeframe) != (
+        scope.instrument_id,
+        Timeframe(scope.timeframe),
+    ):
+        raise ConfigurationError()
 
 
 def _instrument_contract(contract: Path, *, strategy_id: str) -> InstrumentContract:
@@ -1617,6 +1648,7 @@ def research_trial_register(
 
     def operation() -> dict[str, JsonValue]:
         parsed = _load_json_model(protocol, TrialProtocol)
+        _refuse_scope_mismatch(parsed)
         trials = _trial_ledger().register(parsed)
         return {
             "protocol_id": parsed.protocol_id,
@@ -2011,6 +2043,7 @@ def _seal_levels(
     attempt id is then spent.
     """
 
+    _refuse_scope_mismatch(run.parsed)
     refuse_edited_protocol(registered_protocol(run.ledger.replay(), run.trial_id), run.parsed)
     _refuse_unwritable_provenance(run, attempts.values())
     requests = {m: _request_for(run, baseline_at(run.parsed, m), sizing) for m in attempts}

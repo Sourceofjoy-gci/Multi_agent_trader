@@ -4,7 +4,6 @@ import pytest
 
 from trading_house.core.errors import InsufficientHistoryError
 from trading_house.features.indicators.bollinger import (
-    bandwidth,
     population_stdev,
     simple_mean,
     squared_bandwidth,
@@ -28,10 +27,6 @@ def test_population_stdev_divides_by_n_not_n_minus_one() -> None:
     assert population_stdev(values) == Decimal(2)
 
 
-def test_bandwidth_is_band_width_over_middle() -> None:
-    assert bandwidth(ALTERNATING, TWO) == Decimal("0.0004") / Decimal("1.1001")
-
-
 def test_squared_bandwidth_is_bandwidth_squared_without_a_root() -> None:
     assert squared_bandwidth(ALTERNATING, TWO) == Decimal("0.00000016") / (
         Decimal("1.1001") * Decimal("1.1001")
@@ -44,7 +39,7 @@ def test_an_empty_series_is_insufficient_history(function: object) -> None:
         function([])  # type: ignore[operator]
 
 
-@pytest.mark.parametrize("function", [bandwidth, squared_bandwidth])
+@pytest.mark.parametrize("function", [squared_bandwidth])
 def test_an_empty_band_is_insufficient_history(function: object) -> None:
     with pytest.raises(InsufficientHistoryError):
         function([], TWO)  # type: ignore[operator]

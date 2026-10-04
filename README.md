@@ -1,4 +1,4 @@
-# Trading House — Phase 7 Session Momentum
+# Trading House — Phase 9 Volatility Breakout
 
 > **This repository can place orders, and only ever against a demo account.**
 > Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
@@ -2470,7 +2470,8 @@ data.**
 bar's bandwidth equals the minimum of the 125 bars ending at it. Go long when a
 squeeze happened within the last 10 bars, the close crosses above the upper band
 from inside it, and the close is above the 200-bar mean; short is the mirror.
-No entries on bars opening 21:00–24:00 UTC. Invalidation is the middle band, the
+No signals on bars opening 21:00–24:00 UTC (a 20:00-bar signal still fills at the
+21:00 open, at that bar's recorded spread). Invalidation is the middle band, the
 book is `fx_swing`, and the time stop is five calendar days. The exit A/B is
 `none`, `fixed_target` at 2.0R, and `chandelier` at 3.0 ATR with a 10-point
 step — three trials.

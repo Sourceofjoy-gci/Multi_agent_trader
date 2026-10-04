@@ -93,7 +93,8 @@ Entry, evaluated on each closed bar *t* that has a snapshot:
   `close_t > upper_t`; `close_{t−1} ≤ upper_{t−1}`; `close_t > sma_200_t`.
 - **Short** when all hold: `bars_since_squeeze_t` is not `None`;
   `close_t < lower_t`; `close_{t−1} ≥ lower_{t−1}`; `close_t < sma_200_t`.
-- **No entry** on bars whose open time is in 21:00–24:00 UTC (D-4).
+- **No signal** on bars whose open time is in 21:00–24:00 UTC (a 20:00-bar
+  signal still fills at the 21:00 open, at that bar's recorded spread) (D-4).
 
 The previous-close condition requires a fresh cross: a bar that merely
 continues outside the band does not enter.
@@ -134,6 +135,10 @@ estimates, as Phase 7's were.
 | `expected_cost_bps` | 3.0 | Total, including swap: 1.0 non-swap (Phase 7 cost assumptions) + 2.0 swap; TradeProposal requires swap <= total cost |
 | `expected_swap_cost_bps` | 2.0 | ≈3 days long at −7.7 points/day ≈ 0.65 bps/day |
 | `win_probability` | 0.45 | prior |
+
+Amended 2026-10-04, before any backtest: `expected_cost_bps` is 3.0, not 1.0,
+because `TradeProposal` defines it as total cost including swap
+(`core/schemas.py`, `swap_is_included_in_total_cost`).
 
 These must clear the `fx_swing` limits: edge after cost ≥ 2.0 bps and swap ≤ 20%
 of expected edge. They do: edge 20 − 3 = 17 bps ≥ 2, and swap 2 / 17 ≈ 11.8% ≤ 20%

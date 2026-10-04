@@ -46,14 +46,25 @@ from trading_house.core.exits import (
     NoExitPolicy,
 )
 from trading_house.marketdata.models import Bar, BarQuality, IngestOutcome, IngestRun, Timeframe
+from trading_house.research.backtest.costs import CostModel
+from trading_house.research.backtest.sizing import SizingMode
 from trading_house.research.trial_ledger import (
+    CostSpec,
+    DataSpec,
     EvidenceSealedPayload,
+    ExecutionSpec,
+    HoldoutSpec,
+    HoldoutState,
     LedgerEvent,
     LedgerEventType,
     LedgerIntegrityReport,
     LedgerRecord,
+    RegimeSpec,
     ScopeKind,
     TrialCounters,
+    TrialProtocol,
+    TrialSpec,
+    ValidationSpec,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -2239,3 +2250,253 @@ def test_import_legacy_exposes_the_clock_a_retry_must_reuse() -> None:
 
     assert result.exit_code == 0
     assert "--registered-at" in result.stdout
+
+
+# --- F1: the registered protocol's data scope must match the strategy's registry scope -----
+
+
+def _scope_mismatch_protocol(
+    *,
+    strategy_id: str = "vol_breakout_eurusd_h1",
+    data_timeframe: Timeframe = Timeframe.M15,
+    trial_id: str = "trial-1",
+) -> TrialProtocol:
+    """A protocol copied from another strategy's registration.
+
+    ``vol_breakout_eurusd_h1``'s registry scope is H1; ``M15`` is the exact
+    mistake F1 describes -- a Phase 7 (Session Momentum) protocol file reused
+    for the H1 strategy. Everything else here is a valid, otherwise-unremarkable
+    registration so the one disagreement under test is the only thing that can
+    make a guarded command refuse.
+    """
+
+    return TrialProtocol(
+        protocol_id="protocol-f1",
+        protocol_version="1",
+        agent_run_id="agent-1",
+        strategy_id=strategy_id,
+        strategy_version="1",
+        strategy_sha256="b" * 64,
+        data=DataSpec(
+            instrument_id="fx.eurusd",
+            timeframe=data_timeframe,
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            end=datetime(2026, 1, 2, tzinfo=UTC),
+            dataset_sha256="a" * 64,
+            point_in_time_policy="availability_time",
+        ),
+        execution=ExecutionSpec(
+            seed="fixed",
+            warmup_bars=20,
+            fill_policy="pessimistic-bar",
+            sizing_policy="risk-engine",
+        ),
+        costs=CostSpec(
+            baseline=CostModel(
+                commission_per_lot_per_side=Decimal("2.50"),
+                slippage_points_per_side=Decimal("0.5"),
+                swap_long_points_per_day=Decimal("-0.80"),
+                swap_short_points_per_day=Decimal("0.30"),
+                triple_swap_weekday=2,
+                stress_multiplier=Decimal("1"),
+            ),
+            stress_multipliers=(Decimal("1.5"), Decimal("2")),
+        ),
+        validation=ValidationSpec(
+            primary_metric="net_expectancy",
+            wfa_train_months=24,
+            wfa_validation_months=6,
+            wfa_test_months=6,
+            purge_hours=16,
+            embargo_hours=16,
+            cpcv_folds=6,
+            bootstrap_replicates=10000,
+            bootstrap_c=Decimal("6.7"),
+            trial_count_rule="conservative-selection-lotteries",
+        ),
+        regimes=RegimeSpec(labels=("london",), provenance_sha256="c" * 64),
+        holdout=HoldoutSpec(state=HoldoutState.NOT_DEFINED),
+        candidates=(
+            TrialSpec(
+                trial_id=trial_id,
+                spec_id=f"spec-{trial_id}",
+                rationale="declared before any result existed",
+                parameter_space=(("window", "20"),),
+            ),
+        ),
+    )
+
+
+def _write_protocol(tmp_path: Path, protocol: TrialProtocol) -> Path:
+    path = tmp_path / "protocol.json"
+    path.write_text(protocol.model_dump_json(), encoding="utf-8")
+    return path
+
+
+class _TouchTrackingLedger:
+    """Proves a guarded command touches nothing: every method records its name
+    and raises, so a test that never sees an entry here knows the refusal fired
+    before the ledger was read or written."""
+
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def _touch(self, name: str) -> Any:
+        self.touched.append(name)
+        raise AssertionError(f"ledger.{name} called after a scope mismatch should have refused")
+
+    def register(self, protocol: TrialProtocol) -> Any:
+        return self._touch("register")
+
+    def events_for(self, trial_id: str) -> Any:
+        return self._touch("events_for")
+
+    def counters(self) -> Any:
+        return self._touch("counters")
+
+    def verify(self) -> Any:
+        return self._touch("verify")
+
+    def replay(self) -> Any:
+        return self._touch("replay")
+
+
+def test_trial_register_refuses_a_protocol_whose_data_scope_disagrees_with_the_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: a protocol declaring M15 data for the H1 breakout strategy is refused
+    before ``register`` writes the one event that seals the whole candidate family."""
+
+    ledger = _TouchTrackingLedger()
+    monkeypatch.setattr(cli, "_trial_ledger", lambda: ledger, raising=False)
+    path = _write_protocol(tmp_path, _scope_mismatch_protocol())
+
+    result = runner.invoke(cli.app, ["research", "trial", "register", "--protocol", str(path)])
+
+    _assert_redacted_configuration_error(result)
+    assert ledger.touched == []
+
+
+def _f1_run_options(
+    *, protocol_path: Path, contract_path: Path, trial_id: str = "trial-1"
+) -> list[str]:
+    return [
+        "--protocol", str(protocol_path),
+        "--trial-id", trial_id,
+        "--started-at", "2026-01-01T00:00:00",
+        "--occurred-at", "2026-01-01T00:00:00",
+        "--registered-at", "2026-01-01T00:00:00",
+        "--agent-run-id", "agent-1",
+        "--exit-policy", "none",
+        "--firm-equity", "100000",
+        "--contract", str(contract_path),
+        "--atr-period", "14",
+        "--spread-window", "20",
+    ]  # fmt: skip
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_trial_scenarios_refuses_a_protocol_whose_data_scope_disagrees_with_the_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: the same refusal, through ``scenarios``'s shared pre-flight (``_seal_levels``),
+    before any level is run, simulated or sealed."""
+
+    ledger = _TouchTrackingLedger()
+    monkeypatch.setattr(cli, "_trial_ledger", lambda: ledger, raising=False)
+    protocol_path = _write_protocol(tmp_path, _scope_mismatch_protocol())
+    contract_path = _contract_file(tmp_path)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "scenarios",
+            *_f1_run_options(protocol_path=protocol_path, contract_path=contract_path),
+            "--attempt-prefix",
+            "run",
+        ],
+    )
+
+    _assert_redacted_configuration_error(result)
+    assert ledger.touched == []
+
+
+@pytest.mark.usefixtures("_dsn")
+def test_trial_compounding_refuses_a_protocol_whose_data_scope_disagrees_with_the_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: the same refusal, through ``compounding``'s shared pre-flight (``_seal_levels``),
+    before its rerun is started."""
+
+    ledger = _TouchTrackingLedger()
+    monkeypatch.setattr(cli, "_trial_ledger", lambda: ledger, raising=False)
+    protocol_path = _write_protocol(tmp_path, _scope_mismatch_protocol())
+    contract_path = _contract_file(tmp_path)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "research",
+            "trial",
+            "compounding",
+            *_f1_run_options(protocol_path=protocol_path, contract_path=contract_path),
+            "--attempt-id",
+            "run-1",
+        ],
+    )
+
+    _assert_redacted_configuration_error(result)
+    assert ledger.touched == []
+
+
+def test_seal_levels_refuses_a_protocol_whose_data_scope_disagrees_with_the_strategy_on_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1 for ``open-holdout``: unit-tested on ``_seal_levels`` directly rather than through
+    the CLI, because reaching ``_seal_levels`` from ``research trial open-holdout`` first
+    goes through ``refuse_unopenable``, which calls ``PostgresTrialLedger.snapshot`` -- a
+    method outside the ``TrialLedger`` protocol the other trial commands use, with no fake
+    for it anywhere in this file. ``open-holdout`` shares this exact pre-flight call
+    (``_seal_levels(run, ...)``) with ``scenarios`` and ``compounding``, both proven above, so
+    this test proves the same guard fires for the one thing ``open-holdout`` adds: ``opening=True``.
+    """
+
+    ledger = _TouchTrackingLedger()
+    run = cli._RunInputs(
+        parsed=_scope_mismatch_protocol(),
+        trial_id="trial-1",
+        spec_sha256="a" * 64,
+        ledger=ledger,
+        store=object(),
+        constitution=object(),
+        instrument_contract=object(),
+        started_at=_NINE,
+        occurred_at=_NINE,
+        registered_at=_NINE,
+        agent_run_id="agent-1",
+        exit_policy=cli.ExitPolicyName.NONE,
+        firm_equity="100000",
+        atr_period=14,
+        spread_window=20,
+        defective_bar_tolerance="0",
+        opening=True,
+    )
+
+    with pytest.raises(ConfigurationError):
+        cli._seal_levels(
+            run,
+            sizing=SizingMode.CONSTANT_NOTIONAL,
+            attempts={Decimal(1): "a-1"},
+            unsealed_retry=False,
+        )
+
+    assert ledger.touched == []
+
+
+def test_refuse_scope_mismatch_accepts_the_strategy_s_own_declared_scope() -> None:
+    """The guard's negative case: a protocol whose ``data`` matches its strategy's
+    registry scope is not what F1 refuses, so the helper must pass it through untouched."""
+
+    cli._refuse_scope_mismatch(_scope_mismatch_protocol(data_timeframe=Timeframe.H1))

@@ -29,19 +29,14 @@ def population_stdev(values: Sequence[Decimal]) -> Decimal:
     return _population_variance(values).sqrt()
 
 
-def bandwidth(values: Sequence[Decimal], width: Decimal) -> Decimal:
-    """``(upper - lower) / middle``, which is ``2 * width * sigma / mean``."""
-
-    return 2 * width * population_stdev(values) / simple_mean(values)
-
-
 def squared_bandwidth(values: Sequence[Decimal], width: Decimal) -> Decimal:
     """``bandwidth`` squared, computed without a square root.
 
     The squeeze test compares 135 bandwidths per bar to find a minimum. The
     ordering of non-negative numbers survives squaring, so the comparison can
-    skip ``sqrt`` entirely -- and an exact rational comparison is also one that
-    cannot disagree with itself in the last digit.
+    skip ``sqrt`` entirely -- and is deterministic (same inputs, same digits,
+    every time), not exact: the final ``Decimal`` division still rounds to 28
+    significant digits.
     """
 
     mean = simple_mean(values)
