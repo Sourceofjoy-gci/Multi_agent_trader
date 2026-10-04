@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Self
 
 from pydantic import NonNegativeInt, field_validator, model_validator
@@ -25,6 +26,36 @@ MIN_HORIZON_BARS: int = 10
 trades open and close inside a couple of bars, so D-2's stop-first pessimism
 dominates and the number being measured is the simulator's convention rather
 than the strategy. A future phase that ingests ticks may lower this."""
+
+
+class FeatureBlock(str, Enum):  # noqa: UP042
+    """An optional feature block a strategy can ask the backtester to compute.
+
+    Optional rather than always present because each block costs a fixed window
+    of reads per bar, and a strategy that never looks at it should neither pay
+    for it nor have its snapshots changed by it.
+    """
+
+    BOLLINGER = "bollinger"
+
+
+class BollingerFeatures(CanonicalModel):
+    """Bollinger bands (20 bars, 2 population sigma), the previous bar's bands,
+    the bars since the last squeeze, and the 200-bar trend mean.
+
+    ``bars_since_squeeze`` is ``None`` when no bar in the last ten was a
+    squeeze -- distinct from zero, which means this bar is one.
+    """
+
+    middle: Decimal
+    upper: Decimal
+    lower: Decimal
+    bandwidth: Decimal
+    previous_close: Decimal
+    previous_upper: Decimal
+    previous_lower: Decimal
+    bars_since_squeeze: NonNegativeInt | None
+    sma_200: Decimal
 
 
 class FeatureSnapshot(CanonicalModel):
@@ -55,6 +86,7 @@ class FeatureSnapshot(CanonicalModel):
     prior_session_return: Decimal | None
     session_open_price: Decimal
     bars_since_session_open: NonNegativeInt
+    bollinger: BollingerFeatures | None = None
 
     @field_validator("as_of", "tick_time")
     @classmethod
