@@ -63,8 +63,11 @@ jobs:
         run: uv run trading-house constitution verify
 
       - name: No trading or agent dependency reached the tree
+        # terminal.py is the one module allowed to import MetaTrader5
+        # (tests/acceptance/test_architecture.py); every other match fails.
         run: |
-          ! grep -rniE '^(from|import) (MetaTrader5|langgraph|openai|anthropic|ccxt)' src tests
+          ! grep -rniE '^(from|import) (MetaTrader5|langgraph|openai|anthropic|ccxt)' src tests \
+            | grep -v '^src/trading_house/brokers/mt5/terminal.py:[0-9]*:import MetaTrader5 as mt5$'
 
   windows:
     name: Windows — no containers
