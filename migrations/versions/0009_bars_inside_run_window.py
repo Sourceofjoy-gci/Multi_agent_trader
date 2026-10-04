@@ -15,7 +15,9 @@ broker's frame. Before that, ``copy_rates_range`` fetched a window
 sat up to that far before ``requested_from``. Code older than that fix must
 not ingest against a database at this revision.
 
-A missing run raises nothing here, so the foreign key still reports it.
+The check extends 0008's function rather than adding a second trigger, so each
+inserted bar costs one lookup of its run, not two. Each rule keeps its own
+message. A missing run raises nothing here, so the foreign key still reports it.
 """
 
 from collections.abc import Sequence
@@ -32,15 +34,23 @@ def upgrade() -> None:
     op.execute("SET ROLE trading_house_owner")
     op.execute(
         """
-        CREATE FUNCTION marketdata.reject_bar_outside_run_window()
+        CREATE OR REPLACE FUNCTION marketdata.reject_bar_after_run()
         RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        DECLARE
+            run marketdata.ingest_runs%ROWTYPE;
         BEGIN
-            IF EXISTS (
-                SELECT 1 FROM marketdata.ingest_runs
-                WHERE run_id = NEW.ingest_run_id
-                  AND NOT (NEW.event_time >= requested_from
-                           AND NEW.event_time < requested_to)
-            ) THEN
+            SELECT * INTO run FROM marketdata.ingest_runs
+            WHERE run_id = NEW.ingest_run_id;
+            IF NOT FOUND THEN
+                RETURN NEW;
+            END IF;
+            IF NEW.availability_time > run.finished_at THEN
+                RAISE EXCEPTION 'bar % closes after its ingest run % finished',
+                    NEW.event_time, NEW.ingest_run_id
+                    USING ERRCODE = 'check_violation';
+            END IF;
+            IF NOT (NEW.event_time >= run.requested_from
+                    AND NEW.event_time < run.requested_to) THEN
                 RAISE EXCEPTION 'bar % is outside the window its ingest run % requested',
                     NEW.event_time, NEW.ingest_run_id
                     USING ERRCODE = 'check_violation';
@@ -50,14 +60,26 @@ def upgrade() -> None:
         $$
         """
     )
-    op.execute(
-        "CREATE TRIGGER bars_inside_run_window "
-        "BEFORE INSERT ON marketdata.bars "
-        "FOR EACH ROW EXECUTE FUNCTION marketdata.reject_bar_outside_run_window()"
-    )
 
 
 def downgrade() -> None:
     op.execute("SET ROLE trading_house_owner")
-    op.execute("DROP TRIGGER bars_inside_run_window ON marketdata.bars")
-    op.execute("DROP FUNCTION marketdata.reject_bar_outside_run_window()")
+    # 0008's body, verbatim.
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION marketdata.reject_bar_after_run()
+        RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.availability_time > (
+                SELECT finished_at FROM marketdata.ingest_runs
+                WHERE run_id = NEW.ingest_run_id
+            ) THEN
+                RAISE EXCEPTION 'bar % closes after its ingest run % finished',
+                    NEW.event_time, NEW.ingest_run_id
+                    USING ERRCODE = 'check_violation';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        """
+    )

@@ -19,7 +19,7 @@ import pytest
 from pydantic import SecretStr
 
 from trading_house.brokers.mt5.boundary import TerminalPort
-from trading_house.brokers.mt5.gateway import Mt5Gateway
+from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
 from trading_house.marketdata.models import IngestOutcome, Timeframe, duration
@@ -90,15 +90,17 @@ def test_a_real_window_of_h1_bars_satisfies_utc_and_ohlc_guarantees() -> None:
 
 def test_a_known_m15_window_comes_back_as_exactly_that_window() -> None:
     """Settles the window semantics against a real broker: two hours of M15
-    on last Wednesday, mid-session, must come back as exactly its eight bars.
-    Unshifted, a UTC+3 broker answers with 07:00-09:00 instead of 10:00-12:00;
-    end-inclusive, it adds a ninth bar at 12:00."""
+    on an ordinary Wednesday, mid-session, must come back as exactly its eight
+    bars. Unshifted, a UTC+3 broker answers with 07:00-09:00 instead of
+    10:00-12:00; end-inclusive, it adds a ninth bar at 12:00.
+
+    A fixed date rather than "last Wednesday", which would sometimes be a
+    market holiday. FBS-Demo held all nine end-inclusive bars on 2026-10-04;
+    M15 history there reaches back years, so the date stays fetchable."""
 
     from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
 
-    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    wednesday = today - timedelta(days=(today.weekday() - 2) % 7 or 7)
-    start = wednesday + timedelta(hours=10)
+    start = datetime(2026, 9, 30, 10, 0, tzinfo=UTC)
     end = start + timedelta(hours=2)
 
     with Mt5Gateway(_terminal(), clock=SystemClock()) as gateway:
@@ -106,6 +108,32 @@ def test_a_known_m15_window_comes_back_as_exactly_that_window() -> None:
         bars = adapter.history("fx.eurusd", Timeframe.M15, start, end)
 
     assert [bar.event_time for bar in bars] == [start + timedelta(minutes=15 * i) for i in range(8)]
+
+
+def test_a_window_around_a_past_deal_returns_that_deal() -> None:
+    """``history_deals_get`` reads its window in the server frame, as
+    ``copy_rates_range`` does. Measured on FBS-Demo (UTC+3), 2026-10-04: an
+    unshifted two-minute window around a deal's UTC time found none of five
+    sampled deals. The reconciler reads deals through this call, so a shifted
+    window would show it the wrong three hours of history."""
+
+    with Mt5Gateway(_terminal(), clock=SystemClock()) as gateway:
+        now = datetime.now(UTC)
+        history = gateway.call(
+            Priority.RECONCILE, lambda t: t.history_deals(now - timedelta(days=400), now)
+        )
+        if not history:
+            pytest.skip("the demo account has no deal history to look a deal up by")
+        deal = history[len(history) // 2]
+        around = gateway.call(
+            Priority.RECONCILE,
+            lambda t: t.history_deals(
+                deal.dealt_at - timedelta(minutes=1), deal.dealt_at + timedelta(minutes=1)
+            ),
+        )
+
+    assert around is not None
+    assert deal.ticket in {found.ticket for found in around}
 
 
 def _delete_test_rows(dsn: str, *, instrument_id: str, timeframe: Timeframe) -> None:

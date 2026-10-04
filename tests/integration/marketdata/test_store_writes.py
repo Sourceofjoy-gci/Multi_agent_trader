@@ -227,45 +227,54 @@ def test_the_run_ledger_records_what_the_write_actually_did(
     assert row == (0, 0)
 
 
+# One trigger function enforces both rules (migrations 0008 and 0009) with one
+# message each, so a test names the rule it expects rather than accepting
+# whichever CheckViolation fires first.
+AFTER_FINISH = "closes after its ingest run"
+OUTSIDE_WINDOW = "is outside the window its ingest run"
+
+
 def test_a_run_cannot_vouch_for_a_bar_that_closed_after_it_finished(
     bar_store: BarStore,
 ) -> None:
     """A run can only have fetched bars that had closed by the time it finished.
 
-    ``seed`` finishes its run at NINE + 1h, so the bar opening at minute 59
-    closes exactly then and is accepted, while one opening at minute 60 closes
-    after the run was over: no fetch that run made could have returned it.
+    The run requests ``[NINE, NINE + 1h)`` but finishes at NINE + 30min, so
+    both bars sit inside its window and only their closing times differ: the
+    bar opening at minute 29 closes exactly as the run finishes and is
+    accepted, the one opening at minute 30 closes after it and is refused.
     """
 
     import psycopg
 
     run_id = uuid4()
-    seed(bar_store, [_bar(59)], run_id=run_id)
+    seed(bar_store, [_bar(29)], run_id=run_id, finished_at=NINE + timedelta(minutes=30))
 
-    with pytest.raises(psycopg.errors.CheckViolation):
-        bar_store.append_bars([_bar(60)], run_id=run_id)
+    with pytest.raises(psycopg.errors.CheckViolation, match=AFTER_FINISH):
+        bar_store.append_bars([_bar(30)], run_id=run_id)
 
 
 def test_a_superuser_cannot_file_later_bars_under_a_finished_run(
     bar_store: BarStore, database: DatabaseHarness
 ) -> None:
-    """The 2026-10-01 incident, replayed: a hand-typed superuser INSERT that
-    extended a finished run with 2,880 synthetic bars dated after it.
+    """The 2026-10-01 incident: a hand-typed superuser INSERT that filed
+    synthetic bars under a run that had already finished.
 
     A grant cannot stop a superuser and the store was never in the path, so
-    the refusal has to live in the table itself.
+    the refusal has to live in the table itself. The bar here sits inside the
+    run's window, so it is the finish-time rule that has to refuse it.
     """
 
     import psycopg
 
     run_id = uuid4()
-    seed(bar_store, [_bar(0)], run_id=run_id)
-    later = NINE + timedelta(days=1)
+    seed(bar_store, [_bar(0)], run_id=run_id, finished_at=NINE + timedelta(minutes=30))
+    later = NINE + timedelta(minutes=40)
 
     with (
         psycopg.connect(database.test_superuser_dsn, autocommit=True) as connection,
         connection.cursor() as cursor,
-        pytest.raises(psycopg.errors.CheckViolation),
+        pytest.raises(psycopg.errors.CheckViolation, match=AFTER_FINISH),
     ):
         cursor.execute(
             "INSERT INTO marketdata.bars (instrument_id, timeframe, event_time, "
@@ -278,15 +287,15 @@ def test_a_superuser_cannot_file_later_bars_under_a_finished_run(
 
 def test_a_run_cannot_vouch_for_a_bar_before_its_window(bar_store: BarStore) -> None:
     """``seed`` requests ``[NINE, NINE + 1h)``. A bar opening a minute before
-    closed long before the run finished, so 0008 lets it through; only the
-    requested window says that run never asked for it."""
+    closed long before the run finished, so the finish-time rule lets it
+    through; only the requested window says that run never asked for it."""
 
     import psycopg
 
     run_id = uuid4()
     seed(bar_store, [_bar(0)], run_id=run_id)
 
-    with pytest.raises(psycopg.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation, match=OUTSIDE_WINDOW):
         bar_store.append_bars([_bar(-1)], run_id=run_id)
 
 
@@ -302,5 +311,5 @@ def test_a_run_cannot_vouch_for_the_bar_opening_at_its_window_end(
     run_id = uuid4()
     seed(bar_store, [_bar(0)], run_id=run_id, finished_at=NINE + timedelta(hours=2))
 
-    with pytest.raises(psycopg.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation, match=OUTSIDE_WINDOW):
         bar_store.append_bars([_bar(60)], run_id=run_id)
