@@ -88,6 +88,26 @@ def test_a_real_window_of_h1_bars_satisfies_utc_and_ohlc_guarantees() -> None:
         assert bar.low > 0
 
 
+def test_a_known_m15_window_comes_back_as_exactly_that_window() -> None:
+    """Settles the window semantics against a real broker: two hours of M15
+    on last Wednesday, mid-session, must come back as exactly its eight bars.
+    Unshifted, a UTC+3 broker answers with 07:00-09:00 instead of 10:00-12:00;
+    end-inclusive, it adds a ninth bar at 12:00."""
+
+    from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
+
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    wednesday = today - timedelta(days=(today.weekday() - 2) % 7 or 7)
+    start = wednesday + timedelta(hours=10)
+    end = start + timedelta(hours=2)
+
+    with Mt5Gateway(_terminal(), clock=SystemClock()) as gateway:
+        adapter = Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock())
+        bars = adapter.history("fx.eurusd", Timeframe.M15, start, end)
+
+    assert [bar.event_time for bar in bars] == [start + timedelta(minutes=15 * i) for i in range(8)]
+
+
 def _delete_test_rows(dsn: str, *, instrument_id: str, timeframe: Timeframe) -> None:
     """Remove only this test's own rows, never a blanket TRUNCATE -- other
     tests sharing the session-scoped database fixture may have state of
@@ -159,10 +179,8 @@ def test_a_real_backfill_round_trips_through_the_store(database: DatabaseHarness
         coverage = store.coverage(instrument_id, timeframe)
         assert coverage.earliest_event_time is not None
 
-        # One bar's width of slack past requested_to: bars() filters
-        # event_time strictly less than end, and MetaTrader5's own range
-        # query is end-inclusive, so a bar landing exactly on the boundary
-        # must not be excluded from this comparison by an off-by-one.
+        # One bar's width of slack past requested_to, so the comparison
+        # cannot hinge on how either side treats the boundary bar.
         as_of = run.requested_to + duration(timeframe)
         stored = {
             bar.event_time: bar

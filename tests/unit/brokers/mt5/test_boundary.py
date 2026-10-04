@@ -20,6 +20,7 @@ from trading_house.brokers.mt5.boundary import (
     mt5_timeframe_code,
     server_time_to_utc,
     utc_offset_seconds,
+    utc_to_server_time,
 )
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 from trading_house.core.venue import DealEntry
@@ -280,6 +281,25 @@ def test_converting_before_the_offset_is_known_raises_rather_than_guessing() -> 
 
 def test_the_same_conversion_succeeds_once_the_offset_is_established() -> None:
     assert server_time_to_utc(1_756_112_400.0, 3600).tzinfo is not None
+
+
+def test_a_utc_window_is_sent_in_the_brokers_frame() -> None:
+    """MetaTrader 5 compares a passed datetime's epoch against its own
+    server-frame epochs: on FBS-Demo (UTC+3) a UTC 10:00-11:00 request
+    returned the bars that opened 07:00-08:00 UTC. The window must be shifted
+    forward by the offset before it is sent, the inverse of
+    ``server_time_to_utc``."""
+
+    nine_utc = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+    sent = utc_to_server_time(nine_utc, 3 * 3600)
+
+    assert sent.timestamp() == datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp()
+    assert server_time_to_utc(sent.timestamp(), 3 * 3600) == nine_utc
+
+
+def test_sending_a_window_before_the_offset_is_known_raises() -> None:
+    with pytest.raises(BrokerUnavailableError):
+        utc_to_server_time(datetime(2026, 8, 25, tzinfo=UTC), None)
 
 
 # --- the offset must not be believed when the tick is stale ------------------

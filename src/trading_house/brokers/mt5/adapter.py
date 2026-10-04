@@ -286,7 +286,9 @@ class Mt5BrokerAdapter:
             Priority.MARKET_DATA,
             lambda t: t.copy_rates_range(server_symbol, minutes, start, end),
         )
-        return () if bars is None else tuple(bars)
+        # MetaTrader 5's range is end-inclusive; ingest's windows are
+        # [start, end), and ``update`` ends one at the still-forming bar.
+        return () if bars is None else tuple(bar for bar in bars if bar.event_time < end)
 
     def precheck(self, intent: OrderIntent) -> PrecheckResult:
         """Ask the venue whether it would accept ``intent``, without acting.
