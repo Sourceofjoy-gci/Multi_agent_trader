@@ -236,6 +236,45 @@ def _session_ramp(n: int = 65) -> tuple[Bar, ...]:
     )
 
 
+def _breakout_h1() -> tuple[Bar, ...]:
+    """360 H1 bars with exactly one long volatility breakout, at bar 230.
+
+    See the Phase 9 plan, Task 7, for the arithmetic: a wide rising swing,
+    a 30-bar squeeze at 1.10400, a close at 1.10700, and a flat tail long enough
+    for the five-day time stop to close the trade inside the series.
+    """
+
+    origin = datetime(2026, 9, 7, 0, 0, tzinfo=UTC)
+    closes: list[Decimal] = []
+    for index in range(360):
+        if index < 200:
+            swing = Decimal("0.00080") if index % 2 else Decimal("-0.00080")
+            closes.append(Decimal("1.10000") + Decimal("0.00002") * index + swing)
+        elif index < 230:
+            closes.append(Decimal("1.10400") + (POINT * 5 if index % 2 else -POINT * 5))
+        elif index == 230:
+            closes.append(Decimal("1.10700"))
+        else:
+            closes.append(Decimal("1.10700") + (POINT * 5 if index % 2 else -POINT * 5))
+    return tuple(
+        Bar(
+            instrument_id="fx.eurusd",
+            timeframe=Timeframe.H1,
+            event_time=origin + timedelta(hours=index),
+            availability_time=origin + timedelta(hours=index + 1),
+            open=close,
+            high=close + POINT * 10,
+            low=close - POINT * 10,
+            close=close,
+            tick_volume=100,
+            spread=RAMP_SPREAD_POINTS,
+            real_volume=0,
+            quality=BarQuality.OK,
+        )
+        for index, close in enumerate(closes)
+    )
+
+
 @dataclass(slots=True)
 class FakeBarReader:
     """A ``BarReader`` over a list held in memory.

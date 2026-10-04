@@ -1330,6 +1330,61 @@ def test_each_cli_arm_builds_its_exact_predeclared_policy(
     assert captured == [expected]
 
 
+@pytest.mark.parametrize(
+    ("arm", "expected"),
+    [
+        ("none", NoExitPolicy(kind="none")),
+        ("fixed_target", FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("2.0"))),
+        (
+            "chandelier",
+            ChandelierPolicy(
+                kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
+            ),
+        ),
+    ],
+)
+@pytest.mark.usefixtures("_dsn")
+def test_the_breakout_cli_arms_build_its_own_predeclared_policies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+    expected: NoExitPolicy | FixedTargetPolicy | ChandelierPolicy,
+) -> None:
+    from tests.unit.research.backtest.conftest import FakeBarReader, _breakout_h1
+    from trading_house.ops.backtest import build_strategy
+
+    captured: list[NoExitPolicy | FixedTargetPolicy | ChandelierPolicy] = []
+
+    def capture(
+        strategy_id: str,
+        *,
+        exit_policy: NoExitPolicy | FixedTargetPolicy | ChandelierPolicy,
+    ) -> Any:
+        captured.append(exit_policy)
+        return build_strategy(strategy_id, exit_policy=exit_policy)
+
+    bars = _breakout_h1()
+    monkeypatch.setattr(cli, "build_strategy", capture)
+    monkeypatch.setattr(cli, "_bar_store", lambda: FakeBarReader(bars))
+
+    result = runner.invoke(
+        cli.app,
+        _backtest_args(
+            tmp_path,
+            **{
+                "--strategy": "vol_breakout_eurusd_h1",
+                "--exit-policy": arm,
+                "--start": bars[0].event_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "--end": bars[-1].event_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "--atr-period": "14",
+            },
+        ),
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert captured == [expected]
+
+
 def test_the_arms_parameters_are_not_command_line_options() -> None:
     result = runner.invoke(cli.app, ["backtest", "run", "--help"])
 
