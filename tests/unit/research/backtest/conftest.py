@@ -19,6 +19,7 @@ from trading_house.constitution.models import Constitution
 from trading_house.core.errors import CoverageError
 from trading_house.core.instruments import FillPolicy, FinancingModel, InstrumentContract
 from trading_house.core.schemas import Side, TradeProposal
+from trading_house.core.snapshot import FeatureBlock
 from trading_house.core.values import AssetClass
 from trading_house.features.engine import WARMUP_MULTIPLE
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
@@ -350,6 +351,11 @@ class ToyStrategy:
     toy strategy because §3.3's sell-side claim -- that the two legs' slippage
     inverts and still charges both -- is only reachable by selling, and one
     field buys it where a subclass would have to restate the whole proposal."""
+
+    required_features: frozenset[FeatureBlock] = frozenset()
+    """Which optional feature blocks the backtester computes for this toy. Empty
+    by default, like Session Momentum, so every existing engine test keeps the
+    snapshots -- and the pinned identities -- it had before Phase 9."""
 
     seen: list[FeatureSnapshot] = field(default_factory=list)
 

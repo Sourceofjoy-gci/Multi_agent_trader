@@ -59,6 +59,7 @@ from trading_house.core.errors import (
 )
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import RejectedRiskDecision, Side
+from trading_house.core.snapshot import FeatureBlock
 from trading_house.features.engine import BarReader, FeatureEngine, MaterializedBarReader
 from trading_house.features.sessions import session_of
 from trading_house.marketdata.models import Bar, BarQuality, Coverage, Timeframe, duration
@@ -629,7 +630,10 @@ class Backtester:
         session-open price would be the guess the store's own author refused
         to make one call down. ``prior_session_return`` never raises -- its
         own ``None`` already distinguishes an outage from a flat night, so
-        it is read unconditionally.
+        it is read unconditionally. The Bollinger block's own warm-up raises
+        ``InsufficientHistoryError`` too and is skipped the same way; it is
+        computed only for a strategy that declares it, so no other strategy's
+        snapshots change.
         """
 
         try:
@@ -651,6 +655,11 @@ class Backtester:
             bars_since_session_open = features.bars_since_session_open(
                 request.instrument_id, request.timeframe, as_of=as_of
             )
+            bollinger = (
+                features.bollinger(request.instrument_id, request.timeframe, as_of=as_of)
+                if FeatureBlock.BOLLINGER in request.strategy.required_features
+                else None
+            )
         except InsufficientHistoryError:
             return None
         prior_session_return = features.prior_session_return(
@@ -669,6 +678,7 @@ class Backtester:
             prior_session_return=prior_session_return,
             session_open_price=session_open_price,
             bars_since_session_open=bars_since_session_open,
+            bollinger=bollinger,
         )
 
     def _open(self, signal: _Signal, bar: Bar, request: BacktestRequest) -> _Position:

@@ -8,7 +8,7 @@ from typing import Annotated, Literal, Protocol
 from pydantic import Field, field_validator
 
 from trading_house.core.schemas import TradeProposal
-from trading_house.core.snapshot import FeatureSnapshot
+from trading_house.core.snapshot import FeatureBlock, FeatureSnapshot
 from trading_house.core.values import BookId, CanonicalModel, NonNegativeDecimal, PositiveDecimal
 
 
@@ -92,6 +92,7 @@ class Strategy(Protocol):
     book: BookId
     horizon_seconds: int
     max_holding_seconds: int
+    required_features: frozenset[FeatureBlock]
 
     def evaluate(self, snapshot: FeatureSnapshot) -> TradeProposal | None: ...
 
