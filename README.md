@@ -217,7 +217,9 @@ way in, requests are paged around the broker's own request-size ceiling, and
 every read is filtered by an explicit `availability_time` (I-17) — a bar
 stamped 09:00 was not knowable until 09:01, and no consumer read path can see
 it before then. Storage never rewrites a row; a revised broker history is
-counted as a conflict, not silently applied.
+counted as a conflict, not silently applied. A bar that closes after its
+ingest run's `finished_at` is refused by a trigger (migration 0008), which binds
+a superuser too: a run cannot vouch for a bar it could not have fetched.
 
 ### Commands
 
