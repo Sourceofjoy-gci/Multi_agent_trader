@@ -57,13 +57,35 @@ class SubmissionVenue(PortfolioVenue, Protocol):
 
 class OrderHistory(Protocol):
     def submissions_since(self, start: datetime) -> Sequence[tuple[str, datetime]]: ...
-    def consecutive_rejects(self) -> int: ...
+    def consecutive_rejects(self, since: datetime) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
 class LivePortfolio:
     firm_equity: Decimal
     state: PortfolioState
+
+
+@dataclass(frozen=True, slots=True)
+class Baselines:
+    """Where each running count restarts once a person has cleared its halt
+    (Phase 11).
+
+    Clearing a drawdown halt restarts that book's -- or the firm's -- curve
+    from zero at the moment it was cleared: without that, the halt would
+    re-latch on the very next read and the unlock would mean nothing. Clearing
+    safe mode restarts the reject streak for the same reason. ``None`` and a
+    missing book both mean never cleared: the start of history.
+    """
+
+    book_drawdown_since: Mapping[BookId, datetime]
+    firm_drawdown_since: datetime | None
+    rejects_since: datetime | None
+
+
+NEVER_CLEARED: Final = Baselines(
+    book_drawdown_since={}, firm_drawdown_since=None, rejects_since=None
+)
 
 
 def build_live_portfolio(
@@ -73,6 +95,7 @@ def build_live_portfolio(
     *,
     books: Iterable[BookId],
     now: datetime,
+    baselines: Baselines = NEVER_CLEARED,
 ) -> LivePortfolio:
     now = ensure_utc(now)
     marks = venue.position_marks()
@@ -117,7 +140,7 @@ def build_live_portfolio(
 
     book_ids = tuple(books)
     book_pnl, firm_drawdown = _pnl(
-        venue.deal_money_since(HISTORY_START), marks, book_of, book_ids, now
+        venue.deal_money_since(HISTORY_START), marks, book_of, book_ids, now, baselines
     )
     stamps = tuple(
         OrderStamp(book=book, submitted_at=at)
@@ -131,7 +154,9 @@ def build_live_portfolio(
             book_pnl=book_pnl,
             firm_drawdown=firm_drawdown,
             order_stamps=stamps,
-            consecutive_rejects=history.consecutive_rejects(),
+            consecutive_rejects=history.consecutive_rejects(
+                baselines.rejects_since or HISTORY_START
+            ),
         ),
     )
 
@@ -142,10 +167,13 @@ def _pnl(
     book_of: _BookOf,
     books: Sequence[BookId],
     now: datetime,
+    baselines: Baselines,
 ) -> tuple[Mapping[BookId, BookPnl] | None, Decimal | None]:
     """Each book's P&L and the firm's drawdown, from system-owned deals and
     positions only. Balance operations and manual trades carry no book's magic
-    and are outside both (design section 6)."""
+    and are outside both (Phase 10 design, section 6). Each drawdown curve
+    starts at its baseline; today's realised P&L does not, because a person
+    clearing a halt does not change what was lost today."""
 
     if deals is None:
         return None, None
@@ -169,10 +197,20 @@ def _pnl(
                 Decimal(0),
             ),
             unrealized=unrealized.get(book, Decimal(0)),
-            drawdown=_drawdown(book_deals, unrealized.get(book, Decimal(0))),
+            drawdown=_drawdown(
+                _since(book_deals, baselines.book_drawdown_since.get(book)),
+                unrealized.get(book, Decimal(0)),
+            ),
         )
-    firm = _drawdown([deal for deal, _ in owned], sum(unrealized.values(), Decimal(0)))
+    firm = _drawdown(
+        _since([deal for deal, _ in owned], baselines.firm_drawdown_since),
+        sum(unrealized.values(), Decimal(0)),
+    )
     return result, firm
+
+
+def _since(deals: Sequence[DealMoney], start: datetime | None) -> Sequence[DealMoney]:
+    return deals if start is None else [deal for deal in deals if deal.dealt_at > start]
 
 
 class _BookOf(Protocol):
@@ -195,13 +233,10 @@ def recheck_submission(
     decision: RiskDecision,
     *,
     venue: SubmissionVenue,
-    history: OrderHistory,
-    binding: VenueBinding,
-    books: Iterable[BookId],
+    live: LivePortfolio,
     book: BookId,
     instrument_id: InstrumentId,
     side: Side,
-    now: datetime,
 ) -> None:
     """Re-judge a decision against the live portfolio, or raise.
 
@@ -210,7 +245,6 @@ def recheck_submission(
     failure to answer, not a market with nothing in it.
     """
 
-    live = build_live_portfolio(venue, history, binding, books=books, now=now)
     contract = venue.describe_instrument(instrument_id)
     quote = next(
         (q for q in venue.snapshot([instrument_id]).quotes if q.instrument_id == instrument_id),

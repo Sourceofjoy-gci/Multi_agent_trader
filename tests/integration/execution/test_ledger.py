@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ...conftest import DatabaseHarness
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
+EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -305,15 +306,17 @@ def test_the_reject_streak_counts_rejections_since_the_last_confirmation(
         ledger.append(intent_id, IntentState.SUBMITTING, at, {"book": "fx_scalp"})
         ledger.append(intent_id, state, at, {})
 
-    assert ledger.consecutive_rejects() == 0
+    assert ledger.consecutive_rejects(EPOCH) == 0
     settle("r1", IntentState.REJECTED)
     settle("r2", IntentState.REJECTED)
-    assert ledger.consecutive_rejects() == 2
+    assert ledger.consecutive_rejects(EPOCH) == 2
     settle("c1", IntentState.CONFIRMED)
-    assert ledger.consecutive_rejects() == 0
+    assert ledger.consecutive_rejects(EPOCH) == 0
     settle("r3", IntentState.REJECTED)
     # FAILED is the reconciler's verdict on a lost order, not a venue refusal:
     # it neither extends the streak nor breaks it.
     settle("f1", IntentState.FAILED)
     settle("r4", IntentState.REJECTED)
-    assert ledger.consecutive_rejects() == 2
+    assert ledger.consecutive_rejects(EPOCH) == 2
+    # Phase 11: a person clearing safe mode restarts the streak from then.
+    assert ledger.consecutive_rejects(at) == 0

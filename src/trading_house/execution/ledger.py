@@ -146,13 +146,16 @@ WHERE state = 'SUBMITTING' AND event_time > %s
 ORDER BY seq
 """
 
-# Venue rejections since the last confirmation. FAILED is the reconciler's
-# verdict on a lost order, not the broker refusing one, so it neither counts
-# toward the streak nor breaks it.
+# Venue rejections since the last confirmation, and since a person last
+# cleared safe mode (Phase 11): without the second bound a latched streak could
+# never end, because no order can be confirmed while it refuses every one.
+# FAILED is the reconciler's verdict on a lost order, not the broker refusing
+# one, so it neither counts toward the streak nor breaks it.
 _CONSECUTIVE_REJECTS_SQL = """
 SELECT count(*)
 FROM execution.intent_events
 WHERE state = 'REJECTED'
+  AND event_time > %s
   AND seq > COALESCE(
       (SELECT max(seq) FROM execution.intent_events WHERE state = 'CONFIRMED'), 0
   )
@@ -254,13 +257,13 @@ class PostgresIntentLedger:
             connection.close()
         return tuple((row[0], row[1]) for row in rows)
 
-    def consecutive_rejects(self) -> int:
-        """Venue rejections since the last confirmed order."""
+    def consecutive_rejects(self, since: datetime) -> int:
+        """Venue rejections after ``since`` and since the last confirmed order."""
 
         connection = self._connect()
         try:
             with connection, connection.cursor() as cursor:
-                cursor.execute(_CONSECUTIVE_REJECTS_SQL)
+                cursor.execute(_CONSECUTIVE_REJECTS_SQL, (since,))
                 row = cursor.fetchone()
         finally:
             connection.close()

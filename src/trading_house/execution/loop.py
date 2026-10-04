@@ -30,8 +30,9 @@ then does ``Escalator.escalate()`` run. Escalation is exactly three things:
 owns the third directly (the same store append every material change makes);
 the first two are bundled behind the single ``Escalator.escalate()`` call,
 which the composition root (Task 6) wires to ``Gateway.mark_stale`` and the
-audit ledger. There is no fourth step, no alerting subsystem and no safe-mode
-state machine here.
+audit ledger. There is no fourth step here. Since Phase 11 the composition
+root also wraps that escalator in ``ops/control.py``'s ``SafeModeEscalator``,
+which enters safe mode and alerts; this module neither knows nor needs to.
 
 When ``decide()`` itself returns ``ActionKind.ESCALATE`` (D-7: two failed
 restores, or an orphan with no stop and no distance), that position event

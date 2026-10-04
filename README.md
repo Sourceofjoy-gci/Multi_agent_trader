@@ -1,4 +1,4 @@
-# Trading House — Phase 10 Portfolio Risk
+# Trading House — Phase 11 Safe Mode and Kill Switches
 
 > **This repository can place orders, and only ever against a demo account.**
 > Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
@@ -8,6 +8,8 @@
 > untested on real data. Phase 10 gives the risk engine a view of the
 > portfolio, so every limit the constitution signs is now enforced, and
 > `order submit` re-checks a decision against the live account before sending.
+> Phase 11 adds safe mode, kill switches at four scopes, latched drawdown
+> halts, and webhook alerts; only a named person clears a halt.
 >
 > **There is still no funded account, LLM agent, or demonstrated edge.** The
 > MT5 gateway refuses every non-demo login, and MetaTrader 5 is reachable from
@@ -427,9 +429,8 @@ no standing to make.
 
 **Escalation is three things and no more:** gateway state is marked stale, one
 row goes into the hash-chained audit ledger, and one position event is
-written. There is no alerting subsystem and no safe-mode state machine in this
-codebase; an operator learns of an escalation by reading the audit ledger or
-running `guard status`. After escalating, the guard stops attempting
+written. Since Phase 11 an escalation also enters firm-wide safe mode and
+sends an alert (see *Phase 11*); the guard itself keeps running. After escalating, the guard stops attempting
 modifications on that position — terminally, for the life of that position's
 record — so the first, true diagnosis is not buried under a day's worth of
 repetitions of itself. Nothing in this phase clears it: `reconcile_all` only
@@ -2552,11 +2553,78 @@ written:
 {"detail": "portfolio risk limits refuse this order", "reasons": "unmeasured_open_risk", "status": "error"}
 ```
 
-What this does not do: halts do not latch (that is SAFE_MODE's job); the swing
+What this does not do: halts do not latch here (Phase 11 latches them); the swing
 overnight, weekend and gap limits stay declared and unenforced; drawdown is built
 from system-owned deals only, so balance operations and manual trades' P&L are
 outside it (their open risk is not); and the only live caller is `order submit`,
 because the automated strategy runner does not exist yet.
+
+## Phase 11 — safe mode, kill switches and alerting
+
+Design: [Phase 11](docs/superpowers/specs/2026-10-04-phase-11-safe-mode-kill-switches-design.md).
+
+A **halt** stops new orders. It never stops stops: the guard keeps guarding
+whatever is halted. There are three kinds:
+
+| Kind | Scope | Entered by |
+|---|---|---|
+| `safe_mode` | firm | A guard escalation; a venue refusal of authority (trading or account disabled, retcode 10027, insufficient funds); the reject streak; or an operator |
+| `kill` | firm, book, instrument or strategy | An operator |
+| `drawdown_halt` | firm or book | The book or firm reaching its signed drawdown halt |
+
+**Only a named person clears a halt**, with `control clear`. A halt is one row
+in the append-only `execution.control_events` (migration 0009), and clearing it
+is a second row; nothing in the system lifts one on its own. Clearing a
+drawdown halt restarts that curve from the moment it was cleared, and clearing
+safe mode restarts the reject streak. Without that, both would latch again on
+the next read and the unlock would mean nothing.
+
+`order submit` checks for halts inside the submission lock, before the terminal
+is reached. A covering halt is **exit 23**, naming each halt by id. After the
+live portfolio is read, anything it has already earned is latched before the
+Phase 10 re-check runs. Asking for a switch that is already down returns the
+existing halt and alerts no one, so neither a guard escalating every cycle nor
+a streak re-read on every order can pile up halts or messages.
+
+**Alerts** go to one webhook when a halt is entered and when one is cleared,
+never once per cycle. The halt commits first and the alert is attempted after,
+so a dead chat service cannot stop the system from stopping itself. A failed
+delivery is audited as `control.alert_undelivered`. Configure the channel with:
+
+| Variable | Meaning |
+|---|---|
+| `TRADING_HOUSE_ALERT_WEBHOOK_URL` | The https webhook. It is the channel's credential, so it is never printed |
+| `TRADING_HOUSE_ALERT_WEBHOOK_FORMAT` | `slack`, `discord`, `ntfy` or `json` (default) |
+
+Without a URL, every halt still binds, and records that nobody was told.
+`control status` reports the channel as `unconfigured`.
+
+### Commands
+
+```bash
+uv run trading-house control status
+uv run trading-house control kill --scope book --target fx_scalp --operator ana --reason "desk review"
+uv run trading-house control kill --scope firm --operator ana --reason "broker incident"
+uv run trading-house control safe-mode --operator ana --reason "NFP in five minutes"
+uv run trading-house control clear --halt-id <id> --operator ben --reason "reviewed"
+uv run trading-house control check
+uv run trading-house control flatten --operator ana
+```
+
+- **`control kill`** refuses a target the system does not know: a book not in
+  the signed constitution, an instrument not in the signed binding, or a
+  strategy not registered. A kill on a typo stops nothing and would report that
+  it did.
+- **`control check`** reads the live account and latches anything it has earned,
+  the same check `order submit` runs, with no order attached. Run it from a
+  scheduler so a book that crosses its halt between orders is halted, and
+  someone told, when it happens.
+- **`control flatten`** closes every position carrying a system magic number,
+  and only while a firm `kill` is in force: stopping new orders and closing
+  positions are two separate, deliberate acts. Manual trades are left alone.
+  Each close is one audit row; a refused close is reported, not retried.
+- `operator` is whoever you say you are, recorded verbatim. `system` is
+  reserved for the system's own halts.
 
 ## Operator commands
 
@@ -2689,6 +2757,8 @@ Each failure has a stable exit code and a fixed, redacted message.
 | 20 | `sealed evidence is not a usable statistical input` | A sealed run cannot be turned into a statistical input or cut as its protocol declares: no series, days that are not contiguous, a value that is not finite, fewer than 30 days, a missing basis, a trade that exits outside the series, or a policy that cannot be applied (for example more CPCV folds than days) | **Do not measure this run.** The evidence is intact and is the candidate's own; it is too short or malformed to measure. Which refusal fired is on the error's private cause. No default is substituted |
 | 21 | `promotion step refused` | The policy digest an evaluation was asked to run under is not the one the constants in force give (a threshold moved after the trial's first report), a decision or holdout derivation was handed an incomplete or inconsistent set, a trial is both legacy-imported and preregistered, or `report` was asked for a trial with no recorded decision | **Do not edit the constants to make it run.** A policy change needs a new trial. The specifics ride on the error's private cause for a log reader |
 | 22 | `portfolio risk limits refuse this order` | `order submit`'s re-check of the live portfolio refused the decision; the payload's `reasons` names each refusing gate | Read the reasons. `unmeasured_open_risk` means a position has no stop or sits on a symbol the binding does not name: protect or close it. `pnl_unavailable` means deal history could not be read: check the terminal. A limit reason means the account is at that limit: wait for positions to close, or for the next UTC day for the daily stop. **Do not edit the constitution to make it pass** |
+| 23 | `trading is halted` | A halt in force covers this order: firm safe mode or kill, or a kill or drawdown halt on its book, instrument or strategy. The message names each by id | `control status`, find out why it was entered, then `control clear --halt-id ... --operator ... --reason ...` once it is safe. **Clearing is the acknowledgement; do not script it** |
+| 24 | `no such active halt` | `control clear` named a halt that is not in force, or `control flatten` ran without a firm kill | `control status` lists what is in force |
 | 1 | `unexpected failure` | An unmapped error, reported with a correlation id | Re-run with `--debug` to see the traceback locally |
 
 ## Tests and quality gates

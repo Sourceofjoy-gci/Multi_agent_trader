@@ -15,7 +15,7 @@ import os
 import signal
 import tempfile
 import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,7 +41,8 @@ from trading_house.brokers.mt5.magic import derive_magic
 from trading_house.constitution.binding import VenueBinding, load_venue_binding
 from trading_house.constitution.loader import LoadedConstitution, load_constitution
 from trading_house.constitution.signing import load_private_key, sign_bytes
-from trading_house.core.clock import SystemClock, ensure_utc
+from trading_house.core.clock import Clock, SystemClock, ensure_utc
+from trading_house.core.control import SYSTEM_ACTOR, Halt, HaltKind, HaltRequest, HaltScope
 from trading_house.core.errors import (
     AuditAppendError,
     AuditIntegrityError,
@@ -54,6 +55,7 @@ from trading_house.core.errors import (
     EquityEvidenceError,
     EvidenceIntegrityError,
     ExitCode,
+    HaltNotActiveError,
     InsufficientHistoryError,
     IntentAlreadySubmittedError,
     MigrationMismatchError,
@@ -65,6 +67,7 @@ from trading_house.core.errors import (
     SignatureVerificationError,
     StatisticalInputError,
     TimestampError,
+    TradingHaltedError,
     TradingHouseError,
     TrialLedgerAppendError,
     TrialLedgerIntegrityError,
@@ -73,6 +76,7 @@ from trading_house.core.errors import (
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import (
     RISK_DECISION_ADAPTER,
+    ExecutableRiskDecision,
     OrderIntent,
     RejectedRiskDecision,
     Side,
@@ -86,9 +90,16 @@ from trading_house.core.values import (
     NonEmptyStr,
     TimeInForce,
 )
-from trading_house.core.venue import DealRecord, Mt5VenueRef, PositionRecord, Venue
+from trading_house.core.venue import (
+    DealRecord,
+    Mt5VenueRef,
+    PositionRecord,
+    RecoveryAction,
+    Venue,
+)
 from trading_house.database.connection import open_runtime_connection
 from trading_house.database.migrations import assert_at_head
+from trading_house.execution.control import PostgresControlStore, require_not_halted
 from trading_house.execution.ledger import (
     ConnectionFactory,
     PostgresIntentLedger,
@@ -102,6 +113,7 @@ from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
 from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
+from trading_house.ops.alerts import AlertFormat, alerter_from
 from trading_house.ops.backtest import build_strategy, mark_to_market_bundle, simulate
 from trading_house.ops.compounding import (
     CompoundingReport,
@@ -110,6 +122,12 @@ from trading_house.ops.compounding import (
     request_replay_inputs,
     sealed_baseline,
     sealed_rerun,
+)
+from trading_house.ops.control import (
+    ControlOutcome,
+    ControlService,
+    SafeModeEscalator,
+    baselines_from,
 )
 from trading_house.ops.dataset import refuse_changed_dataset, refuse_dataset_mismatch, window_digest
 from trading_house.ops.decide import (
@@ -129,7 +147,7 @@ from trading_house.ops.ledger import (
     seal_bundle,
 )
 from trading_house.ops.package import package_from_chain, verify_package
-from trading_house.ops.portfolio import recheck_submission
+from trading_house.ops.portfolio import build_live_portfolio, recheck_submission
 from trading_house.ops.scenarios import (
     ScenarioReport,
     baseline_at,
@@ -166,7 +184,7 @@ from trading_house.research.trial_ledger import (
 from trading_house.research.validation.capacity import capacity_diagnostic
 from trading_house.risk.engine import RiskEngine
 from trading_house.settings import RuntimeSettings
-from trading_house.strategies.registry import strategy_scope
+from trading_house.strategies.registry import REGISTERED_STRATEGY_IDS, strategy_scope
 
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
 DEFAULT_SIGNATURE = Path("config/risk_constitution.yaml.sig")
@@ -207,6 +225,8 @@ EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
     StatisticalInputError: ExitCode.STATISTICAL_INPUT,
     PromotionRefusedError: ExitCode.PROMOTION_REFUSED,
     PortfolioRiskRefusedError: ExitCode.PORTFOLIO_RISK,
+    TradingHaltedError: ExitCode.TRADING_HALTED,
+    HaltNotActiveError: ExitCode.HALT_NOT_ACTIVE,
     # One code for all five refusal kinds. They have different remedies --
     # backfill, repair the bars, fix the arm or strategy, widen the horizon --
     # but they are all "the run you asked for cannot be simulated honestly", and
@@ -230,6 +250,10 @@ audit_app = typer.Typer(no_args_is_help=True, help="Audit-ledger commands.")
 data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
 order_app = typer.Typer(no_args_is_help=True, help="Order commands.")
 guard_app = typer.Typer(no_args_is_help=True, help="Position-guard commands.")
+FLATTEN_EVENT = "control.position_flattened"
+control_app = typer.Typer(
+    no_args_is_help=True, help="Safe mode, kill switches, and the halts that stop new orders."
+)
 backtest_app = typer.Typer(no_args_is_help=True, help="Backtest commands.")
 research_app = typer.Typer(no_args_is_help=True, help="Research commands.")
 trial_app = typer.Typer(no_args_is_help=True, help="Trial-ledger commands.")
@@ -241,6 +265,7 @@ app.add_typer(audit_app, name="audit")
 app.add_typer(data_app, name="data")
 app.add_typer(order_app, name="order")
 app.add_typer(guard_app, name="guard")
+app.add_typer(control_app, name="control")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(research_app, name="research")
 research_app.add_typer(trial_app, name="trial")
@@ -305,6 +330,10 @@ def _execute(operation: Callable[[], dict[str, JsonValue]]) -> dict[str, JsonVal
             EXIT_CODES[PortfolioRiskRefusedError],
             reasons=",".join(error.reasons),
         ) from None
+    except TradingHaltedError as error:
+        # str(error) names each halt in force by id and kind; an operator who
+        # cannot see which switch is down cannot clear it.
+        raise _fail(str(error), EXIT_CODES[TradingHaltedError]) from None
     except UnresolvedIntentsError as error:
         # str(error) names the offending intent ids; the class-level
         # public_message alone does not, and an operator who cannot see
@@ -974,60 +1003,146 @@ def order_submit(
 
         factory = _connection_factory()
         ledger = PostgresIntentLedger(factory)
-        with (
-            submission_lock(factory),
-            _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
-                adapter,
-                gateway,
-                binding,
-                clock,
-            ),
-        ):
-            require_clean_ledger(ledger, _AdapterDealSource(adapter), clock, gateway.mark_stale)
-            book_binding = binding.books.get(book)
-            instrument_binding = binding.instruments.get(instrument)
-            if book_binding is None or instrument_binding is None:
-                raise ConfigurationError()
-            # Phase 10: the decision was sized against the portfolio as it
-            # was then. Read it again, under the lock and after the gate, and
-            # refuse before an intent exists if a signed limit now would.
-            constitution = _constitution().constitution
-            recheck_submission(
-                RiskEngine(constitution, clock),
-                approved,
-                venue=adapter,
-                history=ledger,
-                binding=binding,
-                books=tuple(constitution.books),
-                book=book,
-                instrument_id=instrument,
-                side=side,
-                now=clock.now(),
+        control_store = PostgresControlStore(factory)
+        with submission_lock(factory):
+            # Phase 11: a halt in force refuses before the terminal is even
+            # reached. Read under the lock, so a kill that lands while another
+            # submission holds it is seen by this one.
+            require_not_halted(
+                control_store, book=book, instrument_id=instrument, strategy_id=strategy_id
             )
-            venue_ref = Mt5VenueRef(
-                venue=Venue.MT5,
-                magic=derive_magic(intent_id, book_binding.magic_range),
-                server_symbol=instrument_binding.server_symbol,
-            )
-            intent = OrderIntent(
-                intent_id=intent_id,
-                proposal_id=approved.proposal_id,
-                book=book,
-                instrument_id=instrument,
-                side=side,
-                quantity=approved.approved_quantity,
-                stop_loss=approved.stop_loss_price,
-                take_profit=approved.take_profit_price,
-                time_in_force=time_in_force,
-                max_slippage_bps=Decimal(max_slippage_bps),
-                state=IntentState.SUBMITTING,
-                t_submit_utc=clock.now(),
-                venue_ref=venue_ref,
-            )
-            state = OrderManager(ledger, adapter, clock).submit(intent, strategy_id)
+            with _order_adapter(
+                venue_binding, venue_binding_signature, venue_binding_public_key
+            ) as (adapter, gateway, binding, clock):
+                require_clean_ledger(ledger, _AdapterDealSource(adapter), clock, gateway.mark_stale)
+                book_binding = binding.books.get(book)
+                instrument_binding = binding.instruments.get(instrument)
+                if book_binding is None or instrument_binding is None:
+                    raise ConfigurationError()
+                # Phase 10: the decision was sized against the portfolio as it
+                # was then. Read it again, under the lock and after the gate.
+                # Phase 11: anything that portfolio has already earned -- a
+                # drawdown halt, a reject streak -- is latched first, so it
+                # holds past this order and a person is told.
+                constitution = _constitution().constitution
+                control = _control_service(factory, clock)
+                live = build_live_portfolio(
+                    adapter,
+                    ledger,
+                    binding,
+                    books=tuple(constitution.books),
+                    now=clock.now(),
+                    baselines=baselines_from(control_store, tuple(constitution.books)),
+                )
+                control.latch(constitution, live.state, live.firm_equity)
+                require_not_halted(
+                    control_store, book=book, instrument_id=instrument, strategy_id=strategy_id
+                )
+                recheck_submission(
+                    RiskEngine(constitution, clock),
+                    approved,
+                    venue=adapter,
+                    live=live,
+                    book=book,
+                    instrument_id=instrument,
+                    side=side,
+                )
+                state = _submit_intent(
+                    ledger=ledger,
+                    adapter=adapter,
+                    clock=clock,
+                    approved=approved,
+                    intent_id=intent_id,
+                    strategy_id=strategy_id,
+                    book=book,
+                    instrument=instrument,
+                    side=side,
+                    time_in_force=time_in_force,
+                    max_slippage_bps=max_slippage_bps,
+                    magic_range=book_binding.magic_range,
+                    server_symbol=instrument_binding.server_symbol,
+                )
+                _enter_safe_mode_on_authority_refusal(ledger, control, intent_id, state)
         return {"intent_id": intent_id, "state": state.value}
 
     _run(operation)
+
+
+def _submit_intent(
+    *,
+    ledger: PostgresIntentLedger,
+    adapter: Mt5BrokerAdapter,
+    clock: Clock,
+    approved: ExecutableRiskDecision,
+    intent_id: str,
+    strategy_id: str,
+    book: str,
+    instrument: str,
+    side: Side,
+    time_in_force: TimeInForce,
+    max_slippage_bps: str,
+    magic_range: tuple[int, int],
+    server_symbol: str,
+) -> IntentState:
+    """Build the intent from the decision and the signed binding, and send it once."""
+
+    venue_ref = Mt5VenueRef(
+        venue=Venue.MT5,
+        magic=derive_magic(intent_id, magic_range),
+        server_symbol=server_symbol,
+    )
+    intent = OrderIntent(
+        intent_id=intent_id,
+        proposal_id=approved.proposal_id,
+        book=book,
+        instrument_id=instrument,
+        side=side,
+        quantity=approved.approved_quantity,
+        stop_loss=approved.stop_loss_price,
+        take_profit=approved.take_profit_price,
+        time_in_force=time_in_force,
+        max_slippage_bps=Decimal(max_slippage_bps),
+        state=IntentState.SUBMITTING,
+        t_submit_utc=clock.now(),
+        venue_ref=venue_ref,
+    )
+    return OrderManager(ledger, adapter, clock).submit(intent, strategy_id)
+
+
+def _enter_safe_mode_on_authority_refusal(
+    ledger: PostgresIntentLedger, control: ControlService, intent_id: str, state: IntentState
+) -> None:
+    """A venue refusal whose recovery is safe mode -- the AUTHORITY class in
+    ``core/venue.py``: autotrading or trading disabled, the account disabled,
+    insufficient funds, or a refusal nobody could classify -- means the venue
+    has said this account cannot trade as asked, and the next order would be
+    refused the same way. Spec 13.2 lists retcode 10027 as a SAFE_MODE trigger
+    by name."""
+
+    if state is not IntentState.REJECTED:
+        return
+    payload = ledger.events_for(intent_id)[-1].payload
+    if payload.get("recovery") != RecoveryAction.ENTER_SAFE_MODE.value:
+        return
+    control.enter(
+        HaltRequest(
+            kind=HaltKind.SAFE_MODE,
+            scope=HaltScope.FIRM,
+            target=None,
+            reason=f"venue_refused:{payload.get('reject_reason', 'unknown')}",
+            actor=SYSTEM_ACTOR,
+        )
+    )
+
+
+def _control_service(factory: ConnectionFactory, clock: Clock) -> ControlService:
+    settings = _settings()
+    return ControlService(
+        PostgresControlStore(factory),
+        PostgresAuditLedger(factory),
+        alerter_from(settings.alert_webhook_url, AlertFormat(settings.alert_webhook_format)),
+        clock,
+    )
 
 
 @order_app.command("reconcile")
@@ -1166,7 +1281,13 @@ def guard_run(
             guard = PositionGuard(
                 store=PostgresPositionStore(factory),
                 venue=Mt5ProtectionPort(adapter, binding),
-                escalator=LedgerEscalator(PostgresAuditLedger(factory), gateway.mark_stale, clock),
+                # Phase 11: every escalation also enters safe mode -- the
+                # guard can no longer vouch for every stop, so new orders stop
+                # until a person has looked. The guard itself keeps running.
+                escalator=SafeModeEscalator(
+                    LedgerEscalator(PostgresAuditLedger(factory), gateway.mark_stale, clock),
+                    _control_service(factory, clock),
+                ),
                 clock=clock,
                 owned_magic_ranges=[book.magic_range for book in binding.books.values()],
                 min_stop_distances=min_stop_distances,
@@ -1216,6 +1337,282 @@ def guard_status() -> None:
         ]
         escalated = sum(1 for row in rows if row.get("escalated") == "true")
         return {"open_positions": len(positions), "escalated": escalated, "positions": positions}
+
+    _run(operation)
+
+
+class HaltScopeOption(StrEnum):
+    FIRM = "firm"
+    BOOK = "book"
+    INSTRUMENT = "instrument"
+    STRATEGY = "strategy"
+
+
+def _halt_payload(halt: Halt) -> dict[str, JsonValue]:
+    return {
+        "halt_id": halt.halt_id,
+        "kind": halt.kind.value,
+        "scope": halt.scope.value,
+        "target": halt.target,
+        "reason": halt.reason,
+        "actor": halt.actor,
+        "entered_at": halt.entered_at.isoformat(),
+    }
+
+
+def _outcome_payload(outcome: ControlOutcome) -> dict[str, JsonValue]:
+    return {
+        "halt": _halt_payload(outcome.halt),
+        "changed": outcome.changed,
+        "alerted": outcome.alerted,
+    }
+
+
+def _operator(value: str) -> str:
+    """A person's name, as they gave it. ``system`` is the system's own actor,
+    and an operator who could act as it could make a hand-entered halt look
+    automatic -- or a hand-cleared one look like nobody cleared it."""
+
+    if not value.strip() or value.strip() == SYSTEM_ACTOR:
+        raise ConfigurationError()
+    return value.strip()
+
+
+@control_app.command("status")
+def control_status() -> None:
+    """List every halt in force and where alerts go.
+
+    Ungated and read-only: this is what an operator runs when an order was
+    refused, and refusing it while halted would hide the reason.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        settings = _settings()
+        halts = PostgresControlStore(_connection_factory()).active()
+        return {
+            "halts": [_halt_payload(halt) for halt in halts],
+            "halted": bool(halts),
+            "alerting": alerter_from(
+                settings.alert_webhook_url, AlertFormat(settings.alert_webhook_format)
+            ).channel,
+        }
+
+    _run(operation)
+
+
+@control_app.command("kill")
+def control_kill(
+    scope: Annotated[HaltScopeOption, typer.Option("--scope")],
+    operator: Annotated[str, typer.Option("--operator")],
+    reason: Annotated[str, typer.Option("--reason")],
+    target: Annotated[str | None, typer.Option("--target")] = None,
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Stop new orders for a strategy, an instrument, a book or the firm.
+
+    Master spec 13.1. Open positions keep their stops and the guard keeps
+    guarding; only new orders stop. The target must be one the system knows
+    -- a registered strategy, an instrument in the signed binding, a book in
+    the signed constitution -- because a kill on a typo stops nothing and
+    reports that it did. A firm kill takes no target, and is what ``control
+    flatten`` requires.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        halt_scope = HaltScope(scope.value)
+        if halt_scope is HaltScope.BOOK:
+            known: Collection[str] = tuple(_constitution().constitution.books)
+        elif halt_scope is HaltScope.INSTRUMENT:
+            known = tuple(
+                load_venue_binding(
+                    venue_binding, venue_binding_signature, venue_binding_public_key
+                ).instruments
+            )
+        elif halt_scope is HaltScope.STRATEGY:
+            known = REGISTERED_STRATEGY_IDS
+        else:
+            known = ()
+        if halt_scope is not HaltScope.FIRM and target not in known:
+            raise ConfigurationError()
+        outcome = _control_service(_connection_factory(), SystemClock()).enter(
+            HaltRequest(
+                kind=HaltKind.KILL,
+                scope=halt_scope,
+                target=target,
+                reason=reason,
+                actor=_operator(operator),
+            )
+        )
+        return _outcome_payload(outcome)
+
+    _run(operation)
+
+
+@control_app.command("safe-mode")
+def control_safe_mode(
+    operator: Annotated[str, typer.Option("--operator")],
+    reason: Annotated[str, typer.Option("--reason")],
+) -> None:
+    """Enter safe mode by hand: no new orders anywhere, stops left to the broker."""
+
+    def operation() -> dict[str, JsonValue]:
+        outcome = _control_service(_connection_factory(), SystemClock()).enter(
+            HaltRequest(
+                kind=HaltKind.SAFE_MODE,
+                scope=HaltScope.FIRM,
+                target=None,
+                reason=reason,
+                actor=_operator(operator),
+            )
+        )
+        return _outcome_payload(outcome)
+
+    _run(operation)
+
+
+@control_app.command("clear")
+def control_clear(
+    halt_id: Annotated[str, typer.Option("--halt-id")],
+    operator: Annotated[str, typer.Option("--operator")],
+    reason: Annotated[str, typer.Option("--reason")],
+) -> None:
+    """Lift one halt, by id, as a named person.
+
+    The only way any halt ends. Clearing a drawdown halt restarts that book's
+    (or the firm's) drawdown from now, and clearing safe mode restarts the
+    reject streak -- otherwise both would latch again on the next order. A halt
+    that is not in force is exit 24.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        outcome = _control_service(_connection_factory(), SystemClock()).clear(
+            halt_id, actor=_operator(operator), reason=reason
+        )
+        return _outcome_payload(outcome)
+
+    _run(operation)
+
+
+@control_app.command("check")
+def control_check(
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Read the live account and latch any halt it has earned.
+
+    ``order submit`` does the same before every order; this is the same check
+    with no order attached, for a scheduler to run, so a book that crosses its
+    drawdown halt between orders is halted -- and a person told -- when it
+    happens rather than at the next attempt to trade.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        factory = _connection_factory()
+        constitution = _constitution().constitution
+        books = tuple(constitution.books)
+        with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
+            adapter,
+            _gateway,
+            binding,
+            clock,
+        ):
+            live = build_live_portfolio(
+                adapter,
+                PostgresIntentLedger(factory),
+                binding,
+                books=books,
+                now=clock.now(),
+                baselines=baselines_from(PostgresControlStore(factory), books),
+            )
+            outcomes = _control_service(factory, clock).latch(
+                constitution, live.state, live.firm_equity
+            )
+        return {"latched": [_outcome_payload(outcome) for outcome in outcomes]}
+
+    _run(operation)
+
+
+@control_app.command("flatten")
+def control_flatten(
+    operator: Annotated[str, typer.Option("--operator")],
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Close every position this system opened. Only under a firm kill.
+
+    Master spec 13.1's ``kill(firm)``: flatten everything. Split from the kill
+    itself so that stopping new orders -- cheap, reversible -- never also
+    closes positions by accident: an operator kills the firm first, then
+    flattens as a second, deliberate act. Positions with no system magic (a
+    manual trade) are left alone. Each close is one audit row; a close the
+    venue refuses is reported, not retried.
+    """
+
+    def operation() -> dict[str, JsonValue]:
+        actor = _operator(operator)
+        factory = _connection_factory()
+        if not any(
+            halt.kind is HaltKind.KILL and halt.scope is HaltScope.FIRM
+            for halt in PostgresControlStore(factory).active()
+        ):
+            raise HaltNotActiveError()
+        audit = PostgresAuditLedger(factory)
+        closed: list[JsonValue] = []
+        with _order_adapter(venue_binding, venue_binding_signature, venue_binding_public_key) as (
+            adapter,
+            _gateway,
+            binding,
+            clock,
+        ):
+            positions = adapter.positions_now()
+            if positions is None:
+                raise BrokerUnavailableError()
+            ranges = [book.magic_range for book in binding.books.values()]
+            for position in positions:
+                if not any(low <= position.magic <= high for low, high in ranges):
+                    continue
+                outcome = adapter.close(
+                    Mt5VenueRef(
+                        venue=Venue.MT5,
+                        magic=position.magic,
+                        server_symbol=position.server_symbol,
+                        position_ticket=position.position_ticket,
+                    ),
+                    None,
+                )
+                result: dict[str, JsonValue] = {
+                    "position_ticket": position.position_ticket,
+                    "accepted": outcome.accepted,
+                    "reject_reason": (
+                        None if outcome.reject_reason is None else outcome.reject_reason.value
+                    ),
+                }
+                audit.append(
+                    build_audit_event(
+                        FLATTEN_EVENT,
+                        clock.now(),
+                        {**result, "actor": actor},
+                        source_component="cli.control",
+                    )
+                )
+                closed.append(result)
+        return {"closed": closed}
 
     _run(operation)
 

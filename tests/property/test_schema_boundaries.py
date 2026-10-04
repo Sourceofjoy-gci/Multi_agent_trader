@@ -23,6 +23,7 @@ from trading_house.brokers.base import (
     ReconciliationReport,
     VenueHealth,
 )
+from trading_house.core.control import Halt, HaltKind, HaltScope
 from trading_house.core.exits import NoExitPolicy
 from trading_house.core.schemas import (
     AgentOpinion,
@@ -281,6 +282,15 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "value": 1.5,
         "observed_at": AWARE,
         "availability_time": AWARE,
+    },
+    Halt: {
+        "kind": HaltKind.KILL,
+        "scope": HaltScope.BOOK,
+        "target": "fx_scalp",
+        "reason": "operator test",
+        "actor": "operator",
+        "halt_id": "h-1",
+        "entered_at": AWARE,
     },
     OrderStamp: {
         "book": "fx_scalp",

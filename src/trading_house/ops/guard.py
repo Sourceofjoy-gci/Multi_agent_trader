@@ -102,10 +102,10 @@ class LedgerEscalator:
     """Spec 5.2's escalation, minus the position event the loop writes itself.
 
     Exactly two things happen here: the gateway is marked stale, and one row
-    goes into the hash-chained audit ledger. There is no alerting subsystem
-    and no safe-mode state machine in this codebase, and this class is not a
-    stand-in for one -- an operator learns of an escalation by reading the
-    audit ledger or running ``guard status``.
+    goes into the hash-chained audit ledger. Safe mode and the alert are not
+    this class's: ``guard run`` wraps it in ``ops/control.py``'s
+    ``SafeModeEscalator`` (Phase 11), so this one stays the audit record and
+    nothing else.
 
     ``payload`` is carried verbatim. The loop guarantees it contains only an
     exception's TYPE name, never its message, because a broker's own text --

@@ -26,6 +26,8 @@ class ExitCode(IntEnum):
     STATISTICAL_INPUT = 20
     PROMOTION_REFUSED = 21
     PORTFOLIO_RISK = 22
+    TRADING_HALTED = 23
+    HALT_NOT_ACTIVE = 24
 
 
 class TradingHouseError(Exception):
@@ -285,3 +287,25 @@ class PortfolioRiskRefusedError(TradingHouseError):
     def __init__(self, reasons: Sequence[str]) -> None:
         self.reasons = tuple(reasons)
         Exception.__init__(self, f"{self.public_message}: {', '.join(self.reasons)}")
+
+
+class TradingHaltedError(TradingHouseError):
+    """Raised when a halt in force stops a new order.
+
+    Phase 11. Names the halts by id and kind, so an operator can see which
+    switch is down and clear exactly that one; ids are minted here and kinds
+    are a closed enum, so naming them carries no free text.
+    """
+
+    public_message = "trading is halted"
+
+    def __init__(self, halts: Sequence[tuple[str, str]]) -> None:
+        self.halts = tuple(halts)
+        named = ", ".join(f"{kind} {halt_id}" for halt_id, kind in self.halts)
+        Exception.__init__(self, f"{self.public_message}: {named}")
+
+
+class HaltNotActiveError(TradingHouseError):
+    """Raised when asked to clear a halt that does not exist or is already cleared."""
+
+    public_message = "no such active halt"

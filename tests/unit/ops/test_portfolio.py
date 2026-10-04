@@ -24,7 +24,12 @@ from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import ExecutableRiskDecision, Side
 from trading_house.core.values import AssetClass
 from trading_house.core.venue import DealMoney, PositionMark
-from trading_house.ops.portfolio import HISTORY_START, build_live_portfolio, recheck_submission
+from trading_house.ops.portfolio import (
+    HISTORY_START,
+    Baselines,
+    build_live_portfolio,
+    recheck_submission,
+)
 from trading_house.risk.engine import RiskEngine
 from trading_house.risk.portfolio import PortfolioState
 
@@ -121,12 +126,14 @@ class FakeHistory:
     stamps: Sequence[tuple[str, datetime]] = ()
     rejects: int = 0
     since: list[datetime] = field(default_factory=list)
+    rejects_since: list[datetime] = field(default_factory=list)
 
     def submissions_since(self, start: datetime) -> Sequence[tuple[str, datetime]]:
         self.since.append(start)
         return self.stamps
 
-    def consecutive_rejects(self) -> int:
+    def consecutive_rejects(self, since: datetime) -> int:
+        self.rejects_since.append(since)
         return self.rejects
 
 
@@ -299,13 +306,10 @@ def _recheck(venue: FakeVenue, history: FakeHistory | None = None) -> None:
         RiskEngine(CONSTITUTION, FixedClock(NOW)),
         _decision(),
         venue=venue,
-        history=history or FakeHistory(),
-        binding=BINDING,
-        books=BOOKS,
+        live=build_live_portfolio(venue, history or FakeHistory(), BINDING, books=BOOKS, now=NOW),
         book="fx_scalp",
         instrument_id="fx.eurusd",
         side=Side.BUY,
-        now=NOW,
     )
 
 
@@ -330,3 +334,50 @@ def test_the_streak_refuses_at_submission() -> None:
 def test_no_quote_for_the_instrument_is_no_price_to_judge_at() -> None:
     with pytest.raises(BrokerUnavailableError):
         _recheck(FakeVenue(quotes=()))
+
+
+# --- Phase 11: a person's clear restarts the counts -------------------------------------
+
+
+def test_a_cleared_drawdown_halt_restarts_that_curve_from_the_clear() -> None:
+    """Scalp lost 500 before its halt was cleared and 40 after: only the 40
+    counts. The firm's own clear is later still, so only the swing deal after
+    it reaches the firm curve."""
+
+    cleared = MIDNIGHT - timedelta(days=1)
+    firm_cleared = MIDNIGHT - timedelta(hours=1)
+    venue = FakeVenue(
+        deals=(
+            _deal(SCALP, cleared - timedelta(hours=1), "-500"),
+            _deal(SCALP, cleared + timedelta(hours=1), "-40"),
+            _deal(SWING, NOW, "-25"),
+        )
+    )
+    history = FakeHistory()
+
+    state = build_live_portfolio(
+        venue,
+        history,
+        BINDING,
+        books=BOOKS,
+        now=NOW,
+        baselines=Baselines(
+            book_drawdown_since={"fx_scalp": cleared},
+            firm_drawdown_since=firm_cleared,
+            rejects_since=firm_cleared,
+        ),
+    ).state
+
+    assert state.book_pnl is not None
+    assert state.book_pnl["fx_scalp"].drawdown == Decimal(40)
+    assert state.book_pnl["fx_swing"].drawdown == Decimal(25)
+    assert state.firm_drawdown == Decimal(25)
+    assert history.rejects_since == [firm_cleared]
+
+
+def test_never_cleared_counts_from_the_start_of_history() -> None:
+    history = FakeHistory()
+
+    _build(FakeVenue(), history)
+
+    assert history.rejects_since == [HISTORY_START]

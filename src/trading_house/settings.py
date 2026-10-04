@@ -6,6 +6,7 @@ a limit at runtime (invariant I-2).
 """
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,3 +35,8 @@ class RuntimeSettings(BaseSettings):
     constitution_path: Path = Path("config/risk_constitution.yaml")
     constitution_signature_path: Path = Path("config/risk_constitution.yaml.sig")
     constitution_public_key_path: Path = Path("config/risk_constitution.public.pem")
+    # Phase 11. Where a halt is announced. Optional: without it every halt is
+    # still recorded and still binds, and records that nobody was told. A
+    # SecretStr because a chat webhook's URL is its credential.
+    alert_webhook_url: SecretStr | None = None
+    alert_webhook_format: Literal["slack", "discord", "ntfy", "json"] = "json"
