@@ -274,3 +274,33 @@ def test_a_superuser_cannot_file_later_bars_under_a_finished_run(
             "VALUES ('fx.eurusd', 'M1', %s, %s, 1.1, 1.1, 1.1, 1.1, 100, 10, 0, 'OK', %s)",
             (later, later + timedelta(minutes=1), run_id),
         )
+
+
+def test_a_run_cannot_vouch_for_a_bar_before_its_window(bar_store: BarStore) -> None:
+    """``seed`` requests ``[NINE, NINE + 1h)``. A bar opening a minute before
+    closed long before the run finished, so 0008 lets it through; only the
+    requested window says that run never asked for it."""
+
+    import psycopg
+
+    run_id = uuid4()
+    seed(bar_store, [_bar(0)], run_id=run_id)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        bar_store.append_bars([_bar(-1)], run_id=run_id)
+
+
+def test_a_run_cannot_vouch_for_the_bar_opening_at_its_window_end(
+    bar_store: BarStore,
+) -> None:
+    """The window is half-open, as ingest plans it. A run that finished an
+    hour after ``requested_to`` could have seen the bar opening there, but it
+    never asked for it."""
+
+    import psycopg
+
+    run_id = uuid4()
+    seed(bar_store, [_bar(0)], run_id=run_id, finished_at=NINE + timedelta(hours=2))
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        bar_store.append_bars([_bar(60)], run_id=run_id)

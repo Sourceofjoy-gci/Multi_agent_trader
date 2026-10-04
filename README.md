@@ -219,7 +219,9 @@ stamped 09:00 was not knowable until 09:01, and no consumer read path can see
 it before then. Storage never rewrites a row; a revised broker history is
 counted as a conflict, not silently applied. A bar that closes after its
 ingest run's `finished_at` is refused by a trigger (migration 0008), which binds
-a superuser too: a run cannot vouch for a bar it could not have fetched.
+a superuser too: a run cannot vouch for a bar it could not have fetched. Nor
+for one outside the `[requested_from, requested_to)` window it asked for
+(migration 0009).
 
 ### Commands
 

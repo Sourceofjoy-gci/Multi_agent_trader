@@ -7,11 +7,11 @@ up to six weeks into the future, under a run that had finished on 2026-09-28.
 The foreign key only asked whether the run existed, and no grant binds a
 superuser, so nothing refused it. A trigger does bind one.
 
-The run's requested window is deliberately not the test. ``copy_rates_range``
-receives the UTC window unshifted while the bars it returns are shifted back
-by the server offset (``brokers/mt5/terminal.py``), so a real run's bars can
-sit up to that offset outside ``[requested_from, requested_to]``. Closing time
-against ``finished_at`` holds whatever the offset is.
+The run's requested window is not the test here: when this was written,
+``copy_rates_range`` received the UTC window unshifted, so a real run's bars
+sat up to the server offset outside it. Closing time against ``finished_at``
+holds whatever the offset is. Migration 0009 adds the window check now that
+the terminal sends windows in the broker's frame.
 
 ``finalize_run`` may move ``finished_at`` later, only ever to the present.
 """
