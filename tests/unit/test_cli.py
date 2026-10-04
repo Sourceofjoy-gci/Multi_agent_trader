@@ -1390,6 +1390,18 @@ def test_backtest_refuses_an_invalid_exit_policy(tmp_path: Path) -> None:
     _assert_redacted_configuration_error(result)
 
 
+@pytest.mark.usefixtures("_dsn")
+def test_backtest_refuses_a_contract_for_another_instrument(tmp_path: Path) -> None:
+    from tests.unit.research.backtest.conftest import _contract
+
+    path = tmp_path / "gbp.json"
+    path.write_text(_contract(instrument_id="fx.gbpusd").model_dump_json(), encoding="utf-8")
+
+    result = runner.invoke(cli.app, _backtest_args(tmp_path, **{"--contract": str(path)}))
+
+    _assert_redacted_configuration_error(result)
+
+
 # --- backtest run --mark-to-market: the identity guard ------------------------
 #
 # The guard is not tested here. Six options that are all-or-nothing with

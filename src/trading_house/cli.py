@@ -69,12 +69,6 @@ from trading_house.core.errors import (
     TrialLedgerIntegrityError,
     UnresolvedIntentsError,
 )
-from trading_house.core.exits import (
-    ChandelierPolicy,
-    ExitPolicy,
-    FixedTargetPolicy,
-    NoExitPolicy,
-)
 from trading_house.core.instruments import InstrumentContract
 from trading_house.core.schemas import (
     RISK_DECISION_ADAPTER,
@@ -169,6 +163,7 @@ from trading_house.research.trial_ledger import (
 )
 from trading_house.research.validation.capacity import capacity_diagnostic
 from trading_house.settings import RuntimeSettings
+from trading_house.strategies.registry import strategy_scope
 
 DEFAULT_CONSTITUTION = Path("config/risk_constitution.yaml")
 DEFAULT_SIGNATURE = Path("config/risk_constitution.yaml.sig")
@@ -176,27 +171,12 @@ DEFAULT_PUBLIC_KEY = Path("config/risk_constitution.public.pem")
 DEFAULT_BINDING = Path("config/venue_binding.mt5.yaml")
 DEFAULT_BINDING_SIGNATURE = Path("config/venue_binding.mt5.yaml.sig")
 DEFAULT_ALEMBIC_CONFIG = Path("alembic.ini")
-_BACKTEST_INSTRUMENT = "fx.eurusd"
-_BACKTEST_TIMEFRAME = Timeframe.M15
 
 
 class ExitPolicyName(StrEnum):
     NONE = "none"
     FIXED_TARGET = "fixed_target"
     CHANDELIER = "chandelier"
-
-
-_EXIT_POLICIES: dict[ExitPolicyName, ExitPolicy] = {
-    ExitPolicyName.NONE: NoExitPolicy(kind="none"),
-    ExitPolicyName.FIXED_TARGET: FixedTargetPolicy(kind="fixed_target", r_multiple=Decimal("1.0")),
-    ExitPolicyName.CHANDELIER: ChandelierPolicy(
-        kind="chandelier", atr_multiple=Decimal("3.0"), min_step_points=Decimal(10)
-    ),
-}
-
-
-def _exit_policy(arm: ExitPolicyName) -> ExitPolicy:
-    return _EXIT_POLICIES[arm]
 
 
 EXIT_CODES: dict[type[TradingHouseError], ExitCode] = {
@@ -1321,7 +1301,7 @@ def backtest_run(
             # evidence that cannot be trusted.
             raise ConfigurationError()
         settings = _settings()
-        instrument_contract = _instrument_contract(contract)
+        instrument_contract = _instrument_contract(contract, strategy_id=strategy)
         request = _backtest_request(
             strategy=strategy,
             exit_policy=exit_policy,
@@ -1412,13 +1392,13 @@ def _declared_candidate(protocol: TrialProtocol, trial_id: str) -> TrialSpec:
     return candidate
 
 
-def _instrument_contract(contract: Path) -> InstrumentContract:
-    """The contract file, decoded and checked against the one instrument.
+def _instrument_contract(contract: Path, *, strategy_id: str) -> InstrumentContract:
+    """The contract file, decoded and checked against the strategy's registered instrument.
 
-    The ``try``/``except`` and the ``_BACKTEST_INSTRUMENT`` comparison move out
-    of ``backtest run`` unchanged, comment and all. ``--contract`` has no
-    producer in this repo, so a hand-written trailing comma is the likeliest
-    mistake either command will see and both must answer it at exit 2.
+    The ``try``/``except`` moves out of ``backtest run`` unchanged, comment and
+    all. ``--contract`` has no producer in this repo, so a hand-written
+    trailing comma is the likeliest mistake either command will see and both
+    must answer it at exit 2.
     """
 
     try:
@@ -1434,7 +1414,7 @@ def _instrument_contract(contract: Path) -> InstrumentContract:
         # comma in it is the likeliest mistake this command sees, and
         # ``json.JSONDecodeError`` is a ``ValueError``, not an ``OSError``.
         raise ConfigurationError() from error
-    if instrument_contract.instrument_id != _BACKTEST_INSTRUMENT:
+    if instrument_contract.instrument_id != strategy_scope(strategy_id).instrument_id:
         raise ConfigurationError()
     return instrument_contract
 
@@ -1467,10 +1447,11 @@ def _backtest_request(
     """
 
     try:
+        scope = strategy_scope(strategy)
         return BacktestRequest(
-            strategy=build_strategy(strategy, exit_policy=_exit_policy(exit_policy)),
-            instrument_id=_BACKTEST_INSTRUMENT,
-            timeframe=_BACKTEST_TIMEFRAME,
+            strategy=build_strategy(strategy, exit_policy=scope.exit_arm(exit_policy.value)),
+            instrument_id=scope.instrument_id,
+            timeframe=Timeframe(scope.timeframe),
             start=_as_utc(start),
             end=_as_utc(end),
             firm_equity=firm_equity,
@@ -2228,7 +2209,7 @@ def research_trial_scenarios(
             ledger=ledger,
             store=store,
             constitution=_constitution(),
-            instrument_contract=_instrument_contract(contract),
+            instrument_contract=_instrument_contract(contract, strategy_id=parsed.strategy_id),
             started_at=started_at,
             occurred_at=occurred_at,
             registered_at=registered_at,
@@ -2337,7 +2318,7 @@ def research_trial_compounding(
             ledger=ledger,
             store=store,
             constitution=_constitution(),
-            instrument_contract=_instrument_contract(contract),
+            instrument_contract=_instrument_contract(contract, strategy_id=parsed.strategy_id),
             started_at=started_at,
             occurred_at=occurred_at,
             registered_at=registered_at,
@@ -2628,8 +2609,9 @@ def research_trial_open_holdout(
         registered = registered_protocol(ledger.replay(), trial_id)
         refuse_unopenable(trial_id, registered, ledger=ledger, store=store)
         start, end = declared_window(registered, opened=True)
+        scope = strategy_scope(registered.strategy_id)
         refuse_outside_coverage(
-            start, end, _bar_store().coverage(_BACKTEST_INSTRUMENT, _BACKTEST_TIMEFRAME)
+            start, end, _bar_store().coverage(scope.instrument_id, Timeframe(scope.timeframe))
         )
         grid = declared_grid(parsed)
         attempts = {m: f"{attempt_prefix}-holdout-{m}" for m in grid}
@@ -2640,7 +2622,7 @@ def research_trial_open_holdout(
             ledger=ledger,
             store=store,
             constitution=_constitution(),
-            instrument_contract=_instrument_contract(contract),
+            instrument_contract=_instrument_contract(contract, strategy_id=parsed.strategy_id),
             started_at=started_at,
             occurred_at=occurred_at,
             registered_at=registered_at,
