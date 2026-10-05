@@ -24,7 +24,6 @@ re-runs the same clock-advances check over that live connection instead.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -42,7 +41,7 @@ from trading_house.core.schemas import OrderIntent, Side
 from trading_house.core.values import IntentState, PositiveQuantity, TimeInForce
 from trading_house.core.venue import Mt5VenueRef, Venue
 
-from .conftest import skip_reason
+from .conftest import clock_advances, skip_reason
 
 if TYPE_CHECKING:
     from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
@@ -82,14 +81,11 @@ def _feed_still_live(adapter: Mt5BrokerAdapter) -> bool:
     (MetaTrader5 is one global session per process, not one per instance).
     """
 
-    first = adapter.snapshot([INSTRUMENT_ID]).quotes
-    if not first:
-        return False
-    time.sleep(2)
-    second = adapter.snapshot([INSTRUMENT_ID]).quotes
-    if not second:
-        return False
-    return second[0].observed_at > first[0].observed_at
+    def quote_time() -> float | None:
+        quotes = adapter.snapshot([INSTRUMENT_ID]).quotes
+        return quotes[0].observed_at.timestamp() if quotes else None
+
+    return clock_advances(quote_time)
 
 
 def _autotrading_enabled(adapter: Mt5BrokerAdapter) -> bool:
