@@ -2,8 +2,34 @@
 
 import sys
 import time
+from collections.abc import Callable
 
 from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_DEMO
+
+LIVENESS_WINDOW_SECONDS = 20
+
+
+def clock_advances(sample: Callable[[], float | None]) -> bool:
+    """Whether the broker's clock moves within ``LIVENESS_WINDOW_SECONDS``.
+
+    Returns as soon as it does. A fixed two-second pair skipped live markets:
+    this demo feed was measured ticking about once per five seconds, and on
+    2026-10-04 twenty runs in a row skipped after the open. The window is the
+    one ``establish_utc_offset`` uses for the same question. ``None`` from
+    ``sample`` means no tick at all, which is not live.
+    """
+
+    first = sample()
+    if first is None:
+        return False
+    for _ in range(LIVENESS_WINDOW_SECONDS):
+        time.sleep(1)
+        latest = sample()
+        if latest is None:
+            return False
+        if latest > first:
+            return True
+    return False
 
 
 def skip_reason() -> str | None:
@@ -28,20 +54,14 @@ def skip_reason() -> str | None:
         if int(account.trade_mode) != ACCOUNT_TRADE_MODE_DEMO:
             return "refusing to run live tests against a non-demo account"
 
-        # Check if the market is open by sampling the broker clock over 2 seconds
-        tick1 = mt5.symbol_info_tick("EURUSD")
-        if tick1 is None:
+        if mt5.symbol_info_tick("EURUSD") is None:
             return "EURUSD tick data unavailable"
-        first_time = tick1.time_msc
 
-        time.sleep(2)
+        def tick_time() -> float | None:
+            tick = mt5.symbol_info_tick("EURUSD")
+            return None if tick is None else float(tick.time_msc)
 
-        tick2 = mt5.symbol_info_tick("EURUSD")
-        if tick2 is None:
-            return "EURUSD tick data unavailable"
-        second_time = tick2.time_msc
-
-        if first_time == second_time:
+        if not clock_advances(tick_time):
             return "the market is closed: the broker clock is not advancing"
     finally:
         mt5.shutdown()
