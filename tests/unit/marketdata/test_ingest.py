@@ -18,6 +18,7 @@ from trading_house.core.clock import FixedClock
 from trading_house.core.errors import BrokerUnavailableError
 from trading_house.marketdata.ingest import _last_completed_boundary, backfill, update
 from trading_house.marketdata.models import Bar, Coverage, IngestOutcome, Timeframe
+from trading_house.marketdata.sessions import is_liquid
 from trading_house.marketdata.store import WriteResult
 
 NINE = datetime(2026, 8, 26, 9, 0, tzinfo=UTC)
@@ -181,6 +182,61 @@ def test_hitting_the_depth_wall_is_truncated_not_complete() -> None:
 
     assert run.outcome is IngestOutcome.TRUNCATED
     assert run.earliest_event_time is not None
+
+
+def _m15_bars(start: datetime, end: datetime) -> list[Mt5Bar]:
+    """One M15 bar per liquid quarter-hour across ``[start, end)``."""
+
+    count = int((end - start) / timedelta(minutes=15))
+    times = (start + timedelta(minutes=15 * i) for i in range(count))
+    return [_mt5_bar(0, event_time=at) for at in times if is_liquid(at)]
+
+
+TWO_WEEK_M15_BACKFILL: dict[str, object] = {
+    "instrument_id": _INSTRUMENT_ID,
+    "timeframe": Timeframe.M15,
+    "until": FIXED_CLOCK.now() - timedelta(days=14),
+    "server_offset_seconds": 0,
+}
+
+
+def test_a_full_page_that_starts_days_late_is_truncated_not_complete() -> None:
+    """MT5's "Max bars in chart" cap (100,000 by default) is a depth wall that
+    returns a full page, not an empty one: on 2026-10-04 a backfill to
+    2022-09-16 came back with 99,999 bars starting 2022-09-23 16:30 and was
+    graded COMPLETE on its 0.99 coverage. Two days of liquid market missing
+    before the first bar means the requested start was never reached."""
+
+    late = FIXED_CLOCK.now() - timedelta(days=12)
+    provider = FakeProvider([_m15_bars(late, FIXED_CLOCK.now())])
+
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **TWO_WEEK_M15_BACKFILL)
+
+    assert run.coverage_ratio >= Decimal("0.5")
+    assert run.outcome is IngestOutcome.TRUNCATED
+
+
+def test_a_holiday_at_the_start_of_the_window_still_reaches_it() -> None:
+    """A market holiday on the window's first day leaves up to a day of liquid
+    time with no bars, and that is the market, not a wall."""
+
+    late = FIXED_CLOCK.now() - timedelta(days=13)
+    provider = FakeProvider([_m15_bars(late, FIXED_CLOCK.now())])
+
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **TWO_WEEK_M15_BACKFILL)
+
+    assert run.outcome is IngestOutcome.COMPLETE
+
+
+def test_a_wall_months_after_the_start_is_truncated_without_counting_every_step() -> None:
+    """Six months of M1 is more steps than ``expected_bars`` will walk, so the
+    leading gap must be judged without counting all of it."""
+
+    provider = FakeProvider([[_mt5_bar(0), _mt5_bar(1)] for _ in range(20)])
+
+    run = backfill(provider, FakeStore(), FIXED_CLOCK, pause=_no_pause, **BACKFILL_ARGS)
+
+    assert run.outcome is IngestOutcome.TRUNCATED
 
 
 def test_reaching_the_requested_start_with_full_coverage_is_complete() -> None:
