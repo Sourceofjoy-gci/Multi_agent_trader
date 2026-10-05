@@ -276,6 +276,12 @@ Plainly: **M1 holds roughly three months.** Anything that reasons over older
 M1 history hits `CoverageError` at the store boundary rather than silently
 running on a truncated window it never chose.
 
+A wall can also cut a page short instead of emptying it: the terminal's "Max
+bars in chart" setting (100,000 by default) serves a full page that starts
+days after the requested start. Ingest records a run whose first bar leaves
+more than a day of liquid market uncovered after `requested_from` as
+`TRUNCATED`, whatever its coverage ratio.
+
 ## Phase 2 — features
 
 `FeatureEngine` (`trading_house.features.engine`) computes indicators from

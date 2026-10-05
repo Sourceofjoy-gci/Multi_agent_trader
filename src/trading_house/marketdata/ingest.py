@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -51,6 +51,10 @@ between retries rather than a hot loop hammering the broker."""
 
 _RETRY_PAUSE_SECONDS = 1.0
 _COMPLETE_RATIO = Decimal("0.5")
+_START_SLACK = timedelta(days=1)
+"""How much liquid market may pass between ``requested_from`` and a run's
+first bar with the start still counting as reached: a holiday on the window's
+first day, not a wall."""
 
 _NO_WRITE = WriteResult(stored=0, duplicate=0, conflicting=0)
 """What a run that fetched nothing handed to the store: nothing."""
@@ -111,6 +115,25 @@ def _looks_exhausted(returned: int, expected: int) -> bool:
     """
 
     return returned == 0 or (returned <= 1 and expected > 1)
+
+
+def _reached_start(
+    timeframe: Timeframe, requested_from: datetime, earliest_event_time: datetime | None
+) -> bool:
+    """Whether a run's bars reach back to the start it asked for.
+
+    ``_looks_exhausted`` sees a wall only as an empty or single-bar page. MT5's
+    "Max bars in chart" cap is a wall that returns a full page beginning days
+    late instead, so the data has to say how far back it got. Clipped at four
+    days because any four days hold two of liquid market (the weekend closure
+    is 48h): the comparison stays exact and ``expected_bars`` stays bounded
+    however far away the wall is.
+    """
+
+    if earliest_event_time is None:
+        return True
+    end = min(earliest_event_time, requested_from + timedelta(days=4))
+    return expected_bars(timeframe, requested_from, end) * duration(timeframe) <= _START_SLACK
 
 
 def _fetch_page(
@@ -306,7 +329,8 @@ def _finish(
         failed=walk.failed,
         had_pages=walk.had_pages,
         bars_returned=bars_returned,
-        reached_target=walk.reached_target,
+        reached_target=walk.reached_target
+        and _reached_start(timeframe, requested_from, earliest_event_time),
         coverage_ratio=coverage_ratio,
     )
 
