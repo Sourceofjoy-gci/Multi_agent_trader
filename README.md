@@ -256,21 +256,36 @@ holds — including a key that holds nothing at all — without paying `bars()`'
 
 ### Measured history depth
 
-Depth was measured against FBS by backfilling each instrument/timeframe pair
-to the broker's own depth wall. It varies by more than an order of magnitude
-across timeframes because MetaTrader 5 caps a request by result size, not by
-age: a bar is one response row whether it spans a minute or a day, so a
-coarser timeframe reaches proportionally further into history for the same
-row budget.
+Measured on 2026-10-06 against the FBS demo terminal, read-only, by paging
+each instrument/timeframe pair backward in 20,000-bar windows until the
+terminal returned nothing. Two different limits decide the depth:
 
-| Timeframe | EURUSD | XAUUSD |
-|---|---|---|
-| M1 | ~3 months | ~3 months |
-| M5 | ~16 months | ~17 months |
-| M15 | ~4.1 years | ~4.2 years |
-| H1 | ~16.3 years | ~11.6 years |
-| H4 | ~25 years | ~11.6 years |
-| D1 | back to 2000 | back to 2000 |
+- **The terminal's "Max bars in chart" setting** (100,000 by default). It
+  holds the most recent ~100,000 bars of each pair and refuses a request
+  that would return more (`(-2, 'Terminal: Invalid params')`). Every M1, M5
+  and M15 pair, and EURUSD H1, stops here. Because it is a count of the
+  newest bars, its start date moves forward as new bars arrive: history
+  already in the store can be older than anything the terminal will serve
+  again.
+- **The broker's own history**, which the coarser pairs reach before the
+  cap.
+
+| Timeframe | EURUSD | XAUUSD | Limit |
+|---|---|---|---|
+| M1 | from 2026-06-29 (~3.3 months) | from 2026-06-24 (~3.4 months) | terminal cap |
+| M5 | from 2025-06-03 (~16 months) | from 2025-05-07 (~17 months) | terminal cap |
+| M15 | from 2022-09-26 (~4.0 years) | from 2022-07-12 (~4.2 years) | terminal cap |
+| H1 | from 2010-08-25 (~16.1 years), cap | from 1996-03-11 (~30.6 years), broker | see cells |
+| H4 | from 1971-01-03, broker | from 1996-03-11, broker | broker |
+| D1 | from 1971-01-03, broker | from 1996-03-11, broker | broker |
+
+EURUSD bars before 1999-01-01 cannot be euro prices, because the euro did
+not exist yet: the broker serves a synthetic or proxy series there. Keep them
+out of any backtest unless their construction is known.
+
+Raising "Max bars in chart" to Unlimited (Tools, Options, Charts) and
+restarting the terminal should lift the cap; the capped rows have not yet
+been measured that way.
 
 Plainly: **M1 holds roughly three months.** Anything that reasons over older
 M1 history hits `CoverageError` at the store boundary rather than silently
