@@ -2588,9 +2588,13 @@ raw broker message). A `COMPLETE` or `EMPTY` row is unique per
 `(instrument_id, day)`; a `FAILED` row never blocks a later attempt.
 
 Measured against the FBS demo terminal (2026-10-06/07): EURUSD runs
-170k–235k ticks per trading day (~6.4k/hour); XAUUSD runs ~10.3k/hour. The
-broker serves a **rolling** history of roughly two years — a day not
-collected before it rolls off is gone.
+170k–235k ticks per trading day (~6.4k/hour); XAUUSD runs ~10.3k/hour. Ticks
+reach back to at least 2022-01-05 on this broker. Beyond its history the
+terminal answers "Call failed" rather than an empty range, so a backfill run
+past that point ends with a `FAILED` day and a broker-unavailable exit (8):
+bound it with `--from`. A first request for history the terminal has not yet
+downloaded often fails the same way and succeeds on repeat, so each hourly
+request is tried up to three times, a second apart, before the day is `FAILED`.
 
 **Broker time.** MetaTrader 5 reports every time on the broker server's wall
 clock and never says which zone that is. The signed venue binding declares it:
@@ -2627,8 +2631,8 @@ uv run trading-house research dataset tick-digest --instrument fx.eurusd --start
 ```
 
 `backfill` walks backwards from yesterday to `--from`, skipping days already
-recorded `COMPLETE` or `EMPTY`, and stops early at the wall (five consecutive
-weekday `EMPTY` days). `update` fills every closed day after the latest
+recorded `COMPLETE` or `EMPTY`, and stops early at the wall where the broker
+answers empty (five consecutive weekday `EMPTY` days). `update` fills every closed day after the latest
 recorded day, through yesterday. `coverage` reports, per bound instrument,
 days by outcome, total ticks, the earliest and latest `COMPLETE` day, and
 weekday gaps; it only reads the store and never touches MetaTrader5.

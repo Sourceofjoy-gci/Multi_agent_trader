@@ -12,7 +12,8 @@ anything reaches the terminal.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from functools import partial
@@ -77,6 +78,11 @@ _FILL_POLICY_TO_MT5 = {
 _FILL_PREFERENCE = (FillPolicy.IOC, FillPolicy.FOK, FillPolicy.RETURN)
 
 _BPS_DIVISOR = Decimal(10_000)
+
+_TICK_ATTEMPTS = 3
+_TICK_RETRY_PAUSE_SECONDS = 1.0
+"""The terminal's first ``copy_ticks_range`` over history it has not yet
+downloaded often answers ``None`` ("Call failed") and succeeds on repeat."""
 
 
 def _type_filling_for(supported: frozenset[FillPolicy]) -> int:
@@ -210,10 +216,12 @@ class Mt5BrokerAdapter:
         *,
         clock: Clock,
         ledger: ConfirmedIntentSource | None = None,
+        pause: Callable[[float], None] = time.sleep,
     ) -> None:
         self._gateway = gateway
         self._clock = clock
         self._ledger = ledger
+        self._pause = pause
         self._server_zone = binding.server_zone
         self._server_symbols = {
             instrument_id: bound.server_symbol
@@ -296,14 +304,22 @@ class Mt5BrokerAdapter:
     def ticks(self, instrument_id: InstrumentId, start: datetime, end: datetime) -> RawTicks:
         """Ticks in ``[start, end)``, UTC, at the lowest priority band.
 
-        ``None`` from the terminal is a failed call, raised as unavailable: an hour
+        ``None`` from the terminal is a failed call. It is retried -- the first
+        request for history the terminal has not downloaded often fails and then
+        succeeds -- and after ``_TICK_ATTEMPTS`` raised as unavailable: an hour
         with no ticks is an answer ingest records, and a failure must not pass for one.
         """
 
         server_symbol = self._server_symbol_for(instrument_id)
-        batch = self._gateway.call(
-            Priority.MARKET_DATA, lambda t: t.copy_ticks_range(server_symbol, start, end)
-        )
+        batch = None
+        for attempt in range(_TICK_ATTEMPTS):
+            if attempt:
+                self._pause(_TICK_RETRY_PAUSE_SECONDS)
+            batch = self._gateway.call(
+                Priority.MARKET_DATA, lambda t: t.copy_ticks_range(server_symbol, start, end)
+            )
+            if batch is not None:
+                break
         if batch is None:
             raise BrokerUnavailableError()
         raw = RawTicks(

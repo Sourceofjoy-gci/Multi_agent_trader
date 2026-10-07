@@ -4,8 +4,11 @@ import numpy as np
 import pytest
 
 from tests.unit.brokers.mt5.conftest import FakeTerminal
-from tests.unit.brokers.mt5.test_adapter import _adapter
+from tests.unit.brokers.mt5.test_adapter import BINDING
+from trading_house.brokers.mt5.adapter import Mt5BrokerAdapter
 from trading_house.brokers.mt5.boundary import Mt5TickBatch
+from trading_house.brokers.mt5.gateway import Mt5Gateway
+from trading_house.core.clock import SystemClock
 from trading_house.core.errors import BrokerUnavailableError
 from trading_house.marketdata.ticks import epoch_ms
 
@@ -46,9 +49,11 @@ def test_from_structured_reads_mt5_columns_by_name() -> None:
 
 
 class _ServerFrameTerminal(FakeTerminal):
-    def __init__(self, batch: Mt5TickBatch | None) -> None:
+    def __init__(self, *batches: Mt5TickBatch | None) -> None:
+        """Answers each request with the next batch, repeating the last."""
+
         super().__init__()
-        self.batch = batch
+        self.batches = batches
         self.tick_requests: list[tuple[str, datetime, datetime]] = []
 
     def server_utc_offset_seconds(self) -> int:
@@ -58,7 +63,16 @@ class _ServerFrameTerminal(FakeTerminal):
         self, server_symbol: str, start: datetime, end: datetime
     ) -> Mt5TickBatch | None:
         self.tick_requests.append((server_symbol, start, end))
-        return self.batch
+        return self.batches[min(len(self.tick_requests), len(self.batches)) - 1]
+
+
+def _adapter(
+    terminal: FakeTerminal, pauses: list[float] | None = None
+) -> tuple[Mt5BrokerAdapter, Mt5Gateway]:
+    gateway = Mt5Gateway(terminal, clock=SystemClock(), request_timeout_seconds=5.0)
+    gateway.start()
+    sink: list[float] = [] if pauses is None else pauses
+    return Mt5BrokerAdapter(gateway, BINDING, clock=SystemClock(), pause=sink.append), gateway
 
 
 def test_ticks_are_moved_from_the_server_frame_to_utc_and_end_is_excluded() -> None:
@@ -104,3 +118,31 @@ def test_a_failed_terminal_call_is_unavailable_not_empty() -> None:
             adapter.ticks("fx.eurusd", START, END)
     finally:
         gateway.stop()
+
+
+def test_a_call_that_fails_and_then_succeeds_is_retried() -> None:
+    """The terminal's first request for history it has not downloaded often
+    answers "Call failed" and succeeds on repeat; that must not abort a backfill."""
+
+    start_ms, shift = epoch_ms(START), OFFSET_SECONDS * 1000
+    terminal = _ServerFrameTerminal(None, None, _batch([start_ms + shift]))
+    pauses: list[float] = []
+    adapter, gateway = _adapter(terminal, pauses)
+    try:
+        raw = adapter.ticks("fx.eurusd", START, END)
+    finally:
+        gateway.stop()
+    assert raw.time_ms.tolist() == [start_ms]
+    assert len(terminal.tick_requests) == 3
+    assert pauses == [1.0, 1.0]
+
+
+def test_three_failed_calls_are_unavailable() -> None:
+    terminal = _ServerFrameTerminal(None, None, None, _batch([epoch_ms(START)]))
+    adapter, gateway = _adapter(terminal)
+    try:
+        with pytest.raises(BrokerUnavailableError):
+            adapter.ticks("fx.eurusd", START, END)
+    finally:
+        gateway.stop()
+    assert len(terminal.tick_requests) == 3
