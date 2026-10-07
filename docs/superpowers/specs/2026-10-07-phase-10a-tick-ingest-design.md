@@ -1,6 +1,6 @@
 # Phase 10a — Tick Ingest and Storage
 
-**Status:** approved design
+**Status:** implemented
 **Date:** 2026-10-07
 **Predecessor:** Phase 9 (`docs/superpowers/specs/2026-10-03-phase-9-volatility-breakout-design.md`)
 **Successor:** Phase 10b, the tick-level simulator (separate spec)
@@ -105,6 +105,10 @@ UTC and to points; all logic lives outside `terminal.py`.
 One request per UTC day `[00:00, 24:00)`. A day is fetched only when its end is at
 least one minute in the past by the system clock.
 
+*(amended 2026-10-07 by the Phase 10a plan: 24 hourly requests per UTC day, with
+the gateway's request timeout raised to 120 s for tick commands — the default 10 s
+cannot cover a day's download.)*
+
 Commands under `data ticks` (all refuse while the market is closed, because the
 server offset cannot be established, and print key-sorted JSON):
 
@@ -140,6 +144,10 @@ file, or has a file whose recomputed digest differs from its row.
 `(day, outcome, file_sha256)` rows of a window, for a future scalp protocol's
 `dataset_sha256`.
 
+*(amended 2026-10-07 by the Phase 10a plan: `research dataset tick-digest`, a
+separate command, instead of overloading `research dataset digest --ticks` —
+that command requires `--timeframe`.)*
+
 ## 10. Testing
 
 - **Unit:** exact point conversion at both point sizes; server-to-UTC conversion;
@@ -155,6 +163,10 @@ file, or has a file whose recomputed digest differs from its row.
   from `terminal.py` with the cap at 90; nothing outside `marketdata/` opens tick
   files; an end-to-end backfill → coverage → reader → window digest on a fake
   terminal.
+
+  *(amended 2026-10-07 by the Phase 10a plan: `test_phase10a.py` asserts the
+  `np.load`/`np.save*` file boundary; the terminal statement cap lives in
+  `test_architecture.py`, alongside the rest of the terminal's shape checks.)*
 
 ## 11. Deliberately excluded
 

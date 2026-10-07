@@ -872,6 +872,9 @@ TOTAL_BAN_RESEARCH_COMMANDS = (
     # 8E: the one report command outside ``research trial``. It reads the bar store and prints a
     # digest, bar count and bar times: it states no verdict, so its help is under the total ban.
     ["dataset", "digest"],
+    # Phase 10a: the tick-window counterpart. Read only, verifies every day file and reports a
+    # digest, day count and tick count: nothing about a candidate either.
+    ["dataset", "tick-digest"],
 )
 """Commands directly under ``research`` held to the same total ban as ``TOTAL_BAN_COMMANDS``, and
 why: ``research dataset digest`` is read only and reports a digest, nothing about a candidate.

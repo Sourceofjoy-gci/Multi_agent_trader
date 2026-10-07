@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any, get_args
@@ -44,6 +44,7 @@ from trading_house.marketdata.models import (
     IngestRun,
     Timeframe,
 )
+from trading_house.marketdata.tick_store import TickDay, TickDayOutcome
 from trading_house.memory.models import AgentBelief, MemoryStore, ObservedFact, WriterKind
 from trading_house.research.backtest.costs import CostModel
 from trading_house.research.backtest.fills import ExitKind
@@ -328,6 +329,19 @@ BUILDERS: dict[type[BaseModel], dict[str, Any]] = {
         "coverage_ratio": Decimal("1.0"),
         "outcome": IngestOutcome.COMPLETE,
         "detail": None,
+    },
+    TickDay: {
+        "instrument_id": "fx.eurusd",
+        "day": date(2026, 10, 1),
+        "outcome": TickDayOutcome.COMPLETE,
+        "tick_count": 10,
+        "first_time_ms": 0,
+        "last_time_ms": 1000,
+        "crossed_quotes": 0,
+        "point_size": Decimal("0.00001"),
+        "file_sha256": "a" * 64,
+        "detail": None,
+        "fetched_at": AWARE,
     },
     FeatureSnapshot: {
         "as_of": AWARE + timedelta(minutes=1),

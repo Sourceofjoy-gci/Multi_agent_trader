@@ -2564,6 +2564,65 @@ over fifteen years, about 0.13% a year, which spread, slippage and swap more tha
 consume. **No tuning or rerun follows.** The three trials raise the selection-lottery
 count the next DSR deflates by.
 
+## Phase 10a — Tick ingest and storage
+
+Phase 10a stores bid/ask ticks point-in-time for the two instruments the venue
+binding declares, `fx.eurusd` and `metal.xauusd` (design:
+[Phase 10a](docs/superpowers/specs/2026-10-07-phase-10a-tick-ingest-design.md)).
+It produces data and a reader; it trades nothing and simulates nothing. The
+`fx_scalp` book exists in the signed constitution with no strategy able to use
+it yet — bar-based simulation is insufficient for scalping — and this phase is
+the first half of closing that gap. The tick-level simulator is a separate,
+later phase (10b).
+
+**What is stored.** One compressed `.npz` file per instrument per UTC day,
+under `RuntimeSettings.tick_root` (`TRADING_HOUSE_TICK_ROOT`, default
+`.local/ticks`, git-ignored). Prices are stored as int64 points
+(`price / point_size`), never floats — floats exist only inside
+`to_tick_arrays`, where MT5's float64 quotes are snapped to the point grid.
+Every fetch attempt, whatever its outcome, is recorded as one append-only row
+in `marketdata.tick_days`: `COMPLETE` (with tick count, first/last tick time,
+crossed-quote count and file digest), `EMPTY` (a weekend, holiday, or a day
+beyond the broker's history wall), or `FAILED` (the error class only, never a
+raw broker message). A `COMPLETE` or `EMPTY` row is unique per
+`(instrument_id, day)`; a `FAILED` row never blocks a later attempt.
+
+Measured against the FBS demo terminal (2026-10-06/07): EURUSD runs
+170k–235k ticks per trading day (~6.4k/hour); XAUUSD runs ~10.3k/hour. The
+broker serves a **rolling** history of roughly two years — a day not
+collected before it rolls off is gone.
+
+**Commands.**
+
+```bash
+uv run trading-house data ticks backfill --instrument fx.eurusd --from 2024-01-01
+uv run trading-house data ticks update --instrument fx.eurusd
+uv run trading-house data ticks coverage
+uv run trading-house research dataset tick-digest --instrument fx.eurusd --start 2026-10-01T00:00:00Z --end 2026-10-02T00:00:00Z
+```
+
+`backfill` walks backwards from yesterday to `--from`, skipping days already
+recorded `COMPLETE` or `EMPTY`, and stops early at the wall (five consecutive
+weekday `EMPTY` days). `update` fills every closed day after the latest
+recorded day, through yesterday. `coverage` reports, per bound instrument,
+days by outcome, total ticks, the earliest and latest `COMPLETE` day, and
+weekday gaps; it only reads the store and never touches MetaTrader5.
+`tick-digest` prints the SHA-256 over the ordered `(day, outcome,
+file_sha256)` rows a window reads, verifying every day file on the way, for a
+future scalp protocol's `dataset_sha256`. **`backfill` and `update` both
+refuse while the market is closed**, because the server's UTC offset cannot
+be established without a live clock.
+
+**Daily collection.** `scripts/collect_ticks.ps1` runs `data ticks update` for
+both bound instruments. The operator installs the scheduled task themselves —
+nothing in this repository creates or modifies one:
+
+```powershell
+schtasks /Create /TN "TradingHouse\CollectTicks" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 02:30 /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\sourc\Downloads\Multi-Agent\scripts\collect_ticks.ps1"
+```
+
+`/ST` is local time: 02:30 in Eswatini (UTC+2) is 00:30 UTC.
+
 ## Operator commands
 
 ```bash
@@ -2581,6 +2640,10 @@ uv run trading-house --help
 | `trading-house backtest run` | Replay one fixed EURUSD M15 strategy arm over stored bars and print the result and its digest |
 | `trading-house backtest run --mark-to-market` | Replay the same arm and print a sealable mark-to-market evidence bundle — the mark-to-market series, the per-trade cost attribution, and the bundle's digest — instead of the bare result |
 | `trading-house research dataset digest` | Print the dataset digest of the stored bars a replay of one window reads (`--instrument`, `--timeframe`, `--start`, `--end`), with the bar count and the first and last bar times. Read only; declare it in a protocol rather than typing a hash. A window the store does not hold is 10, one that holds no bar is 20 |
+| `trading-house data ticks backfill` | Walk backwards from yesterday to `--from`, fetching and storing every closed UTC day of ticks not yet recorded for `--instrument`, stopping early at the broker's history wall. Refuses while the market is closed |
+| `trading-house data ticks update` | Fetch every closed UTC day of ticks after the latest recorded day for `--instrument`, through yesterday. Refuses while the market is closed |
+| `trading-house data ticks coverage` | Report the tick days the store holds, per bound instrument: days by outcome, total ticks, earliest and latest `COMPLETE` day, and weekday gaps. Read only -- never touches MetaTrader5 |
+| `trading-house research dataset tick-digest` | Print the SHA-256 digest of the tick days a window reads (`--instrument`, `--start`, `--end`), verifying every day file on disk, with the day and tick counts |
 | `trading-house research trial register` | Seal a frozen trial protocol and its whole candidate family as one event |
 | `trading-house research trial start` | Record that one execution of a declared trial began, as the event the deflation denominators count from |
 | `trading-house research trial record` | Seal one attempt's evidence bundle to its digest and record the seal. Takes a bare bundle or the document `backtest run --mark-to-market` printed |
