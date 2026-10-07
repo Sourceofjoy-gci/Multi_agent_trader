@@ -97,6 +97,18 @@ def test_a_corrupt_file_is_refused(tmp_path: Path) -> None:
         read_day_file(path)
 
 
+def test_a_file_with_zip_magic_but_no_zip_is_refused(tmp_path: Path) -> None:
+    """File starts with zip magic but contains garbage.
+
+    This triggers zipfile.BadZipFile, not ValueError.
+    """
+    path = day_path(tmp_path, "fx.eurusd", DAY)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"PK\x03\x04" + b"garbage" * 10)
+    with pytest.raises(EvidenceIntegrityError):
+        read_day_file(path)
+
+
 def test_a_stale_partial_from_a_crash_does_not_block_the_write(tmp_path: Path) -> None:
     path = day_path(tmp_path, "fx.eurusd", DAY)
     path.parent.mkdir(parents=True)
