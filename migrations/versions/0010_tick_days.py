@@ -50,7 +50,11 @@ def upgrade() -> None:
                 )
             ),
             CONSTRAINT tick_days_failed_shape CHECK (
-                outcome <> 'FAILED' OR (detail IS NOT NULL AND file_sha256 IS NULL)
+                outcome <> 'FAILED' OR (
+                    detail IS NOT NULL AND detail <> '' AND file_sha256 IS NULL
+                    AND tick_count = 0 AND crossed_quotes = 0
+                    AND first_time_ms IS NULL AND last_time_ms IS NULL
+                )
             )
         )
         """

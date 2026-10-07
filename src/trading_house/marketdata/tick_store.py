@@ -81,8 +81,14 @@ class TickDay(CanonicalModel):
                 or self.detail is not None
             ):
                 raise ValueError("an empty day has no ticks, times, digest or detail")
-        elif not self.detail or self.file_sha256 is not None:
-            raise ValueError("a failed day has a detail and no digest")
+        elif (
+            not self.detail
+            or self.file_sha256 is not None
+            or self.tick_count
+            or self.crossed_quotes
+            or (first_time_ms, last_time_ms) != (None, None)
+        ):
+            raise ValueError("a failed day has a detail and no ticks, times or digest")
         return self
 
 

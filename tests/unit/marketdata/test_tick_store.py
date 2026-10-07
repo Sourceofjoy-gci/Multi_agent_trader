@@ -87,6 +87,32 @@ def test_a_failed_day_needs_a_detail() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"detail": ""},
+        {"file_sha256": SHA},
+        {"tick_count": 1},
+        {"crossed_quotes": 1},
+        {"first_time_ms": 1},
+        {"last_time_ms": 2},
+    ],
+    ids=["empty-detail", "digest", "ticks", "crossed", "first-time", "last-time"],
+)
+def test_a_failed_day_has_a_detail_and_nothing_else(shape: dict[str, object]) -> None:
+    """Matches migration 0010's tick_days_failed_shape exactly: a failed fetch
+    stored no ticks, so it has no count, no times and no digest."""
+
+    fields = _failed(date(2026, 10, 6)).model_dump() | shape
+    with pytest.raises(ValidationError):
+        TickDay(**fields)
+
+
+def test_the_failed_shape_accepts_a_failed_day() -> None:
+    fields = _failed(date(2026, 10, 6)).model_dump()
+    assert TickDay(**fields).outcome is TickDayOutcome.FAILED
+
+
 def test_settled_days_ignore_failures() -> None:
     rows = (_failed(date(2026, 10, 5)), _complete(date(2026, 10, 6)), _failed(date(2026, 10, 6)))
     settled = settled_days(rows)

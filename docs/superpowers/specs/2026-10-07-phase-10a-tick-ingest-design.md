@@ -96,6 +96,9 @@ counted, kept, and recorded as the day's `crossed_quotes`.
 
 - A `COMPLETE` or `EMPTY` row is unique per `(instrument_id, day)`. A `FAILED` row
   does not block a later attempt; a later `COMPLETE` or `EMPTY` supersedes it.
+- *(amended 2026-10-07, final review F6:)* a `FAILED` row has a non-empty `detail`
+  and nothing else: `tick_count = 0`, `crossed_quotes = 0`, and no times or digest.
+  The CHECK and `TickDay`'s validator state the same shape.
 - Triggers refuse UPDATE, DELETE and TRUNCATE; the runtime role is granted SELECT
   and INSERT only, as for `marketdata.bars`.
 - `COMPLETE` requires `tick_count > 0` and a file digest; `EMPTY` requires
