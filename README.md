@@ -2627,7 +2627,7 @@ uv run trading-house constitution sign --constitution config/venue_binding.mt5.y
 uv run trading-house data ticks backfill --instrument fx.eurusd --from 2024-01-01
 uv run trading-house data ticks update --instrument fx.eurusd
 uv run trading-house data ticks coverage
-uv run trading-house research dataset tick-digest --instrument fx.eurusd --start 2026-10-01T00:00:00Z --end 2026-10-02T00:00:00Z
+uv run trading-house research dataset tick-digest --instrument fx.eurusd --start 2026-10-01T00:00:00 --end 2026-10-02T00:00:00
 ```
 
 `backfill` walks backwards from yesterday to `--from`, skipping days already
@@ -2635,7 +2635,9 @@ recorded `COMPLETE` or `EMPTY`, and stops early at the wall where the broker
 answers empty (five consecutive weekday `EMPTY` days). `update` fills every closed day after the latest
 recorded day, through yesterday. `coverage` reports, per bound instrument,
 days by outcome, total ticks, the earliest and latest `COMPLETE` day, and
-weekday gaps; it only reads the store and never touches MetaTrader5.
+weekday gaps; it only reads the store and never touches MetaTrader5. A
+weekday gap is filled by `backfill --from` the earliest gap — `update` only
+moves forward from the latest recorded day, so it never revisits one.
 `tick-digest` prints the SHA-256 over the window's one point size and the
 ordered `(day, outcome, file_sha256)` rows it reads, verifying every day file on
 the way, for a future scalp protocol's `dataset_sha256`; it prints that

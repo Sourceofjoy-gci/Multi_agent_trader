@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 
 import numpy as np
 
@@ -83,6 +83,3 @@ class InMemoryTickDayStore:
 
 def weekdays_only(day: date) -> RawTicks:
     return day_ticks(day) if day.weekday() < 5 else RawTicks.empty()
-
-
-ONE_DAY = timedelta(days=1)
