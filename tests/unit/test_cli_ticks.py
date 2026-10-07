@@ -37,7 +37,7 @@ def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     @contextmanager
     def provider(*_args: Any, request_timeout_seconds: float = 10.0) -> Iterator[Any]:
         timeouts.append(request_timeout_seconds)
-        yield adapter, None, 0
+        yield adapter, None
 
     monkeypatch.setattr(cli, "_history_provider", provider)
     monkeypatch.setattr(cli, "_tick_store", lambda: store)
