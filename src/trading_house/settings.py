@@ -31,6 +31,7 @@ class RuntimeSettings(BaseSettings):
     # absence into a ConfigurationError at the one boundary that needs it.
     research_ledger_dsn: SecretStr | None = None
     evidence_root: Path = Path(".local/evidence")
+    tick_root: Path = Path(".local/ticks")
     constitution_path: Path = Path("config/risk_constitution.yaml")
     constitution_signature_path: Path = Path("config/risk_constitution.yaml.sig")
     constitution_public_key_path: Path = Path("config/risk_constitution.public.pem")
