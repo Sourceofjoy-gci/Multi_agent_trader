@@ -27,8 +27,11 @@ stores only bars. Phase 10 builds the scalping foundations in two sub-projects â
 | Point size | EURUSD 0.00001 (5 digits); XAUUSD 0.01 (2 digits) |
 | Depth | ticks returned for 2024-11-06 and every later date probed; 2024-10-09 returned "Terminal: Call failed"; 2022 and earlier returned nothing |
 
-The broker serves a **rolling** history of roughly two years. A day not collected
-before it rolls out is lost for good, so 10a must collect continuously, not once.
+The broker serves a **rolling** history; a day not collected before it rolls out
+is lost for good, so 10a must collect continuously, not once. (Amended 2026-10-07
+by the final review: the "Call failed" and empty answers above were first-request
+download failures, not the wall â€” repeated requests returned ticks for 2022-01-05,
+so the depth is at least that; see README, Phase 10a.)
 
 ## 3. Decisions
 
