@@ -99,8 +99,11 @@ from trading_house.execution.positions import PostgresPositionStore
 from trading_house.execution.reconciler import reconcile_all, require_clean_ledger
 from trading_house.marketdata.ingest import backfill, update
 from trading_house.marketdata.models import Coverage, IngestRun, Timeframe
-from trading_house.marketdata.provider import HistoryProvider
 from trading_house.marketdata.store import PostgresBarStore
+from trading_house.marketdata.tick_ingest import backfill_ticks, update_ticks
+from trading_house.marketdata.tick_reader import TickReader
+from trading_house.marketdata.tick_store import PostgresTickDayStore, coverage_of
+from trading_house.marketdata.ticks import epoch_ms
 from trading_house.ops.backtest import build_strategy, mark_to_market_bundle, simulate
 from trading_house.ops.compounding import (
     CompoundingReport,
@@ -224,6 +227,7 @@ constitution_app = typer.Typer(no_args_is_help=True, help="Risk-constitution com
 db_app = typer.Typer(no_args_is_help=True, help="Database commands.")
 audit_app = typer.Typer(no_args_is_help=True, help="Audit-ledger commands.")
 data_app = typer.Typer(no_args_is_help=True, help="Market-data commands.")
+ticks_app = typer.Typer(no_args_is_help=True, help="Tick commands.")
 order_app = typer.Typer(no_args_is_help=True, help="Order commands.")
 guard_app = typer.Typer(no_args_is_help=True, help="Position-guard commands.")
 backtest_app = typer.Typer(no_args_is_help=True, help="Backtest commands.")
@@ -235,6 +239,7 @@ app.add_typer(constitution_app, name="constitution")
 app.add_typer(db_app, name="db")
 app.add_typer(audit_app, name="audit")
 app.add_typer(data_app, name="data")
+data_app.add_typer(ticks_app, name="ticks")
 app.add_typer(order_app, name="order")
 app.add_typer(guard_app, name="guard")
 app.add_typer(backtest_app, name="backtest")
@@ -624,8 +629,10 @@ def _history_provider(
     venue_binding: Path,
     venue_binding_signature: Path,
     venue_binding_public_key: Path,
-) -> Iterator[tuple[HistoryProvider, VenueBinding, int]]:
-    """Build a live ``HistoryProvider`` over one MetaTrader 5 terminal.
+    *,
+    request_timeout_seconds: float = 10.0,
+) -> Iterator[tuple[Mt5BrokerAdapter, VenueBinding, int]]:
+    """Build a live ``Mt5BrokerAdapter`` over one MetaTrader 5 terminal.
 
     Unlike ``_book_reconciler``, an absent or unreachable terminal is never
     degraded to an empty result here: backfill and update exist to fetch
@@ -640,7 +647,9 @@ def _history_provider(
     binding = load_venue_binding(venue_binding, venue_binding_signature, venue_binding_public_key)
     clock = SystemClock()
     probe_symbol = next(iter(binding.instruments.values())).server_symbol
-    gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock)
+    gateway = Mt5Gateway(
+        terminal_factory(probe_symbol), clock=clock, request_timeout_seconds=request_timeout_seconds
+    )
     gateway.start()
     try:
         adapter = Mt5BrokerAdapter(gateway, binding, clock=clock)
@@ -796,6 +805,115 @@ def data_coverage(
             }
             coverage[instrument_id] = per_timeframe
         return {"coverage": coverage}
+
+    _run(operation)
+
+
+_TICK_REQUEST_TIMEOUT_SECONDS = 120.0
+"""Per hourly request. The gateway's 10 s default suits a bar page; an hour of
+ticks the terminal must first download from the broker can take far longer."""
+
+
+def _tick_store() -> PostgresTickDayStore:
+    settings = _settings()
+    return PostgresTickDayStore(lambda: open_runtime_connection(settings.database_dsn))
+
+
+def _tick_root() -> Path:
+    return _settings().tick_root
+
+
+@ticks_app.command("backfill")
+def data_ticks_backfill(
+    instrument: Annotated[str, typer.Option("--instrument", help="Instrument id.")],
+    from_: Annotated[datetime, typer.Option("--from", help="Earliest UTC day to fetch.")],
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Walk back from yesterday to ``--from`` or the broker's tick wall, one UTC day at a time."""
+
+    def operation() -> dict[str, JsonValue]:
+        with _history_provider(
+            venue_binding,
+            venue_binding_signature,
+            venue_binding_public_key,
+            request_timeout_seconds=_TICK_REQUEST_TIMEOUT_SECONDS,
+        ) as (provider, _binding, _offset):
+            summary = backfill_ticks(
+                provider,
+                _tick_store(),
+                _tick_root(),
+                SystemClock(),
+                instrument_id=instrument,
+                point_size=provider.describe_instrument(instrument).point_size,
+                until=_as_utc(from_).date(),
+            )
+        return summary.as_json()
+
+    _run(operation)
+
+
+@ticks_app.command("update")
+def data_ticks_update(
+    instrument: Annotated[str, typer.Option("--instrument", help="Instrument id.")],
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Fetch every closed UTC day after the latest settled one, through yesterday."""
+
+    def operation() -> dict[str, JsonValue]:
+        with _history_provider(
+            venue_binding,
+            venue_binding_signature,
+            venue_binding_public_key,
+            request_timeout_seconds=_TICK_REQUEST_TIMEOUT_SECONDS,
+        ) as (provider, _binding, _offset):
+            summary = update_ticks(
+                provider,
+                _tick_store(),
+                _tick_root(),
+                SystemClock(),
+                instrument_id=instrument,
+                point_size=provider.describe_instrument(instrument).point_size,
+            )
+        return summary.as_json()
+
+    _run(operation)
+
+
+@ticks_app.command("coverage")
+def data_ticks_coverage(
+    venue_binding: Annotated[Path, typer.Option("--venue-binding")] = DEFAULT_BINDING,
+    venue_binding_signature: Annotated[
+        Path, typer.Option("--venue-binding-signature")
+    ] = DEFAULT_BINDING_SIGNATURE,
+    venue_binding_public_key: Annotated[
+        Path, typer.Option("--venue-binding-public-key")
+    ] = DEFAULT_PUBLIC_KEY,
+) -> None:
+    """Report the tick days the store holds, per bound instrument. Never touches MetaTrader5."""
+
+    def operation() -> dict[str, JsonValue]:
+        binding = load_venue_binding(
+            venue_binding, venue_binding_signature, venue_binding_public_key
+        )
+        store = _tick_store()
+        return {
+            "coverage": {
+                instrument_id: coverage_of(instrument_id, store.rows(instrument_id)).as_json()
+                for instrument_id in sorted(binding.instruments)
+            }
+        }
 
     _run(operation)
 
@@ -1630,6 +1748,23 @@ def research_dataset_digest(
             "first_event_time": found.first_event_time.isoformat(),
             "last_event_time": found.last_event_time.isoformat(),
         }
+
+    _run(operation)
+
+
+@dataset_app.command("tick-digest")
+def research_dataset_tick_digest(
+    instrument: Annotated[str, typer.Option("--instrument", help="Instrument id.")],
+    start: Annotated[datetime, typer.Option("--start", help="Window start, UTC, inclusive.")],
+    end: Annotated[datetime, typer.Option("--end", help="Window end, UTC, exclusive.")],
+) -> None:
+    """Print the digest of the tick days a window reads, verifying every day file."""
+
+    def operation() -> dict[str, JsonValue]:
+        reader = TickReader(_tick_store(), _tick_root())
+        return reader.window_digest(
+            instrument, epoch_ms(_as_utc(start)), epoch_ms(_as_utc(end))
+        ).as_json()
 
     _run(operation)
 
