@@ -169,6 +169,11 @@ file, or has a file whose recomputed digest differs from its row.
 separate command, instead of overloading `research dataset digest --ticks` —
 that command requires `--timeframe`.)*
 
+*(amended 2026-10-07 by the final review, F5: the reader also refuses a window
+whose `COMPLETE` rows disagree on `point_size`, naming both sizes. The window
+digest carries the window's canonical `point_size` — `None` when no day is
+`COMPLETE` — in its output and in its preimage, after the window bounds.)*
+
 ## 10. Testing
 
 - **Unit:** exact point conversion at both point sizes; server-to-UTC conversion;

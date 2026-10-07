@@ -2636,9 +2636,11 @@ answers empty (five consecutive weekday `EMPTY` days). `update` fills every clos
 recorded day, through yesterday. `coverage` reports, per bound instrument,
 days by outcome, total ticks, the earliest and latest `COMPLETE` day, and
 weekday gaps; it only reads the store and never touches MetaTrader5.
-`tick-digest` prints the SHA-256 over the ordered `(day, outcome,
-file_sha256)` rows a window reads, verifying every day file on the way, for a
-future scalp protocol's `dataset_sha256`. **`backfill` and `update` both
+`tick-digest` prints the SHA-256 over the window's one point size and the
+ordered `(day, outcome, file_sha256)` rows it reads, verifying every day file on
+the way, for a future scalp protocol's `dataset_sha256`; it prints that
+`point_size` too. A window whose `COMPLETE` days were stored at different point
+sizes is refused by the reader and the digest alike. **`backfill` and `update` both
 refuse while the market is closed**, because the server's UTC offset cannot
 be established without a live clock.
 

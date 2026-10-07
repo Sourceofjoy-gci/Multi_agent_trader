@@ -151,7 +151,7 @@ def to_tick_arrays(raw: RawTicks, point_size: Decimal) -> TickArrays:
     )
 
 
-def _canonical_decimal(value: Decimal) -> str:
+def canonical_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
@@ -163,7 +163,7 @@ def day_digest(instrument_id: str, day: date, point_size: Decimal, arrays: TickA
     """
 
     digest = hashlib.sha256(TICK_DIGEST_DOMAIN)
-    for part in (instrument_id, day.isoformat(), _canonical_decimal(point_size)):
+    for part in (instrument_id, day.isoformat(), canonical_decimal(point_size)):
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
     for array, dtype in (

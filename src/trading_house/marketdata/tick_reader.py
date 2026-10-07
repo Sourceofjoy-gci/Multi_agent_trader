@@ -13,7 +13,7 @@ from pydantic import JsonValue
 from trading_house.core.errors import CoverageError, EvidenceIntegrityError
 from trading_house.marketdata.tick_files import day_path, read_day_file
 from trading_house.marketdata.tick_store import TickDay, TickDayOutcome, TickDayStore, settled_days
-from trading_house.marketdata.ticks import TickArrays, day_digest
+from trading_house.marketdata.ticks import TickArrays, canonical_decimal, day_digest
 
 WINDOW_DIGEST_DOMAIN: Final[bytes] = b"trading-house/tick-window/v1\0"
 
@@ -23,13 +23,32 @@ class TickWindowDigest:
     sha256: str
     days: int
     ticks: int
+    point_size: str | None
+    """The window's one point size, canonical; ``None`` when no day is ``COMPLETE``."""
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {"sha256": self.sha256, "days": self.days, "ticks": self.ticks}
+        return {
+            "sha256": self.sha256,
+            "days": self.days,
+            "ticks": self.ticks,
+            "point_size": self.point_size,
+        }
 
 
 def _day_of(ms: int) -> date:
     return datetime.fromtimestamp(ms / 1000, UTC).date()
+
+
+def _point_size_of(instrument_id: str, days: list[tuple[TickDay, TickArrays]]) -> str | None:
+    """The one point size the window's ticks are counted in, or a refusal: two days
+    stored in different points would read as prices a factor of ten apart."""
+
+    complete = (row for row, _ in days if row.outcome is TickDayOutcome.COMPLETE)
+    sizes = sorted({canonical_decimal(row.point_size) for row in complete})
+    if len(sizes) > 1:
+        msg = f"{instrument_id} mixes point sizes {sizes[0]} and {sizes[1]} in one window"
+        raise CoverageError() from ValueError(msg)
+    return sizes[0] if sizes else None
 
 
 class TickReader:
@@ -59,6 +78,7 @@ class TickReader:
                     raise EvidenceIntegrityError() from ValueError(msg)
                 days.append((row, arrays))
             day += timedelta(days=1)
+        _point_size_of(instrument_id, days)
         return days
 
     def ticks(self, instrument_id: str, start_ms: int, end_ms: int, *, as_of_ms: int) -> TickArrays:
@@ -71,12 +91,15 @@ class TickReader:
 
     def window_digest(self, instrument_id: str, start_ms: int, end_ms: int) -> TickWindowDigest:
         verified = self._verified(instrument_id, start_ms, end_ms)
+        point_size = _point_size_of(instrument_id, verified)
         digest = hashlib.sha256(WINDOW_DIGEST_DOMAIN)
-        digest.update(f"{instrument_id}\0{start_ms}\0{end_ms}\0".encode())
+        digest.update(f"{instrument_id}\0{start_ms}\0{end_ms}\0{point_size or '-'}\0".encode())
         ticks = 0
         for row, arrays in verified:
             file_sha = row.file_sha256 or "-"
             digest.update(f"{row.day.isoformat()}\0{row.outcome.value}\0{file_sha}\0".encode())
             in_window = (arrays.time_ms >= start_ms) & (arrays.time_ms < end_ms)
             ticks += int(in_window.sum())
-        return TickWindowDigest(sha256=digest.hexdigest(), days=len(verified), ticks=ticks)
+        return TickWindowDigest(
+            sha256=digest.hexdigest(), days=len(verified), ticks=ticks, point_size=point_size
+        )

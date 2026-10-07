@@ -91,4 +91,5 @@ def test_tick_digest_prints_a_window_digest(wired: dict[str, Any]) -> None:
     payload = json.loads(result.stdout)
     assert payload["days"] == 2
     assert payload["ticks"] == 96
+    assert payload["point_size"] == "0.00001"
     assert len(payload["sha256"]) == 64

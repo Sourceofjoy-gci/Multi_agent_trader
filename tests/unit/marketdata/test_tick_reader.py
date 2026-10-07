@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -10,7 +11,7 @@ from trading_house.core.clock import FixedClock
 from trading_house.core.errors import BrokerUnavailableError, CoverageError, EvidenceIntegrityError
 from trading_house.marketdata.tick_files import day_path, read_day_file, write_day_file
 from trading_house.marketdata.tick_ingest import fetch_day
-from trading_house.marketdata.tick_reader import TickReader
+from trading_house.marketdata.tick_reader import WINDOW_DIGEST_DOMAIN, TickReader
 from trading_house.marketdata.ticks import RawTicks, epoch_ms
 
 POINT = Decimal("0.00001")
@@ -135,3 +136,63 @@ def test_the_window_digest_changes_with_the_ticks(tmp_path: Path) -> None:
         a.window_digest("fx.eurusd", _ms(MON), _ms(TUE)).sha256
         != b.window_digest("fx.eurusd", _ms(MON), _ms(TUE)).sha256
     )
+
+
+FINER = Decimal("0.000001")
+
+
+def _record(
+    store: InMemoryTickDayStore, root: Path, day: date, point: Decimal, ticks: bool
+) -> None:
+    provider = FakeTickProvider(day_ticks if ticks else lambda _day: RawTicks.empty())
+    fetch_day(provider, store, root, CLOCK, instrument_id="fx.eurusd", day=day, point_size=point)
+
+
+def test_a_window_mixing_point_sizes_is_refused(tmp_path: Path) -> None:
+    """A day stored in finer points would read as prices ten times larger."""
+
+    store = _stored(tmp_path, {MON: True})
+    _record(store, tmp_path, TUE, FINER, ticks=True)
+    reader = TickReader(store, tmp_path)
+
+    with pytest.raises(CoverageError) as refused:
+        reader.ticks("fx.eurusd", _ms(MON), _ms(WED), as_of_ms=_ms(WED))
+    assert str(refused.value.__cause__) == (
+        "fx.eurusd mixes point sizes 0.000001 and 0.00001 in one window"
+    )
+    with pytest.raises(CoverageError):
+        reader.window_digest("fx.eurusd", _ms(MON), _ms(WED))
+    assert len(reader.ticks("fx.eurusd", _ms(TUE), _ms(WED), as_of_ms=_ms(WED))) == 48
+
+
+def test_an_empty_days_point_size_does_not_count(tmp_path: Path) -> None:
+    store = _stored(tmp_path, {MON: True})
+    _record(store, tmp_path, TUE, FINER, ticks=False)
+
+    digest = TickReader(store, tmp_path).window_digest("fx.eurusd", _ms(MON), _ms(WED))
+
+    assert digest.point_size == "0.00001"
+
+
+def test_the_window_digest_names_its_point_size(tmp_path: Path) -> None:
+    reader = TickReader(_stored(tmp_path, {MON: True, TUE: False}), tmp_path)
+
+    digest = reader.window_digest("fx.eurusd", _ms(MON), _ms(WED))
+
+    assert digest.point_size == "0.00001"
+    assert digest.as_json()["point_size"] == "0.00001"
+    assert reader.window_digest("fx.eurusd", _ms(TUE), _ms(WED)).point_size is None
+
+
+def test_the_window_digest_preimage_carries_the_point_size(tmp_path: Path) -> None:
+    """Pins the preimage: the domain, the window and its point size, then each day."""
+
+    store = _stored(tmp_path, {MON: True})
+    reader = TickReader(store, tmp_path)
+    row = store.rows("fx.eurusd")[0]
+
+    expected = hashlib.sha256(WINDOW_DIGEST_DOMAIN)
+    expected.update(f"fx.eurusd\0{_ms(MON)}\0{_ms(TUE)}\0{'0.00001'}\0".encode())
+    expected.update(f"{MON.isoformat()}\0COMPLETE\0{row.file_sha256}\0".encode())
+
+    assert reader.window_digest("fx.eurusd", _ms(MON), _ms(TUE)).sha256 == expected.hexdigest()
