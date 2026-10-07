@@ -158,7 +158,9 @@ class Mt5Terminal:
             utc_to_server_time(end, self._zone),
             mt5.COPY_TICKS_ALL,
         )
-        if raw is None:
+        # A range still downloading can come back partial with an error set; only
+        # MT5's success code (1) vouches for the whole range. None is a failed call.
+        if raw is None or mt5.last_error()[0] != 1:
             return None
         return Mt5TickBatch.from_structured(raw)
 
