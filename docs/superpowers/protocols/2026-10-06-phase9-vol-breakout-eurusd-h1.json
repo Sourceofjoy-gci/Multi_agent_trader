@@ -1,0 +1,109 @@
+{
+  "protocol_id": "phase9-vol-breakout-eurusd-h1",
+  "protocol_version": "1",
+  "agent_run_id": "claude-code-2026-10-06-phase9-evidence",
+  "strategy_id": "vol_breakout_eurusd_h1",
+  "strategy_version": "1",
+  "strategy_sha256": "349d0682a18a5c1a3048444fbe76531905662f2110143f0c9300863d5d57ed4b",
+  "data": {
+    "instrument_id": "fx.eurusd",
+    "timeframe": "H1",
+    "start": "2010-08-25T20:00:00Z",
+    "end": "2025-10-05T17:00:00Z",
+    "dataset_sha256": "60220547f55d27464be3c715abc0a8ccb1825956f6072347af91781c300ffde8",
+    "point_in_time_policy": "availability_time"
+  },
+  "execution": {
+    "seed": "fixed",
+    "warmup_bars": 200,
+    "fill_policy": "pessimistic-bar",
+    "sizing_policy": "risk-engine"
+  },
+  "costs": {
+    "baseline": {
+      "commission_per_lot_per_side": "0.0",
+      "slippage_points_per_side": "0.4",
+      "swap_long_points_per_day": "-7.7",
+      "swap_short_points_per_day": "2.0",
+      "triple_swap_weekday": 2,
+      "stress_multiplier": "1"
+    },
+    "stress_multipliers": [
+      "1.5",
+      "2"
+    ]
+  },
+  "validation": {
+    "primary_metric": "net_expectancy",
+    "wfa_train_months": 24,
+    "wfa_validation_months": 6,
+    "wfa_test_months": 6,
+    "purge_hours": 120,
+    "embargo_hours": 120,
+    "cpcv_folds": 6,
+    "bootstrap_replicates": 10000,
+    "bootstrap_c": "6.7",
+    "trial_count_rule": "conservative-selection-lotteries"
+  },
+  "regimes": {
+    "labels": [
+      "asian",
+      "london",
+      "new_york"
+    ],
+    "provenance_sha256": "c31f22c28a0a34999e5ae6a63a108726e0553bdd064a5b6685ed8d9492766cca"
+  },
+  "holdout": {
+    "state": "locked",
+    "start": "2025-10-05T18:00:00Z",
+    "end": "2026-10-05T18:00:00Z",
+    "dataset_sha256": "cc6a4751fe312f8cd4b6cb40f7257389bd31d4309cee3ae1d7acae4acac34ea0"
+  },
+  "candidates": [
+    {
+      "trial_id": "vb-h1-none",
+      "spec_id": "spec-vb-h1-none",
+      "rationale": "Exit arm 'none' of the spec section 9.2 A/B, declared in the Phase 9 design (2026-10-03) and this protocol before any H1 result existed.",
+      "parameter_space": [
+        [
+          "exit_policy",
+          "none"
+        ]
+      ]
+    },
+    {
+      "trial_id": "vb-h1-fixed-2r",
+      "spec_id": "spec-vb-h1-fixed-2r",
+      "rationale": "Exit arm 'fixed_target' of the spec section 9.2 A/B, declared in the Phase 9 design (2026-10-03) and this protocol before any H1 result existed.",
+      "parameter_space": [
+        [
+          "exit_policy",
+          "fixed_target"
+        ],
+        [
+          "r_multiple",
+          "2.0"
+        ]
+      ]
+    },
+    {
+      "trial_id": "vb-h1-chandelier-3atr",
+      "spec_id": "spec-vb-h1-chandelier-3atr",
+      "rationale": "Exit arm 'chandelier' of the spec section 9.2 A/B, declared in the Phase 9 design (2026-10-03) and this protocol before any H1 result existed.",
+      "parameter_space": [
+        [
+          "exit_policy",
+          "chandelier"
+        ],
+        [
+          "atr_multiple",
+          "3.0"
+        ],
+        [
+          "min_step_points",
+          "10"
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "instrument_id": "fx.eurusd",
+  "asset_class": "fx",
+  "base_currency": "EUR",
+  "quote_currency": "USD",
+  "price_increment": "0.00001",
+  "point_size": "0.00001",
+  "quantity_increment": "0.01",
+  "quantity_min": "0.01",
+  "quantity_max": "500.0",
+  "value_per_price_increment": "1.0",
+  "min_stop_distance": "0.00001",
+  "freeze_distance": "0.00001",
+  "session_calendar_id": "fx.default",
+  "financing": "swap",
+  "can_open_long": true,
+  "can_open_short": true,
+  "supported_fills": [
+    "FOK",
+    "IOC",
+    "RETURN"
+  ]
+}

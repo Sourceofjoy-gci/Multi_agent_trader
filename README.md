@@ -4,8 +4,9 @@
 > Phases 1.5 to 6 added market-data ingest, the signed risk constitution and
 > sizing, an idempotent order path, a position guard, and a deterministic
 > backtester that replays stored bars through the same risk engine. Phase 9
-> registers a second strategy, a volatility breakout on EURUSD H1, still
-> untested on real data.
+> registered a second strategy, a volatility breakout on EURUSD H1; its
+> preregistered three-arm trial lost money after costs in every arm and was
+> rejected.
 >
 > **There is still no funded account, LLM agent, or demonstrated edge.** The
 > MT5 gateway refuses every non-demo login, and MetaTrader 5 is reachable from
@@ -2488,8 +2489,8 @@ appends no row, and names no digest.
 
 Phase 9 registers the second strategy, `vol_breakout_eurusd_h1` (design:
 [Phase 9](docs/superpowers/specs/2026-10-03-phase-9-volatility-breakout-design.md)).
-It is a hypothesis, not a claim of edge, and **has not yet been run on real
-data.**
+It was a hypothesis, not a claim of edge, and **the preregistered trial rejected
+it** — see [Phase 9 evidence](#phase-9-evidence) below.
 
 **The rule.** Bollinger bands of 20 H1 closes at 2 population sigma. A squeeze
 bar's bandwidth equals the minimum of the 125 bars ending at it. Go long when a
@@ -2522,6 +2523,46 @@ Then register the trial and its protocol **before any real backtest**, and run
 the Phase 8 sequence — `scenarios`, `validate`, `decide`, and `open-holdout`
 only on `RESEARCH_PASSED` — with `--strategy vol_breakout_eurusd_h1`. A loss
 completes the phase: no tuning, and no rerun under the same id.
+
+### Phase 9 evidence
+
+The H1 backfill (2026-10-05, one run, graded `TRUNCATED` at MT5's 100,000-bar cap)
+stored EURUSD H1 from `2010-08-25T20:00Z` to `2026-10-05T18:00Z`, 100,000 clean bars.
+Protocol [`phase9-vol-breakout-eurusd-h1`](docs/superpowers/protocols/2026-10-06-phase9-vol-breakout-eurusd-h1.json)
+(canonical digest `e500995cd1b1a9b4a7bcbea113bbe1629091602b470f23c849731d92fdaf752a`)
+was registered on 2026-10-06 before any H1 backtest ran. It declares:
+
+- research window `2010-08-25T20:00Z`..`2025-10-05T17:00Z`, 93,790 bars, dataset digest
+  `60220547f55d27464be3c715abc0a8ccb1825956f6072347af91781c300ffde8`;
+- a **locked** holdout `2025-10-05T18:00Z`..`2026-10-05T18:00Z`, 6,210 bars, dataset digest
+  `cc6a4751fe312f8cd4b6cb40f7257389bd31d4309cee3ae1d7acae4acac34ea0` — never opened, so
+  still unspent;
+- the contract exported from the demo terminal through `to_instrument_contract`
+  ([file](docs/superpowers/protocols/2026-10-06-fx-eurusd-contract.json), digest
+  `613f6c7ecf3e95abc47ad6f488d62e1713ca4cb8ca1457ee363de3b07817db62`), firm equity
+  `100000`, ATR period `14`, spread window `20`, defective tolerance `0`, and Phase 7's costs.
+
+Research-window results (`scenarios`), rounded to cents:
+
+| Arm (trial) | Trades | Before costs | Net 1x | Net 1.5x | Net 2x | 1x evidence digest |
+|---|---:|---:|---:|---:|---:|---|
+| `none` (`vb-h1-none`) | 438 | -5824.44 | -11407.66 | -15509.35 | -19611.04 | `70734cd50188b762e912c7c1fd3f95472e3e47549f4c8e77e0a68f1aa9ca8081` |
+| `fixed_target` 2.0R (`vb-h1-fixed-2r`) | 459 | -3182.54 | -6927.15 | -9668.89 | -12410.63 | `892eef60aa6286af2fa2db041ee0107c8f70d7ec4cb8fef398c04c2ad7ab84ac` |
+| `chandelier` 3.0 ATR (`vb-h1-chandelier-3atr`) | 474 | 2000.00 | -1223.25 | -3546.50 | -5869.75 | `a591b9ccf6cd0125820d5821e74dee730f6e8da081abcf9d7ef4fe037d0b8508` |
+
+`decide` rejected all three. Gates 1 (walk-forward, 25 folds) and 8 (coverage, 438–474
+trades across all three sessions) pass. PBO is 0.67 (limit 0.5), and the CPCV
+5th-percentile expectancy and the bootstrap lower bound are negative in every arm. The
+baseline max drawdown is 18.7% (`none`) and 16.9% (`fixed_target`), beyond the 10% limit;
+the chandelier arm's drawdown gate is unavailable because no `compounding` run was sealed.
+DSR (five-day horizon) and capacity are unavailable as documented, and the locked-holdout
+gate is unavailable because the holdout was never opened. Four gates fail on the
+evidence itself, so the rejection does not depend on the gates that cannot yet pass.
+
+Chandelier ranked best, and is the only arm positive before costs: +2000 on 100,000
+over fifteen years, about 0.13% a year, which spread, slippage and swap more than
+consume. **No tuning or rerun follows.** The three trials raise the selection-lottery
+count the next DSR deflates by.
 
 ## Operator commands
 

@@ -43,15 +43,20 @@ VOL_BREAKOUT_SPEC: Final[StrategySpec] = StrategySpec(
     ),
     capacity_model="Capacity is not modelled and is explicitly a non-promise.",
     invalidation=(
-        "Not yet tested. Invalidated if the three-arm trial loses money after costs in every "
-        "arm, or if the Phase 8 gates reject it; no tuning or promotion follows a rejection."
+        "Invalidated: protocol phase9-vol-breakout-eurusd-h1 (EURUSD H1, 2010-08-25..2025-10-05) "
+        "lost money after costs in every arm (net at 1x: none -11407.66, fixed_target(2.0R) "
+        "-6927.15, chandelier(3.0 ATR) -1223.25) and decide rejected all three on PBO, CPCV p5, "
+        "bootstrap lower bound and drawdown; no tuning or promotion. Holdout left locked."
     ),
     regime_constraints=(
         "The risk spread, spread-to-stop and tick-staleness gates apply; no signals on bars "
         "opening 21:00-24:00 UTC (a 20:00-bar signal still fills at the 21:00 open, at that "
         "bar's recorded spread), which is fixed in UTC and carries the DST limitation."
     ),
-    trail_decision="Pending the three-arm A/B: none, fixed_target 2.0R, chandelier 3.0 ATR.",
+    trail_decision=(
+        "chandelier (3.0 ATR) ranked best of the three-arm A/B (net 1x: chandelier -1223.25 > "
+        "fixed_target -6927.15 > none -11407.66); every arm lost money, so nothing is adopted."
+    ),
     trial_count=3,
     versioning=(
         "strategy=vol_breakout_eurusd_h1; version=1; "
