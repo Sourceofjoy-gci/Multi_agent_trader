@@ -709,6 +709,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rfc8785" },
     { name = "typer" },
+    { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
@@ -734,6 +735,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "rfc8785", specifier = ">=0.1,<1" },
     { name = "typer", specifier = ">=0.16,<1" },
+    { name = "tzdata", specifier = ">=2026.1" },
 ]
 
 [package.metadata.requires-dev]

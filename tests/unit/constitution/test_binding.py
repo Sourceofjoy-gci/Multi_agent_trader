@@ -1,4 +1,5 @@
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -12,6 +13,7 @@ CONFIG_DIR = Path("config")
 
 BINDING = b"""
 venue: mt5
+server_timezone: "Europe/Athens"
 books:
   fx_scalp: {magic_range: [110000, 119999]}
   fx_swing: {magic_range: [120000, 129999]}
@@ -24,6 +26,25 @@ def test_binding_parses() -> None:
     binding: VenueBinding = parse_venue_binding(BINDING)
     assert binding.books["fx_scalp"].magic_range == (110000, 119999)
     assert binding.instruments["fx.eurusd"].server_symbol == "EURUSD.raw"
+
+
+def test_the_server_timezone_is_a_zone() -> None:
+    binding = parse_venue_binding(BINDING)
+
+    assert binding.server_zone == ZoneInfo("Europe/Athens")
+
+
+@pytest.mark.parametrize("key", ["Mars/Olympus_Mons", "Europe", "../etc/passwd", ""])
+def test_an_unknown_server_timezone_is_refused(key: str) -> None:
+    with pytest.raises(ConfigurationError):
+        parse_venue_binding(BINDING.replace(b'"Europe/Athens"', f'"{key}"'.encode()))
+
+
+def test_a_binding_without_a_server_timezone_is_refused() -> None:
+    """No default: a guessed zone mislabels every broker time without a sound."""
+
+    with pytest.raises(ConfigurationError):
+        parse_venue_binding(BINDING.replace(b'server_timezone: "Europe/Athens"\n', b""))
 
 
 def test_magic_ranges_must_not_overlap() -> None:

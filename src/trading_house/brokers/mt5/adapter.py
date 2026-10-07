@@ -26,6 +26,7 @@ from trading_house.brokers.mt5.boundary import (
     TerminalPort,
     deal_entry_of,
     mt5_timeframe_code,
+    server_ms_to_utc_ms,
     sltp_request,
 )
 from trading_house.brokers.mt5.contracts import (
@@ -213,6 +214,7 @@ class Mt5BrokerAdapter:
         self._gateway = gateway
         self._clock = clock
         self._ledger = ledger
+        self._server_zone = binding.server_zone
         self._server_symbols = {
             instrument_id: bound.server_symbol
             for instrument_id, bound in binding.instruments.items()
@@ -304,9 +306,8 @@ class Mt5BrokerAdapter:
         )
         if batch is None:
             raise BrokerUnavailableError()
-        shift_ms = self._gateway.server_utc_offset_seconds * 1000
         raw = RawTicks(
-            time_ms=batch.time_msc - shift_ms,
+            time_ms=server_ms_to_utc_ms(batch.time_msc, self._server_zone),
             bid=batch.bid,
             ask=batch.ask,
             last=batch.last,

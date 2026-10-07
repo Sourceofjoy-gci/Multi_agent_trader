@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
 
+from trading_house.core.clock import ensure_utc
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 from trading_house.core.venue import DealEntry
 
@@ -83,11 +84,13 @@ def establish_utc_offset(
     sample_server_epoch: Callable[[], float | None],
     real_utc_epoch: Callable[[], float],
     sleep: Callable[[float], None],
+    zone: tzinfo,
     *,
     max_attempts: int = 20,
     interval_seconds: float = 1.0,
 ) -> int:
-    """Establish the broker clock offset from a demonstrably live feed.
+    """Measure the broker clock offset from a demonstrably live feed, and
+    refuse it unless the declared ``zone`` says the same thing for now.
 
     Quantising a single reading is not enough on its own. A lag near any
     multiple of the half-hour quantum survives both the range and residual
@@ -100,6 +103,12 @@ def establish_utc_offset(
     advances. So sample until it does, and refuse if it never does: the
     offset cannot be known while the market is shut, and refusing is the only
     honest answer.
+
+    The measurement is a check, not the conversion: one offset is right for
+    today only, and history spans both daylight-saving seasons. Every time is
+    converted with ``zone`` (the signed binding's ``server_timezone``); a
+    measured offset that disagrees with it means the declaration is wrong or
+    stale, and is a ``ConfigurationError`` rather than silently mislabelled data.
     """
 
     # The window must exceed the feed's inter-tick gap, not just be "a few
@@ -115,25 +124,38 @@ def establish_utc_offset(
             raise BrokerUnavailableError
         if latest > first:
             # The feed is live, so this reading is at most an interval old.
-            return utc_offset_seconds(latest, real_utc_epoch())
+            now = real_utc_epoch()
+            measured = utc_offset_seconds(latest, now)
+            declared = datetime.fromtimestamp(now, zone).utcoffset()
+            if declared is None or measured != int(declared.total_seconds()):
+                raise ConfigurationError() from ValueError(
+                    f"the server clock runs {measured}s from UTC; {zone} says {declared}"
+                )
+            return measured
     raise BrokerUnavailableError
 
 
-def server_time_to_utc(server_epoch: float, offset_seconds: int | None) -> datetime:
+def server_time_to_utc(server_epoch: float, zone: tzinfo | None) -> datetime:
     """Convert a broker-server epoch to a timezone-aware UTC instant (I-10).
 
-    ``offset_seconds`` is ``None`` until the server clock has been probed. That
-    case raises rather than assuming zero: a terminal that has not established
-    the offset would otherwise pass broker-local time off as UTC, silently, and
-    every timestamp it recorded would be wrong by the broker's timezone.
+    MetaTrader 5's epochs are the broker's *wall clock* written as if it were
+    UTC, so the offset to remove is the zone's offset at that wall time --
+    UTC+2 for a winter instant, UTC+3 for a summer one on an EU-rules broker.
+    One offset for all history labels the other season an hour wrong.
+
+    ``zone`` is ``None`` when none was declared. That case raises rather than
+    assuming UTC: broker-local time would otherwise pass for UTC, silently.
+    A wall time that occurs twice (the autumn repeated hour) resolves to its
+    first occurrence (fold 0).
     """
 
-    if offset_seconds is None:
+    if zone is None:
         raise BrokerUnavailableError
-    return datetime.fromtimestamp(server_epoch, UTC) - timedelta(seconds=offset_seconds)
+    local = datetime.fromtimestamp(server_epoch, UTC).replace(tzinfo=zone)
+    return local.astimezone(UTC)
 
 
-def utc_to_server_time(instant: datetime, offset_seconds: int | None) -> datetime:
+def utc_to_server_time(instant: datetime, zone: tzinfo | None) -> datetime:
     """The inverse of ``server_time_to_utc``, for times sent *to* MetaTrader 5.
 
     MetaTrader 5 compares a passed datetime's epoch against its own
@@ -142,9 +164,36 @@ def utc_to_server_time(instant: datetime, offset_seconds: int | None) -> datetim
     10:00-11:00 M15 request returned the bars that opened 07:00-08:00 UTC.
     """
 
-    if offset_seconds is None:
+    if zone is None:
         raise BrokerUnavailableError
-    return instant + timedelta(seconds=offset_seconds)
+    return ensure_utc(instant).astimezone(zone).replace(tzinfo=UTC)
+
+
+_MS_PER_HOUR = 3_600_000
+
+
+def server_ms_to_utc_ms(server_ms: npt.NDArray[np.int64], zone: tzinfo) -> npt.NDArray[np.int64]:
+    """``server_time_to_utc`` for a column of millisecond wall-clock times.
+
+    The zone's offset is looked up once per distinct server hour and subtracted
+    from every tick in that hour; zones change offset on the hour (EU rules do),
+    so one lookup per hour is exact. A batch that spans a transition is
+    converted with both offsets. In the autumn repeated hour both passes map to
+    the same UTC hour, so time runs backwards and ``to_tick_arrays`` refuses
+    the day -- it is recorded ``FAILED``, which is the honest outcome for an
+    hour the broker's clock cannot tell apart.
+    """
+
+    hours, which = np.unique(server_ms // _MS_PER_HOUR, return_inverse=True)
+    offsets_ms = np.array(
+        [
+            int(hour) * _MS_PER_HOUR
+            - int(server_time_to_utc(int(hour) * 3600, zone).timestamp()) * 1000
+            for hour in hours
+        ],
+        dtype=np.int64,
+    )
+    return server_ms - offsets_ms[which]
 
 
 @dataclass(frozen=True, slots=True)

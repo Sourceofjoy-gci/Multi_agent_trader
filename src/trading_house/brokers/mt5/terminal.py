@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import MetaTrader5 as mt5
 
@@ -32,12 +33,14 @@ from trading_house.brokers.mt5.boundary import (
 class Mt5Terminal:
     """A thin, typed shell over the MetaTrader 5 IPC surface."""
 
-    def __init__(self, probe_symbol: str = "EURUSD") -> None:
+    def __init__(self, server_zone: ZoneInfo, probe_symbol: str = "EURUSD") -> None:
         # Which symbol to read the server clock from. Brokers that suffix
         # their symbols (EURUSD.m, EURUSD_i) have no plain "EURUSD", and a
         # hardcoded one makes the clock probe fail on them.
         self._probe_symbol = probe_symbol
-        self._offset: int | None = None
+        # The signed binding's server_timezone: every conversion uses it, and
+        # server_utc_offset_seconds() refuses a live clock that disagrees.
+        self._zone = server_zone
 
     def initialize(self) -> bool:
         return bool(mt5.initialize())
@@ -69,11 +72,9 @@ class Mt5Terminal:
         return False if info is None else bool(info.trade_allowed)
 
     def server_utc_offset_seconds(self) -> int:
-        offset = establish_utc_offset(
-            self._probe_tick_time, lambda: datetime.now(UTC).timestamp(), time.sleep
+        return establish_utc_offset(
+            self._probe_tick_time, lambda: datetime.now(UTC).timestamp(), time.sleep, self._zone
         )
-        self._offset = offset
-        return offset
 
     def _probe_tick_time(self) -> float | None:
         mt5.symbol_select(self._probe_symbol, True)
@@ -81,7 +82,7 @@ class Mt5Terminal:
         return None if tick is None else float(tick.time)
 
     def _to_utc(self, server_epoch: float) -> datetime:
-        return server_time_to_utc(float(server_epoch), self._offset)
+        return server_time_to_utc(float(server_epoch), self._zone)
 
     def symbol_info(self, server_symbol: str) -> Mt5SymbolInfo | None:
         mt5.symbol_select(server_symbol, True)
@@ -128,8 +129,8 @@ class Mt5Terminal:
         rates = mt5.copy_rates_range(
             server_symbol,
             timeframe_code,
-            utc_to_server_time(start, self._offset),
-            utc_to_server_time(end, self._offset),
+            utc_to_server_time(start, self._zone),
+            utc_to_server_time(end, self._zone),
         )
         if rates is None:
             return None
@@ -153,8 +154,8 @@ class Mt5Terminal:
         mt5.symbol_select(server_symbol, True)
         raw = mt5.copy_ticks_range(
             server_symbol,
-            utc_to_server_time(start, self._offset),
-            utc_to_server_time(end, self._offset),
+            utc_to_server_time(start, self._zone),
+            utc_to_server_time(end, self._zone),
             mt5.COPY_TICKS_ALL,
         )
         if raw is None:
@@ -214,7 +215,7 @@ class Mt5Terminal:
         """
 
         raw = mt5.history_deals_get(
-            utc_to_server_time(start, self._offset), utc_to_server_time(end, self._offset)
+            utc_to_server_time(start, self._zone), utc_to_server_time(end, self._zone)
         )
         if raw is None:
             return None

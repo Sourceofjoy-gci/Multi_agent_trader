@@ -63,6 +63,7 @@ ORDER_SEND_ALLOWED = frozenset({TERMINAL_MODULE})
 BINDING = parse_venue_binding(
     b"""
 venue: mt5
+server_timezone: "Europe/Athens"
 books:
   fx_scalp: {magic_range: [110000, 119999]}
 instruments:

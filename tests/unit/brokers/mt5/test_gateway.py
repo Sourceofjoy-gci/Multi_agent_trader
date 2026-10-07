@@ -2,15 +2,20 @@ import contextlib
 import threading
 import time
 from collections.abc import Mapping
-from datetime import UTC
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from tests.unit.brokers.mt5.conftest import FakeTerminal
-from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_REAL
+from trading_house.brokers.mt5.boundary import ACCOUNT_TRADE_MODE_REAL, establish_utc_offset
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
 from trading_house.core.clock import SystemClock
-from trading_house.core.errors import BrokerUnavailableError, NonDemoAccountError
+from trading_house.core.errors import (
+    BrokerUnavailableError,
+    ConfigurationError,
+    NonDemoAccountError,
+)
 
 
 def _gateway(terminal: FakeTerminal) -> Mt5Gateway:
@@ -347,3 +352,45 @@ def test_a_failing_audit_hook_does_not_leak_the_terminal_session() -> None:
         gateway.start()
 
     assert terminal.shutdown_calls == 1
+
+
+class _ClockedTerminal(FakeTerminal):
+    """A live server clock running ``measured_hours`` ahead of UTC on a January
+    day, checked against Europe/Athens (UTC+2 then) the way Mt5Terminal does."""
+
+    def __init__(self, measured_hours: int) -> None:
+        super().__init__()
+        self._real = datetime(2026, 1, 14, 9, 30, tzinfo=UTC).timestamp()
+        server = self._real + measured_hours * 3600
+        self._samples = iter([server, server + 1.0])
+
+    def server_utc_offset_seconds(self) -> int:
+        return establish_utc_offset(
+            lambda: next(self._samples),
+            lambda: self._real,
+            lambda _s: None,
+            ZoneInfo("Europe/Athens"),
+        )
+
+
+def test_a_clock_that_disagrees_with_the_declared_zone_stops_the_gateway() -> None:
+    terminal = _ClockedTerminal(measured_hours=3)
+    gateway = _gateway(terminal)
+
+    with pytest.raises(ConfigurationError):
+        gateway.start()
+
+    assert terminal.shutdown_calls == 1
+    with pytest.raises(BrokerUnavailableError):
+        gateway.call(Priority.MARKET_DATA, lambda t: t.terminal_connected())
+
+
+def test_a_clock_that_agrees_with_the_declared_zone_starts_the_gateway() -> None:
+    gateway = _gateway(_ClockedTerminal(measured_hours=2))
+
+    gateway.start()
+    try:
+        assert gateway.server_utc_offset_seconds == 2 * 3600
+        assert gateway.call(Priority.MARKET_DATA, lambda t: t.terminal_connected())
+    finally:
+        gateway.stop()

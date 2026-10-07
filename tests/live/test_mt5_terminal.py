@@ -20,6 +20,7 @@ import pytest
 from trading_house.brokers.mt5.boundary import TerminalPort
 from trading_house.brokers.mt5.contracts import to_instrument_contract
 from trading_house.brokers.mt5.gateway import Mt5Gateway, Priority
+from trading_house.constitution.binding import parse_venue_binding
 from trading_house.core.clock import SystemClock
 
 from .conftest import skip_reason
@@ -43,7 +44,10 @@ def _terminal() -> TerminalPort:
 
     from trading_house.brokers.mt5.terminal import Mt5Terminal
 
-    return Mt5Terminal()
+    # The shipped binding's declared zone, read without its signature so these
+    # tests check the declaration against the live clock even before a re-sign.
+    declared = parse_venue_binding((CONFIG / "venue_binding.mt5.yaml").read_bytes())
+    return Mt5Terminal(declared.server_zone)
 
 
 def test_gateway_starts_against_a_demo_account() -> None:

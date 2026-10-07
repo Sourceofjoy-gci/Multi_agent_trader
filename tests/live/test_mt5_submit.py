@@ -52,6 +52,7 @@ BOOK = "fx_scalp"
 BINDING = parse_venue_binding(
     b"""
 venue: mt5
+server_timezone: "Europe/Athens"
 books:
   fx_scalp: {magic_range: [110000, 119999]}
 instruments:
@@ -67,7 +68,7 @@ def _terminal() -> TerminalPort:
 
     from trading_house.brokers.mt5.terminal import Mt5Terminal
 
-    return Mt5Terminal()
+    return Mt5Terminal(BINDING.server_zone)
 
 
 def _feed_still_live(adapter: Mt5BrokerAdapter) -> bool:

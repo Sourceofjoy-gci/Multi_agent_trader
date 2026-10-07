@@ -3,6 +3,13 @@
 # venue-neutral; this file carries everything that would change if the firm
 # switched brokers. Signed separately with the same Ed25519 loader (spec 3.3).
 venue: mt5
+# The broker server's clock, as an IANA zone. MT5 reports every time in it and
+# never says which zone it is. FBS-Demo follows EU daylight-saving rules: UTC+2
+# in winter, UTC+3 in summer -- Friday's last H1 bar opens at 23:00 server time
+# in January, July, September and December, but at 22:00 in the US-only-DST
+# week of 13 March 2026. EET/EEST switches on EU dates, hence Europe/Athens.
+# The gateway refuses to start when the live clock disagrees with this zone.
+server_timezone: "Europe/Athens"
 books:
   fx_scalp:     { magic_range: [110000, 119999] }
   fx_swing:     { magic_range: [120000, 129999] }

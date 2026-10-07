@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import pytest
 from alembic import command
@@ -161,8 +162,8 @@ def _runtime_environment(
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", database.runtime_dsn)
     cli._STATE.debug = False
 
-    def _factory() -> Callable[[str], TerminalPort]:
-        return lambda _probe: terminal  # type: ignore[return-value]
+    def _factory() -> Callable[[ZoneInfo, str], TerminalPort]:
+        return lambda _zone, _probe: terminal  # type: ignore[return-value]
 
     monkeypatch.setattr(cli, "_mt5_terminal_factory", _factory)
     monkeypatch.setattr(cli, "_stop_event", _SelfSettingStop)
@@ -289,8 +290,8 @@ def test_guard_run_skips_an_unreadable_instrument_instead_of_refusing_to_start(
 
     blind_terminal = _PartiallyBlindTerminal()
 
-    def _factory() -> Callable[[str], TerminalPort]:
-        return lambda _probe: blind_terminal  # type: ignore[return-value]
+    def _factory() -> Callable[[ZoneInfo, str], TerminalPort]:
+        return lambda _zone, _probe: blind_terminal  # type: ignore[return-value]
 
     monkeypatch.setattr(cli, "_mt5_terminal_factory", _factory)
     _record(database, stop_loss="1.09500")

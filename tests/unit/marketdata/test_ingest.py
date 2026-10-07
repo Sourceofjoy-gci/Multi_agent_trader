@@ -9,9 +9,10 @@ outcome derivation in isolation from both.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from trading_house.brokers.mt5.boundary import Mt5Bar
 from trading_house.core.clock import FixedClock
@@ -29,26 +30,27 @@ FIXED_CLOCK = FixedClock(datetime(2026, 8, 26, 10, 0, tzinfo=UTC))
 """One liquid hour after NINE, already aligned to an M1 boundary."""
 
 _INSTRUMENT_ID = "fx.eurusd"
+PLUS_THREE = timezone(timedelta(hours=3))
 
 BACKFILL_ARGS: dict[str, object] = {
     "instrument_id": _INSTRUMENT_ID,
     "timeframe": Timeframe.M1,
     "until": datetime(2026, 2, 26, 10, 0, tzinfo=UTC),  # ~six months before FIXED_CLOCK
-    "server_offset_seconds": 0,
+    "server_zone": UTC,
 }
 
 ONE_HOUR_BACKFILL: dict[str, object] = {
     "instrument_id": _INSTRUMENT_ID,
     "timeframe": Timeframe.M1,
     "until": NINE,
-    "server_offset_seconds": 0,
+    "server_zone": UTC,
 }
 
 UPDATE_ARGS: dict[str, object] = {
     "instrument_id": _INSTRUMENT_ID,
     "timeframe": Timeframe.M1,
     "until": datetime(2026, 8, 25, 8, 0, tzinfo=UTC),
-    "server_offset_seconds": 0,
+    "server_zone": UTC,
 }
 
 
@@ -196,7 +198,7 @@ TWO_WEEK_M15_BACKFILL: dict[str, object] = {
     "instrument_id": _INSTRUMENT_ID,
     "timeframe": Timeframe.M15,
     "until": FIXED_CLOCK.now() - timedelta(days=14),
-    "server_offset_seconds": 0,
+    "server_zone": UTC,
 }
 
 
@@ -377,11 +379,23 @@ def test_last_completed_boundary_floors_in_the_brokers_frame_not_utc() -> None:
 
     instant = datetime(2026, 8, 26, 0, 30, tzinfo=UTC)
 
-    h4 = _last_completed_boundary(Timeframe.H4, instant, server_offset_seconds=10_800)
-    d1 = _last_completed_boundary(Timeframe.D1, instant, server_offset_seconds=10_800)
+    h4 = _last_completed_boundary(Timeframe.H4, instant, server_zone=PLUS_THREE)
+    d1 = _last_completed_boundary(Timeframe.D1, instant, server_zone=PLUS_THREE)
 
     assert h4 == datetime(2026, 8, 25, 21, 0, tzinfo=UTC)
     assert d1 == datetime(2026, 8, 25, 21, 0, tzinfo=UTC)
+
+
+def test_last_completed_boundary_floors_at_the_instants_own_seasons_offset() -> None:
+    """In January an EU-rules broker is UTC+2, so its D1 candle opens at
+    22:00 UTC, not the 21:00 UTC of summer."""
+
+    athens = ZoneInfo("Europe/Athens")
+    instant = datetime(2026, 1, 15, 0, 30, tzinfo=UTC)
+
+    d1 = _last_completed_boundary(Timeframe.D1, instant, server_zone=athens)
+
+    assert d1 == datetime(2026, 1, 14, 22, 0, tzinfo=UTC)
 
 
 def test_update_walks_newest_first_so_a_fresh_key_still_fetches_recent_pages() -> None:
@@ -415,7 +429,7 @@ def test_update_walks_newest_first_so_a_fresh_key_still_fetches_recent_pages() -
         instrument_id=_INSTRUMENT_ID,
         timeframe=Timeframe.M1,
         until=genesis,
-        server_offset_seconds=0,
+        server_zone=UTC,
     )
 
     assert run.bars_returned > 0
@@ -441,7 +455,7 @@ def test_an_inverted_backfill_range_is_a_no_op_not_a_broken_run() -> None:
         instrument_id=_INSTRUMENT_ID,
         timeframe=Timeframe.M1,
         until=later_until,
-        server_offset_seconds=0,
+        server_zone=UTC,
     )
 
     assert run.outcome is IngestOutcome.COMPLETE

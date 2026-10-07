@@ -109,6 +109,21 @@ least one minute in the past by the system clock.
 the gateway's request timeout raised to 120 s for tick commands — the default 10 s
 cannot cover a day's download.)*
 
+*(amended 2026-10-07 by the final review, F1: the server clock is converted with
+the broker's **timezone**, not one measured offset. FBS-Demo follows EU
+daylight-saving rules (UTC+2 winter, UTC+3 summer), so one offset applied to all
+history labels the other season an hour wrong — an hour of look-ahead for winter
+data fetched in summer. The signed venue binding declares
+`server_timezone: "Europe/Athens"`; `server_time_to_utc` / `utc_to_server_time`
+convert at each instant's own offset, the adapter converts a tick batch per
+distinct server hour (a batch spanning a transition uses both offsets; the autumn
+repeated hour maps two passes onto one UTC hour, time runs backwards and the day
+is recorded `FAILED`), and bar ingest judges alignment and the forming-bar cutoff
+in the same zone. `establish_utc_offset` remains as a live check: the gateway
+refuses to start when the measured offset differs from the zone's offset for now.
+Bars stored before this amendment keep their single-offset labels; correcting
+them is a separate follow-up.)*
+
 Commands under `data ticks` (all refuse while the market is closed, because the
 server offset cannot be established, and print key-sorted JSON):
 

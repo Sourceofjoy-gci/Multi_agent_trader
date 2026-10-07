@@ -7,7 +7,7 @@ can share them.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 from hypothesis import given
@@ -178,7 +178,7 @@ def test_a_bar_passing_the_gates_always_satisfies_ohlc_ordering(
         spread=spread,
         timeframe=timeframe,
         event_time=event_time,
-        server_offset_seconds=offset_seconds,
+        server_zone=timezone(timedelta(seconds=offset_seconds)),
     )
 
     if quality is not BarQuality.OK:
@@ -211,7 +211,7 @@ def test_ohlc_ok_is_actually_reachable(
         spread=spread,
         timeframe=timeframe,
         event_time=event_time,
-        server_offset_seconds=offset_seconds,
+        server_zone=timezone(timedelta(seconds=offset_seconds)),
     )
 
     assert quality is BarQuality.OK

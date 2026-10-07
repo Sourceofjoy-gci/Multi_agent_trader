@@ -34,6 +34,7 @@ NOW = datetime(2026, 9, 9, tzinfo=UTC)
 BINDING = parse_venue_binding(
     b"""
 venue: mt5
+server_timezone: "Europe/Athens"
 books:
   fx_scalp: {magic_range: [110000, 119999]}
 instruments:

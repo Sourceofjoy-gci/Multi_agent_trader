@@ -21,11 +21,11 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from decimal import Decimal
 from uuid import uuid4
 
-from trading_house.brokers.mt5.boundary import Mt5Bar
+from trading_house.brokers.mt5.boundary import Mt5Bar, server_time_to_utc, utc_to_server_time
 from trading_house.brokers.mt5.contracts import decimal_of
 from trading_house.core.clock import Clock
 from trading_house.core.errors import TradingHouseError
@@ -61,7 +61,7 @@ _NO_WRITE = WriteResult(stored=0, duplicate=0, conflicting=0)
 
 
 def _last_completed_boundary(
-    timeframe: Timeframe, instant: datetime, *, server_offset_seconds: int
+    timeframe: Timeframe, instant: datetime, *, server_zone: tzinfo
 ) -> datetime:
     """The newest bar boundary that has actually closed, in the broker's frame.
 
@@ -71,8 +71,8 @@ def _last_completed_boundary(
     """
 
     step = int(duration(timeframe).total_seconds())
-    server_epoch = int(instant.timestamp()) + server_offset_seconds
-    return datetime.fromtimestamp((server_epoch // step) * step - server_offset_seconds, tz=UTC)
+    server_epoch = int(utc_to_server_time(instant, server_zone).timestamp())
+    return server_time_to_utc((server_epoch // step) * step, server_zone)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,9 +165,7 @@ def _fetch_page(
     return _PageFetch(bars=retried, exhausted=True)
 
 
-def _to_bar(
-    raw: Mt5Bar, instrument_id: str, timeframe: Timeframe, server_offset_seconds: int
-) -> Bar:
+def _to_bar(raw: Mt5Bar, instrument_id: str, timeframe: Timeframe, server_zone: tzinfo) -> Bar:
     """Convert one broker bar to canonical form and grade it (D-2 keeps a
     defective bar rather than dropping it, so this never raises on a bad
     price -- it only classifies)."""
@@ -184,7 +182,7 @@ def _to_bar(
         spread=raw.spread,
         timeframe=timeframe,
         event_time=raw.event_time,
-        server_offset_seconds=server_offset_seconds,
+        server_zone=server_zone,
     )
     return Bar(
         instrument_id=instrument_id,
@@ -216,7 +214,7 @@ def _walk(
     provider: HistoryProvider,
     instrument_id: str,
     timeframe: Timeframe,
-    server_offset_seconds: int,
+    server_zone: tzinfo,
     pages: Sequence[tuple[datetime, datetime]],
     pause: Pause,
 ) -> _WalkResult:
@@ -240,9 +238,7 @@ def _walk(
             expected = expected_bars(timeframe, start, end)
             fetch = _fetch_page(provider, instrument_id, timeframe, start, end, expected, pause)
             expected_total += expected
-            bars.extend(
-                _to_bar(raw, instrument_id, timeframe, server_offset_seconds) for raw in fetch.bars
-            )
+            bars.extend(_to_bar(raw, instrument_id, timeframe, server_zone) for raw in fetch.bars)
             if fetch.exhausted:
                 reached_target = False
                 break
@@ -380,7 +376,7 @@ def backfill(
     instrument_id: str,
     timeframe: Timeframe,
     until: datetime,
-    server_offset_seconds: int,
+    server_zone: tzinfo,
     pause: Pause = time.sleep,
 ) -> IngestRun:
     """Walk backward toward ``until``, from what is already stored or now.
@@ -394,7 +390,7 @@ def backfill(
     started_at = clock.now()
     coverage = store.coverage(instrument_id, timeframe)
     newest = coverage.earliest_event_time or _last_completed_boundary(
-        timeframe, started_at, server_offset_seconds=server_offset_seconds
+        timeframe, started_at, server_zone=server_zone
     )
 
     # ``until`` is operator-supplied (``--from``) and can land after ``newest``
@@ -405,7 +401,7 @@ def backfill(
     pages = plan_backward(timeframe, newest=newest, oldest=until) if has_work else ()
     requested_from = until if has_work else newest
 
-    walk = _walk(provider, instrument_id, timeframe, server_offset_seconds, pages, pause)
+    walk = _walk(provider, instrument_id, timeframe, server_zone, pages, pause)
 
     return _finish(
         store=store,
@@ -427,7 +423,7 @@ def update(
     instrument_id: str,
     timeframe: Timeframe,
     until: datetime,
-    server_offset_seconds: int,
+    server_zone: tzinfo,
     pause: Pause = time.sleep,
 ) -> IngestRun:
     """Walk forward toward now, from the newest stored bar or ``until``.
@@ -441,9 +437,7 @@ def update(
     started_at = clock.now()
     coverage = store.coverage(instrument_id, timeframe)
     oldest = coverage.latest_event_time or until
-    target = _last_completed_boundary(
-        timeframe, started_at, server_offset_seconds=server_offset_seconds
-    )
+    target = _last_completed_boundary(timeframe, started_at, server_zone=server_zone)
 
     # Newest-first, like backfill: ``_walk`` breaks on the first exhausted
     # page, and on a fresh key the plan can span decades of pages with a wall
@@ -451,7 +445,7 @@ def update(
     # and never attempt the recent pages that actually hold data.
     pages = plan_backward(timeframe, newest=target, oldest=oldest) if oldest < target else ()
 
-    walk = _walk(provider, instrument_id, timeframe, server_offset_seconds, pages, pause)
+    walk = _walk(provider, instrument_id, timeframe, server_zone, pages, pause)
 
     return _finish(
         store=store,

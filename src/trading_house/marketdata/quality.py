@@ -14,7 +14,7 @@ including this project's own timestamp conversion.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, tzinfo
 from decimal import Decimal
 
 from trading_house.marketdata.models import BarQuality, Timeframe, is_aligned
@@ -29,7 +29,7 @@ def assess(
     spread: int,
     timeframe: Timeframe,
     event_time: datetime,
-    server_offset_seconds: int,
+    server_zone: tzinfo,
 ) -> BarQuality:
     """Classify one bar. The first defect found wins, in a fixed order."""
 
@@ -39,6 +39,6 @@ def assess(
         return BarQuality.OHLC_INCOHERENT
     if spread < 0:
         return BarQuality.NEGATIVE_SPREAD
-    if not is_aligned(timeframe, event_time, server_offset_seconds=server_offset_seconds):
+    if not is_aligned(timeframe, event_time, server_zone=server_zone):
         return BarQuality.MISALIGNED_TIMESTAMP
     return BarQuality.OK

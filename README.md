@@ -2592,6 +2592,31 @@ Measured against the FBS demo terminal (2026-10-06/07): EURUSD runs
 broker serves a **rolling** history of roughly two years — a day not
 collected before it rolls off is gone.
 
+**Broker time.** MetaTrader 5 reports every time on the broker server's wall
+clock and never says which zone that is. The signed venue binding declares it:
+`server_timezone: "Europe/Athens"`. FBS-Demo follows EU daylight-saving rules —
+UTC+2 in winter, UTC+3 in summer — so every tick, bar, deal and position time is
+converted at the offset of its own instant, and a tick batch that spans a
+transition is converted with both offsets. At start the gateway still measures
+the live clock's offset, and now refuses to start (`ConfigurationError`, exit
+code 2) when it differs from what the declared zone says for now: a wrong or
+stale declaration is a refusal, not silently mislabelled data. The same zone
+drives bar ingest (`data backfill`/`data update`): bar alignment and the
+still-forming-bar cutoff are judged at each bar's own season's offset.
+
+Adding `server_timezone` changed the binding's bytes, so its signature must be
+renewed before any command that verifies it will run:
+
+```bash
+uv run trading-house constitution sign --constitution config/venue_binding.mt5.yaml --private-key <your key> --signature-output config/venue_binding.mt5.yaml.sig --force
+```
+
+> **Warning — bars stored before this fix.** Bars ingested before the zone was
+> declared were converted with the one offset measured on the day they were
+> fetched. Bars from the other daylight-saving season are labelled one hour
+> off (for bars fetched in summer, every winter bar is an hour early). Nothing
+> here rewrites stored bars; correcting them is a separate follow-up.
+
 **Commands.**
 
 ```bash

@@ -8,7 +8,7 @@ is what keeps a backtest from seeing its own future (I-17).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from enum import Enum
 from typing import Self
@@ -66,16 +66,17 @@ def availability_of(timeframe: Timeframe, event_time: datetime) -> datetime:
     return event_time + duration(timeframe)
 
 
-def is_aligned(timeframe: Timeframe, event_time: datetime, *, server_offset_seconds: int) -> bool:
+def is_aligned(timeframe: Timeframe, event_time: datetime, *, server_zone: tzinfo) -> bool:
     """Whether a bar's open sits on a timeframe boundary in the BROKER's frame.
 
     Not in UTC. A broker running UTC+3 opens its H4 bars at 21:00, 01:00 and
     05:00 UTC, none of which divide 14400 -- a modulo against UTC would reject
-    every H4 and D1 bar the broker ever sent. Adding the offset back recovers
-    the server epoch, which is where the boundary actually is.
+    every H4 and D1 bar the broker ever sent. The broker's wall clock at that
+    instant -- in ``server_zone``, so a winter bar is read at the winter
+    offset -- is where the boundary actually is (``utc_to_server_time``).
     """
 
-    server_epoch = int(event_time.timestamp()) + server_offset_seconds
+    server_epoch = int(event_time.astimezone(server_zone).replace(tzinfo=UTC).timestamp())
     return server_epoch % _SECONDS[timeframe] == 0
 
 

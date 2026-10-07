@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from alembic import command
@@ -82,8 +83,8 @@ def _runtime_environment(database: DatabaseHarness, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("TRADING_HOUSE_DATABASE_DSN", database.runtime_dsn)
     cli._STATE.debug = False
 
-    def _factory() -> Callable[[str], TerminalPort]:
-        return lambda _probe: _DisconnectedTerminal()  # type: ignore[return-value]
+    def _factory() -> Callable[[ZoneInfo, str], TerminalPort]:
+        return lambda _zone, _probe: _DisconnectedTerminal()  # type: ignore[return-value]
 
     monkeypatch.setattr(cli, "_mt5_terminal_factory", _factory)
 

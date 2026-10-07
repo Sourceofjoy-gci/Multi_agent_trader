@@ -22,10 +22,11 @@ import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
-OFFSET = 3 * 3600
+OFFSET = 3 * 3600  # Europe/Athens in summer, which START falls in
 START = datetime(2026, 9, 30, 10, 0, tzinfo=UTC)
 END = START + timedelta(hours=2)
 TERMINAL_PY = (
@@ -40,7 +41,7 @@ TERMINAL_PY = (
 
 @pytest.fixture
 def sent(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[tuple[str, datetime, datetime]]]:
-    """A terminal whose offset is known, and the windows it sends."""
+    """A terminal on an EU-rules server clock, and the windows it sends."""
 
     calls: list[tuple[str, datetime, datetime]] = []
     fake = types.ModuleType("MetaTrader5")
@@ -55,10 +56,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[tuple[str, datetime
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    terminal = module.Mt5Terminal()
-    # What server_utc_offset_seconds() stores once it has probed the clock;
-    # set directly because the probe samples a live tick over real time.
-    terminal._offset = OFFSET
+    terminal = module.Mt5Terminal(ZoneInfo("Europe/Athens"))
     return terminal, calls
 
 

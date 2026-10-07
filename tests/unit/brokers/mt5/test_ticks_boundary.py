@@ -78,6 +78,22 @@ def test_ticks_are_moved_from_the_server_frame_to_utc_and_end_is_excluded() -> N
     assert [request[1:] for request in terminal.tick_requests] == [(START, END)]
 
 
+def test_winter_ticks_are_moved_at_the_winter_offset_not_todays() -> None:
+    """The binding's zone, not the gateway's measured offset, converts history:
+    the terminal here reports today's UTC+3, but a January hour on an EU-rules
+    server is UTC+2."""
+
+    winter = datetime(2026, 1, 14, 12, 0, tzinfo=UTC)
+    start_ms, shift = epoch_ms(winter), 2 * 3600 * 1000
+    terminal = _ServerFrameTerminal(_batch([start_ms + shift, start_ms + 1500 + shift]))
+    adapter, gateway = _adapter(terminal)
+    try:
+        raw = adapter.ticks("fx.eurusd", winter, winter + timedelta(hours=1))
+    finally:
+        gateway.stop()
+    assert raw.time_ms.tolist() == [start_ms, start_ms + 1500]
+
+
 def test_a_failed_terminal_call_is_unavailable_not_empty() -> None:
     """Unlike bar history, an empty tick hour is a fact ingest records as EMPTY;
     a failed call must not be mistaken for one."""

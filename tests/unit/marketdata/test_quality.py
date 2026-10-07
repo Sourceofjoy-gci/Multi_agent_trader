@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -7,7 +7,7 @@ from trading_house.marketdata.models import BarQuality, Timeframe
 from trading_house.marketdata.quality import assess
 
 ALIGNED = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
-OFFSET = 10800
+PLUS_THREE = timezone(timedelta(hours=3))
 
 
 def _assess(**overrides: object) -> BarQuality:
@@ -19,7 +19,7 @@ def _assess(**overrides: object) -> BarQuality:
         "spread": 9,
         "timeframe": Timeframe.M1,
         "event_time": ALIGNED,
-        "server_offset_seconds": OFFSET,
+        "server_zone": PLUS_THREE,
     }
     kwargs.update(overrides)
     return assess(**kwargs)  # type: ignore[arg-type]

@@ -1,5 +1,7 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
+import numpy as np
 import pytest
 
 from trading_house.brokers.mt5.boundary import (
@@ -18,6 +20,7 @@ from trading_house.brokers.mt5.boundary import (
     deal_entry_of,
     establish_utc_offset,
     mt5_timeframe_code,
+    server_ms_to_utc_ms,
     server_time_to_utc,
     utc_offset_seconds,
     utc_to_server_time,
@@ -241,6 +244,16 @@ def test_package_imports_on_any_platform() -> None:
 # a sign error here would silently shift every timestamp the system records.
 
 
+ATHENS = ZoneInfo("Europe/Athens")
+"""FBS-Demo's server clock: UTC+2 in winter, UTC+3 in summer, on EU dates."""
+
+
+def _wall(*fields: int) -> float:
+    """A broker wall-clock reading as MetaTrader 5 reports it: written as if UTC."""
+
+    return datetime(*fields, tzinfo=UTC).timestamp()
+
+
 @pytest.mark.parametrize(
     ("offset_hours", "label"),
     [(0, "broker on UTC"), (3, "broker ahead of UTC"), (-5, "broker behind UTC")],
@@ -253,13 +266,14 @@ def test_offset_recovers_the_real_utc_instant(offset_hours: int, label: str) -> 
     offset = utc_offset_seconds(server_epoch, real_epoch)
 
     assert offset == offset_hours * 3600, label
-    assert server_time_to_utc(server_epoch, offset) == real_utc, label
+    zone = timezone(timedelta(hours=offset_hours))
+    assert server_time_to_utc(server_epoch, zone) == real_utc, label
 
 
 def test_converted_timestamps_are_timezone_aware() -> None:
     """I-10: a naive datetime must never escape the broker boundary."""
 
-    converted = server_time_to_utc(1_756_112_400.0, 10800)
+    converted = server_time_to_utc(1_756_112_400.0, ATHENS)
 
     assert converted.tzinfo is not None
     assert converted.utcoffset() == timedelta(0)
@@ -268,20 +282,45 @@ def test_converted_timestamps_are_timezone_aware() -> None:
 def test_a_broker_ahead_of_utc_reads_as_an_earlier_utc_instant() -> None:
     """Pins the sign: a server clock reading 12:00 at UTC 09:00 is UTC 09:00."""
 
-    server_noon = datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp()
+    server_noon = _wall(2026, 8, 25, 12, 0)
 
-    assert server_time_to_utc(server_noon, 3 * 3600) == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+    assert server_time_to_utc(server_noon, ATHENS) == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
 
 
-def test_converting_before_the_offset_is_known_raises_rather_than_guessing() -> None:
-    """An unset offset must fail loud, not pass broker time off as UTC."""
+def test_a_winter_server_time_converts_at_the_winter_offset() -> None:
+    """An EU-rules broker is UTC+2 in January. Today's summer offset applied to
+    it would label every winter bar and tick an hour early."""
+
+    assert server_time_to_utc(_wall(2026, 1, 15, 12, 0), ATHENS) == datetime(
+        2026, 1, 15, 10, 0, tzinfo=UTC
+    )
+
+
+def test_a_summer_server_time_converts_at_the_summer_offset() -> None:
+    assert server_time_to_utc(_wall(2026, 7, 15, 12, 0), ATHENS) == datetime(
+        2026, 7, 15, 9, 0, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize(
+    ("utc", "server"),
+    [
+        (datetime(2026, 1, 15, 10, 0, tzinfo=UTC), datetime(2026, 1, 15, 12, 0, tzinfo=UTC)),
+        (datetime(2026, 7, 15, 9, 0, tzinfo=UTC), datetime(2026, 7, 15, 12, 0, tzinfo=UTC)),
+    ],
+)
+def test_a_utc_instant_is_sent_at_its_own_seasons_offset(utc: datetime, server: datetime) -> None:
+    sent = utc_to_server_time(utc, ATHENS)
+
+    assert sent == server
+    assert server_time_to_utc(sent.timestamp(), ATHENS) == utc
+
+
+def test_converting_without_a_zone_raises_rather_than_guessing() -> None:
+    """An undeclared zone must fail loud, not pass broker time off as UTC."""
 
     with pytest.raises(BrokerUnavailableError):
         server_time_to_utc(1_756_112_400.0, None)
-
-
-def test_the_same_conversion_succeeds_once_the_offset_is_established() -> None:
-    assert server_time_to_utc(1_756_112_400.0, 3600).tzinfo is not None
 
 
 def test_a_utc_window_is_sent_in_the_brokers_frame() -> None:
@@ -292,15 +331,38 @@ def test_a_utc_window_is_sent_in_the_brokers_frame() -> None:
     ``server_time_to_utc``."""
 
     nine_utc = datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
-    sent = utc_to_server_time(nine_utc, 3 * 3600)
+    sent = utc_to_server_time(nine_utc, ATHENS)
 
-    assert sent.timestamp() == datetime(2026, 8, 25, 12, 0, tzinfo=UTC).timestamp()
-    assert server_time_to_utc(sent.timestamp(), 3 * 3600) == nine_utc
+    assert sent.timestamp() == _wall(2026, 8, 25, 12, 0)
+    assert server_time_to_utc(sent.timestamp(), ATHENS) == nine_utc
 
 
-def test_sending_a_window_before_the_offset_is_known_raises() -> None:
+def test_sending_a_window_without_a_zone_raises() -> None:
     with pytest.raises(BrokerUnavailableError):
         utc_to_server_time(datetime(2026, 8, 25, tzinfo=UTC), None)
+
+
+def test_a_tick_batch_across_the_spring_transition_converts_with_both_offsets() -> None:
+    """2026-03-29 01:00 UTC: Athens moves from UTC+2 to UTC+3, and the server
+    clock jumps from 03:00 to 04:00. One second either side of the jump is two
+    real seconds apart, not an hour and two seconds."""
+
+    before = int(_wall(2026, 3, 29, 2, 59, 59)) * 1000  # 00:59:59 UTC at +2
+    after = int(_wall(2026, 3, 29, 4, 0, 0)) * 1000  # 01:00:00 UTC at +3
+    server_ms = np.array([before, before + 500, after], dtype=np.int64)
+
+    utc_ms = server_ms_to_utc_ms(server_ms, ATHENS)
+
+    expected_before = int(datetime(2026, 3, 29, 0, 59, 59, tzinfo=UTC).timestamp()) * 1000
+    assert utc_ms.tolist() == [expected_before, expected_before + 500, expected_before + 1000]
+    assert utc_ms.dtype == np.int64
+
+
+def test_an_empty_tick_batch_converts_to_an_empty_one() -> None:
+    utc_ms = server_ms_to_utc_ms(np.array([], dtype=np.int64), ATHENS)
+
+    assert utc_ms.tolist() == []
+    assert utc_ms.dtype == np.int64
 
 
 # --- the offset must not be believed when the tick is stale ------------------
@@ -352,7 +414,7 @@ def test_a_live_feed_establishes_the_offset() -> None:
     server = real + 3 * 3600
     samples = iter([server, server + 1.0])
 
-    offset = establish_utc_offset(lambda: next(samples), lambda: real, lambda _s: None)
+    offset = establish_utc_offset(lambda: next(samples), lambda: real, lambda _s: None, ATHENS)
 
     assert offset == 3 * 3600
 
@@ -367,18 +429,44 @@ def test_a_frozen_clock_is_refused_however_plausible_its_offset_looks() -> None:
     frozen = real + 3 * 3600 - 1800
 
     with pytest.raises(BrokerUnavailableError):
-        establish_utc_offset(lambda: frozen, lambda: real, lambda _s: None)
+        establish_utc_offset(lambda: frozen, lambda: real, lambda _s: None, ATHENS)
 
 
 def test_a_probe_symbol_with_no_tick_at_all_is_refused() -> None:
     with pytest.raises(BrokerUnavailableError):
-        establish_utc_offset(lambda: None, lambda: 0.0, lambda _s: None)
+        establish_utc_offset(lambda: None, lambda: 0.0, lambda _s: None, ATHENS)
 
 
 def test_the_probe_gives_up_instead_of_waiting_forever() -> None:
     sleeps: list[float] = []
 
     with pytest.raises(BrokerUnavailableError):
-        establish_utc_offset(lambda: 1.0, lambda: 0.0, sleeps.append, max_attempts=3)
+        establish_utc_offset(lambda: 1.0, lambda: 0.0, sleeps.append, ATHENS, max_attempts=3)
 
     assert len(sleeps) == 3
+
+
+# --- the declared zone is checked against the live clock --------------------
+
+
+def test_a_live_clock_that_disagrees_with_the_declared_zone_is_refused() -> None:
+    """In January Athens is UTC+2. A live clock reading UTC+3 means the
+    declaration is wrong or stale, and every converted time would be an hour
+    off; the gateway must refuse rather than mislabel."""
+
+    real = datetime(2026, 1, 14, 9, 30, tzinfo=UTC).timestamp()
+    server = real + 3 * 3600
+    samples = iter([server, server + 1.0])
+
+    with pytest.raises(ConfigurationError):
+        establish_utc_offset(lambda: next(samples), lambda: real, lambda _s: None, ATHENS)
+
+
+def test_a_live_clock_that_agrees_with_the_declared_zone_in_winter_is_accepted() -> None:
+    real = datetime(2026, 1, 14, 9, 30, tzinfo=UTC).timestamp()
+    server = real + 2 * 3600
+    samples = iter([server, server + 1.0])
+
+    offset = establish_utc_offset(lambda: next(samples), lambda: real, lambda _s: None, ATHENS)
+
+    assert offset == 2 * 3600

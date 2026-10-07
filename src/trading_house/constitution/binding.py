@@ -3,6 +3,7 @@
 from itertools import combinations
 from pathlib import Path
 from typing import Literal, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import Field, PositiveInt, ValidationError, field_validator, model_validator
@@ -36,8 +37,24 @@ class InstrumentBinding(ConstitutionModel):
 
 class VenueBinding(ConstitutionModel):
     venue: Literal["mt5"]
+    server_timezone: NonEmptyStr
     books: dict[BookId, BookBinding] = Field(min_length=1)
     instruments: dict[InstrumentId, InstrumentBinding] = Field(min_length=1)
+
+    @field_validator("server_timezone")
+    @classmethod
+    def server_timezone_is_a_known_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError, OSError) as error:  # "Europe" is a directory
+            raise ValueError("server_timezone must be an IANA zone key") from error
+        return value
+
+    @property
+    def server_zone(self) -> ZoneInfo:
+        """The broker server's clock. Every MT5 time is wall-clock time in this zone."""
+
+        return ZoneInfo(self.server_timezone)
 
     @model_validator(mode="after")
     def magic_ranges_do_not_overlap(self) -> Self:

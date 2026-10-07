@@ -35,6 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BINDING = parse_venue_binding(
     b"""
 venue: mt5
+server_timezone: "Europe/Athens"
 books:
   fx_scalp: {magic_range: [110000, 119999]}
 instruments:
@@ -57,7 +58,7 @@ def _terminal() -> TerminalPort:
 
     from trading_house.brokers.mt5.terminal import Mt5Terminal
 
-    return Mt5Terminal()
+    return Mt5Terminal(BINDING.server_zone)
 
 
 def test_a_real_window_of_h1_bars_satisfies_utc_and_ohlc_guarantees() -> None:
@@ -192,7 +193,7 @@ def test_a_real_backfill_round_trips_through_the_store(database: DatabaseHarness
                 instrument_id=instrument_id,
                 timeframe=timeframe,
                 until=until,
-                server_offset_seconds=gateway.server_utc_offset_seconds,
+                server_zone=BINDING.server_zone,
             )
 
             assert run.outcome is not IngestOutcome.FAILED, run.detail

@@ -24,6 +24,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import typer
 from alembic.config import Config
@@ -510,7 +511,7 @@ def audit_verify() -> None:
         raise typer.Exit(code=int(ExitCode.AUDIT_INTEGRITY))
 
 
-def _mt5_terminal_factory() -> Callable[[str], TerminalPort] | None:
+def _mt5_terminal_factory() -> Callable[[ZoneInfo, str], TerminalPort] | None:
     """Look up a MetaTrader 5 terminal constructor, or report it unavailable.
 
     ``MetaTrader5`` is a ``sys_platform == 'win32'`` dependency and
@@ -594,7 +595,11 @@ def _book_reconciler(
         # brokers that suffix their symbols (EURUSD.m) have no such symbol,
         # and the probe would fail the whole venue step on them.
         probe_symbol = next(iter(binding.instruments.values())).server_symbol
-        gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock, on_event=on_gateway_event)
+        gateway = Mt5Gateway(
+            terminal_factory(binding.server_zone, probe_symbol),
+            clock=clock,
+            on_event=on_gateway_event,
+        )
         try:
             gateway.start()
         except BrokerUnavailableError:
@@ -631,7 +636,7 @@ def _history_provider(
     venue_binding_public_key: Path,
     *,
     request_timeout_seconds: float = 10.0,
-) -> Iterator[tuple[Mt5BrokerAdapter, VenueBinding, int]]:
+) -> Iterator[tuple[Mt5BrokerAdapter, VenueBinding]]:
     """Build a live ``Mt5BrokerAdapter`` over one MetaTrader 5 terminal.
 
     Unlike ``_book_reconciler``, an absent or unreachable terminal is never
@@ -648,12 +653,14 @@ def _history_provider(
     clock = SystemClock()
     probe_symbol = next(iter(binding.instruments.values())).server_symbol
     gateway = Mt5Gateway(
-        terminal_factory(probe_symbol), clock=clock, request_timeout_seconds=request_timeout_seconds
+        terminal_factory(binding.server_zone, probe_symbol),
+        clock=clock,
+        request_timeout_seconds=request_timeout_seconds,
     )
     gateway.start()
     try:
         adapter = Mt5BrokerAdapter(gateway, binding, clock=clock)
-        yield adapter, binding, gateway.server_utc_offset_seconds
+        yield adapter, binding
     finally:
         gateway.stop()
 
@@ -721,7 +728,7 @@ def data_backfill(
     def operation() -> dict[str, JsonValue]:
         with _history_provider(
             venue_binding, venue_binding_signature, venue_binding_public_key
-        ) as (provider, _binding, server_offset_seconds):
+        ) as (provider, binding):
             run = backfill(
                 provider,
                 _bar_store(),
@@ -729,7 +736,7 @@ def data_backfill(
                 instrument_id=instrument,
                 timeframe=timeframe,
                 until=_as_utc(from_),
-                server_offset_seconds=server_offset_seconds,
+                server_zone=binding.server_zone,
             )
         return _ingest_run_payload(run)
 
@@ -755,7 +762,7 @@ def data_update(
     def operation() -> dict[str, JsonValue]:
         with _history_provider(
             venue_binding, venue_binding_signature, venue_binding_public_key
-        ) as (provider, binding, server_offset_seconds):
+        ) as (provider, binding):
             store = _bar_store()
             clock = SystemClock()
             runs = [
@@ -766,7 +773,7 @@ def data_update(
                     instrument_id=instrument_id,
                     timeframe=timeframe,
                     until=_GENESIS,
-                    server_offset_seconds=server_offset_seconds,
+                    server_zone=binding.server_zone,
                 )
                 for instrument_id in sorted(binding.instruments)
                 for timeframe in Timeframe
@@ -843,7 +850,7 @@ def data_ticks_backfill(
             venue_binding_signature,
             venue_binding_public_key,
             request_timeout_seconds=_TICK_REQUEST_TIMEOUT_SECONDS,
-        ) as (provider, _binding, _offset):
+        ) as (provider, _binding):
             summary = backfill_ticks(
                 provider,
                 _tick_store(),
@@ -877,7 +884,7 @@ def data_ticks_update(
             venue_binding_signature,
             venue_binding_public_key,
             request_timeout_seconds=_TICK_REQUEST_TIMEOUT_SECONDS,
-        ) as (provider, _binding, _offset):
+        ) as (provider, _binding):
             summary = update_ticks(
                 provider,
                 _tick_store(),
@@ -1005,7 +1012,7 @@ def _order_adapter(
     binding = load_venue_binding(venue_binding, venue_binding_signature, venue_binding_public_key)
     clock = SystemClock()
     probe_symbol = next(iter(binding.instruments.values())).server_symbol
-    gateway = Mt5Gateway(terminal_factory(probe_symbol), clock=clock)
+    gateway = Mt5Gateway(terminal_factory(binding.server_zone, probe_symbol), clock=clock)
     gateway.start()
     try:
         yield Mt5BrokerAdapter(gateway, binding, clock=clock), gateway, binding, clock

@@ -1,5 +1,6 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -78,14 +79,28 @@ def test_alignment_is_judged_in_the_brokers_frame_not_utc() -> None:
 
     h4_open_utc = datetime(2026, 8, 25, 21, 0, tzinfo=UTC)
 
-    assert is_aligned(Timeframe.H4, h4_open_utc, server_offset_seconds=10800)
-    assert not is_aligned(Timeframe.H4, h4_open_utc, server_offset_seconds=0)
+    assert is_aligned(Timeframe.H4, h4_open_utc, server_zone=timezone(timedelta(hours=3)))
+    assert not is_aligned(Timeframe.H4, h4_open_utc, server_zone=UTC)
+
+
+def test_alignment_is_judged_at_the_bars_own_seasons_offset() -> None:
+    """An EU-rules broker is UTC+2 in January: its H4 bars open at 22:00 UTC
+    then, and at 21:00 UTC in August. Judging a winter bar at today's summer
+    offset would grade every winter H4 and D1 bar misaligned."""
+
+    athens = ZoneInfo("Europe/Athens")
+
+    assert is_aligned(Timeframe.H4, datetime(2026, 1, 14, 22, 0, tzinfo=UTC), server_zone=athens)
+    assert is_aligned(Timeframe.H4, datetime(2026, 8, 25, 21, 0, tzinfo=UTC), server_zone=athens)
+    assert not is_aligned(
+        Timeframe.H4, datetime(2026, 1, 14, 21, 0, tzinfo=UTC), server_zone=athens
+    )
 
 
 def test_a_misaligned_bar_is_detected_at_any_offset() -> None:
     stray = datetime(2026, 8, 25, 9, 0, 37, tzinfo=UTC)
 
-    assert not is_aligned(Timeframe.M1, stray, server_offset_seconds=10800)
+    assert not is_aligned(Timeframe.M1, stray, server_zone=timezone(timedelta(hours=3)))
 
 
 def test_a_naive_timestamp_is_refused() -> None:
