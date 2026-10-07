@@ -21,6 +21,7 @@ from trading_house.brokers.mt5.boundary import (
     Mt5SendResult,
     Mt5SymbolInfo,
     Mt5Tick,
+    Mt5TickBatch,
     establish_utc_offset,
     mt5_timeframe_code,
     server_time_to_utc,
@@ -145,6 +146,20 @@ class Mt5Terminal:
             )
             for row in rates
         )
+
+    def copy_ticks_range(
+        self, server_symbol: str, start: datetime, end: datetime
+    ) -> Mt5TickBatch | None:
+        mt5.symbol_select(server_symbol, True)
+        raw = mt5.copy_ticks_range(
+            server_symbol,
+            utc_to_server_time(start, self._offset),
+            utc_to_server_time(end, self._offset),
+            mt5.COPY_TICKS_ALL,
+        )
+        if raw is None:
+            return None
+        return Mt5TickBatch.from_structured(raw)
 
     def positions(self) -> Sequence[Mt5Position] | None:
         # None means "could not read", never "there are none" -- see

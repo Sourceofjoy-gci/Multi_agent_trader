@@ -12,7 +12,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+import numpy as np
+import numpy.typing as npt
 
 from trading_house.core.errors import BrokerUnavailableError, ConfigurationError
 from trading_house.core.venue import DealEntry
@@ -172,6 +175,32 @@ class Mt5Tick:
     observed_at: datetime
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class Mt5TickBatch:
+    """``copy_ticks_range`` as columns. ``time_msc`` is still in the broker's clock;
+    ``Mt5BrokerAdapter.ticks`` moves it to UTC."""
+
+    time_msc: npt.NDArray[np.int64]
+    bid: npt.NDArray[np.float64]
+    ask: npt.NDArray[np.float64]
+    last: npt.NDArray[np.float64]
+    volume: npt.NDArray[np.int64]
+    volume_real: npt.NDArray[np.float64]
+    flags: npt.NDArray[np.int64]
+
+    @classmethod
+    def from_structured(cls, raw: npt.NDArray[Any]) -> Mt5TickBatch:
+        return cls(
+            time_msc=np.asarray(raw["time_msc"], dtype=np.int64),
+            bid=np.asarray(raw["bid"], dtype=np.float64),
+            ask=np.asarray(raw["ask"], dtype=np.float64),
+            last=np.asarray(raw["last"], dtype=np.float64),
+            volume=np.asarray(raw["volume"], dtype=np.int64),
+            volume_real=np.asarray(raw["volume_real"], dtype=np.float64),
+            flags=np.asarray(raw["flags"], dtype=np.int64),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Mt5Bar:
     """One closed bar, with its timestamp already converted to UTC."""
@@ -319,6 +348,9 @@ class TerminalPort(Protocol):
     def copy_rates_range(
         self, server_symbol: str, timeframe_minutes: int, start: datetime, end: datetime
     ) -> Sequence[Mt5Bar] | None: ...
+    def copy_ticks_range(
+        self, server_symbol: str, start: datetime, end: datetime
+    ) -> Mt5TickBatch | None: ...
     # Both of these return None for "could not read", never for "nothing
     # there": absence of evidence is not evidence of absence when what is
     # at stake is whether a live position exists.

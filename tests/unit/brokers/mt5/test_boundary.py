@@ -40,6 +40,7 @@ EXPECTED_PORT_METHODS = {
     "history_deals",
     "last_error",
     "copy_rates_range",
+    "copy_ticks_range",
 }
 
 

@@ -24,6 +24,7 @@ from trading_house.brokers.mt5.boundary import (
     Mt5SendResult,
     Mt5SymbolInfo,
     Mt5Tick,
+    Mt5TickBatch,
 )
 
 _OPENED_AT = datetime(2026, 8, 25, tzinfo=UTC)
@@ -83,6 +84,11 @@ class FakeTerminal:
     ) -> tuple[Mt5Bar, ...]:
         self.rate_requests.append((server_symbol, timeframe_minutes, start, end))
         return ()
+
+    def copy_ticks_range(
+        self, server_symbol: str, start: datetime, end: datetime
+    ) -> Mt5TickBatch | None:
+        return None
 
     def positions(self) -> Sequence[Mt5Position]:
         return self._positions

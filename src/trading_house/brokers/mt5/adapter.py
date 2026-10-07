@@ -51,6 +51,7 @@ from trading_house.core.venue import (
     VenueRef,
 )
 from trading_house.marketdata.models import Timeframe, duration
+from trading_house.marketdata.ticks import RawTicks, epoch_ms
 
 # MetaTrader 5's own enum values, mirrored so this module never needs to
 # import MetaTrader5 (only terminal.py may). ``order_check`` is a simulation
@@ -289,6 +290,32 @@ class Mt5BrokerAdapter:
         # MetaTrader 5's range is end-inclusive; ingest's windows are
         # [start, end), and ``update`` ends one at the still-forming bar.
         return () if bars is None else tuple(bar for bar in bars if bar.event_time < end)
+
+    def ticks(self, instrument_id: InstrumentId, start: datetime, end: datetime) -> RawTicks:
+        """Ticks in ``[start, end)``, UTC, at the lowest priority band.
+
+        ``None`` from the terminal is a failed call, raised as unavailable: an hour
+        with no ticks is an answer ingest records, and a failure must not pass for one.
+        """
+
+        server_symbol = self._server_symbol_for(instrument_id)
+        batch = self._gateway.call(
+            Priority.MARKET_DATA, lambda t: t.copy_ticks_range(server_symbol, start, end)
+        )
+        if batch is None:
+            raise BrokerUnavailableError()
+        shift_ms = self._gateway.server_utc_offset_seconds * 1000
+        raw = RawTicks(
+            time_ms=batch.time_msc - shift_ms,
+            bid=batch.bid,
+            ask=batch.ask,
+            last=batch.last,
+            volume=batch.volume,
+            volume_real=batch.volume_real,
+            flags=batch.flags,
+        )
+        # MetaTrader 5's range is end-inclusive; ingest windows are [start, end).
+        return raw.within(epoch_ms(start), epoch_ms(end))
 
     def precheck(self, intent: OrderIntent) -> PrecheckResult:
         """Ask the venue whether it would accept ``intent``, without acting.

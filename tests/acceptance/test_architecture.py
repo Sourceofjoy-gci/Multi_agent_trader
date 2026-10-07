@@ -23,7 +23,10 @@ SIGNING_MODULE = SOURCE_ROOT / "constitution" / "signing.py"
 FORBIDDEN_TOP_LEVEL_IMPORTS = frozenset({"langgraph", "openai", "anthropic", "ccxt"})
 MT5_IMPORT_ALLOWED = frozenset({SOURCE_ROOT / "brokers" / "mt5" / "terminal.py"})
 MARKETDATA_ROOT = SOURCE_ROOT / "marketdata"
-TERMINAL_STATEMENT_CAP = 80
+TERMINAL_STATEMENT_CAP = 90
+"""Raised from 80 once, for Phase 10a's ``copy_ticks_range`` (spec D-6): MetaTrader5
+may be imported in one module only, so the tick call has to live here. Conversion
+stays in ``boundary.py`` and the adapter."""
 PRIVATE_KEY_SYMBOLS = frozenset({"load_pem_private_key", "Ed25519PrivateKey"})
 MIGRATION_CALL_NAMES = frozenset({"upgrade", "downgrade"})
 SIGNING_PRIMITIVES = frozenset({"sign_bytes", "sign_file", "load_private_key", "generate_key_pair"})
