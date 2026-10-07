@@ -37,7 +37,7 @@ before it rolls out is lost for good, so 10a must collect continuously, not once
 | D-1 | Instruments: `fx.eurusd` and `metal.xauusd` (both already in the signed venue binding). |
 | D-2 | Storage: immutable compressed numpy files, one per instrument per UTC day, recorded in PostgreSQL. Rejected: a PostgreSQL tick table (15–20 GB/year, slow replay decode) and Parquet (a heavy new dependency for what `numpy`, already declared, does). |
 | D-3 | Prices are int64 **points** (`price / point_size`), exact like `Decimal` and vectorisable; never floats. |
-| D-4 | Only completed UTC days are written; a day file is never rewritten. |
+| D-4 | Only completed UTC days are written; a day file vouched for by a settled row is never rewritten; an unvouched file is preserved aside and replaced *(amended 2026-10-07, final review F4)*. |
 | D-5 | A day's digest covers the raw arrays, not the `.npz` bytes, so it is independent of zip metadata. |
 | D-6 | `terminal.py`'s statement cap rises from 80 to 90, once, for the one tick method; `MetaTrader5` stays importable only there. |
 | D-7 | Daily collection is an operator-installed Windows scheduled task; the repository ships the script and the instructions, never the installation. |
@@ -47,7 +47,8 @@ before it rolls out is lost for good, so 10a must collect continuously, not once
 A tick has four fields:
 
 - `time_ms` — int64 UTC epoch milliseconds, converted from the server-frame
-  `time_msc` with the gateway's established offset (`server_time_to_utc`), at ingest.
+  `time_msc` at ingest, at the offset the binding's `server_timezone` gives each
+  server hour (`server_ms_to_utc_ms`; amended by F1, see §7).
 - `bid`, `ask` — int64 points.
 - `flags` — uint16, MT5's tick flags as delivered.
 
@@ -66,7 +67,12 @@ counted, kept, and recorded as the day's `crossed_quotes`.
 - `tick_root` is a new `RuntimeSettings` field, `TRADING_HOUSE_TICK_ROOT`, default
   `.local/ticks` (git-ignored, beside `.local/evidence`).
 - Written to a temporary name and renamed into place only after its digest is
-  computed; an existing file at the final path is never overwritten.
+  computed. *(amended 2026-10-07, final review F4:)* a day file vouched for by a
+  settled row is never rewritten; an unvouched file is preserved aside and replaced.
+  Ingest writes only days no settled row vouches for, so a file already at the path
+  is unrecorded: identical ticks are a recognised retry; anything else is renamed to
+  `<YYYY-MM-DD>.orphan-<first 12 hex of its SHA-256>.npz` (kept, never deleted) and
+  the new file takes the path.
 - **Day digest:** SHA-256 over `b"trading-house/ticks/v1\0"`, then the instrument id,
   the day (`YYYY-MM-DD`), the point size as a canonical decimal string, each separated
   by `\0`, then the four arrays' little-endian bytes in the order above.

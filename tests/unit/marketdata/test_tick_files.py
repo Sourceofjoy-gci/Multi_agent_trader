@@ -1,3 +1,4 @@
+import hashlib
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -47,11 +48,45 @@ def test_rewriting_the_same_ticks_is_a_recognised_retry(tmp_path: Path) -> None:
     assert write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays()) == first
 
 
-def test_a_day_file_is_never_overwritten_with_different_ticks(tmp_path: Path) -> None:
+def _orphans(tmp_path: Path) -> list[Path]:
+    return sorted(day_path(tmp_path, "fx.eurusd", DAY).parent.glob(f"{DAY}.orphan-*.npz"))
+
+
+def test_an_unrecorded_file_with_different_ticks_is_kept_aside_and_replaced(
+    tmp_path: Path,
+) -> None:
+    """Ingest writes only days no settled row vouches for, so a file already there
+    is an orphan (e.g. a crash after writing, then a different answer on retry).
+    It must not block the instrument, and it is never deleted."""
+
+    path = day_path(tmp_path, "fx.eurusd", DAY)
     write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays())
-    with pytest.raises(EvidenceIntegrityError):
-        write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays(first_bid=109999))
-    assert _same(read_day_file(day_path(tmp_path, "fx.eurusd", DAY)), _arrays())
+    old_bytes = path.read_bytes()
+
+    digest = write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays(first_bid=109999))
+
+    assert digest == day_digest("fx.eurusd", DAY, POINT, _arrays(first_bid=109999))
+    assert _same(read_day_file(path), _arrays(first_bid=109999))
+    own = hashlib.sha256(old_bytes).hexdigest()[:12]
+    assert _orphans(tmp_path) == [path.with_name(f"2026-10-06.orphan-{own}.npz")]
+    assert _orphans(tmp_path)[0].read_bytes() == old_bytes
+
+
+def test_an_unreadable_unrecorded_file_is_kept_aside_and_replaced(tmp_path: Path) -> None:
+    path = day_path(tmp_path, "fx.eurusd", DAY)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"not a zip")
+
+    write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays())
+
+    assert _same(read_day_file(path), _arrays())
+    assert [orphan.read_bytes() for orphan in _orphans(tmp_path)] == [b"not a zip"]
+
+
+def test_a_recognised_retry_leaves_no_orphan(tmp_path: Path) -> None:
+    write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays())
+    write_day_file(tmp_path, "fx.eurusd", DAY, POINT, _arrays())
+    assert _orphans(tmp_path) == []
 
 
 def test_the_digest_does_not_depend_on_how_the_file_was_compressed(tmp_path: Path) -> None:

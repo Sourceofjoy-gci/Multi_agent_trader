@@ -1,12 +1,14 @@
 """One immutable compressed file per instrument per UTC day.
 
 The only module in ``src/`` that opens a tick file (an acceptance test says so).
-A file is written under a temporary name and renamed into place; a file already
-in place is only ever confirmed, never replaced.
+A file is written under a temporary name and renamed into place. A file vouched
+for by a settled row is never rewritten (ingest never writes that day again); an
+unvouched file is preserved aside and replaced.
 """
 
 from __future__ import annotations
 
+import hashlib
 import zipfile
 from datetime import date
 from decimal import Decimal
@@ -43,19 +45,26 @@ def read_day_file(path: Path) -> TickArrays:
 def write_day_file(
     root: Path, instrument_id: str, day: date, point_size: Decimal, arrays: TickArrays
 ) -> str:
-    """Write one day's ticks once and return their digest.
+    """Write one day's ticks and return their digest.
 
-    Rewriting identical ticks is a recognised retry -- a crash between writing the
-    file and recording its row must not strand the day. Different ticks at the same
-    path are refused: a stored day is never revised.
+    Ingest calls this only for a day no settled row vouches for, so a file already
+    at the path is unrecorded. Identical ticks are a recognised retry -- a crash
+    between writing the file and recording its row must not strand the day.
+    Anything else there (different ticks, or a file that no longer reads) is an
+    orphan: it is renamed aside to ``<day>.orphan-<first 12 hex of its SHA-256>.npz``,
+    kept and never deleted, and the new ticks take the path.
     """
 
     digest = day_digest(instrument_id, day, point_size, arrays)
     path = day_path(root, instrument_id, day)
     if path.exists():
-        if day_digest(instrument_id, day, point_size, read_day_file(path)) != digest:
-            raise EvidenceIntegrityError() from ValueError(f"{path.name} holds different ticks")
-        return digest
+        try:
+            if day_digest(instrument_id, day, point_size, read_day_file(path)) == digest:
+                return digest
+        except EvidenceIntegrityError:
+            pass  # unreadable: an orphan like any other
+        own = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        path.replace(path.with_name(f"{day.isoformat()}.orphan-{own}.npz"))
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f"{path.stem}.partial")
     partial.unlink(missing_ok=True)
