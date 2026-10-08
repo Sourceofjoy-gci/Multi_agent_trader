@@ -16,6 +16,8 @@ from trading_house.marketdata.tick_store import PostgresTickDayStore, TickDay, T
 if TYPE_CHECKING:
     from ...conftest import DatabaseHarness
 
+pytestmark = pytest.mark.integration
+
 DAY = date(2026, 10, 6)
 FETCHED = datetime(2026, 10, 7, 1, tzinfo=UTC)
 
